@@ -6,11 +6,10 @@ import Hls from 'hls.js';
 import mpegts from 'mpegts.js';
 import { watch } from 'vue';
 
-import KeyboardShortcutManager from './managers/KeyboardShortcutManager';
-
 import APIClient from '@/services/APIClient';
 import CaptureManager from '@/services/player/managers/CaptureManager';
 import DocumentPiPManager from '@/services/player/managers/DocumentPiPManager';
+import KeyboardShortcutManager from '@/services/player/managers/KeyboardShortcutManager';
 import LiveCommentManager from '@/services/player/managers/LiveCommentManager';
 import LiveDataBroadcastingManager from '@/services/player/managers/LiveDataBroadcastingManager';
 import LiveEventManager from '@/services/player/managers/LiveEventManager';
@@ -77,6 +76,9 @@ class PlayerController {
     // RomSound の AudioContext と AudioBuffer のリスト
     private readonly romsounds_context: AudioContext = new AudioContext();
     private readonly romsounds_buffers: AudioBuffer[] = [];
+
+    // L字画面のクロップ設定で使うウォッチャーを保持する配列
+    private lshaped_screen_crop_watchers: (() => void)[] = [];
 
     // 破棄中かどうか
     // 破棄中は destroy() が呼ばれても何もしない
@@ -195,6 +197,17 @@ class PlayerController {
         (window as any).mpegts = mpegts;
         (window as any).Hls = Hls;
 
+        // ブラウザが H.265 / HEVC の再生に対応していて、かつ通信節約モードが有効なとき、H.265 / HEVC で再生する
+        let is_hevc_playback = false;
+        if (PlayerUtils.isHEVCVideoSupported() &&
+            ((this.playback_mode === 'Live' && this.quality_profile.tv_data_saver_mode === true) ||
+             (this.playback_mode === 'Video' && this.quality_profile.video_data_saver_mode === true))) {
+            is_hevc_playback = true;
+        }
+
+        // ブラウザが MSE in Worker での H.265 / HEVC 再生に対応しているかどうか
+        const is_hevc_video_supported_in_worker = await mpegts.supportWorkerForMSEH265Playback();
+
         // 文字スーパーの表示設定
         // ライブ視聴とビデオ視聴で設定キーが異なる
         const is_show_superimpose = this.playback_mode === 'Live' ?
@@ -235,25 +248,15 @@ class PlayerController {
 
             // 動画の設定
             video: (() => {
-
                 // 画質リスト
                 const qualities: DPlayerType.VideoQuality[] = [];
-
-                // ブラウザが H.265 / HEVC の再生に対応していて、かつ通信節約モードが有効なとき
-                // API に渡す画質に -hevc のプレフィックスをつける
-                let hevc_prefix = '';
-                if (PlayerUtils.isHEVCVideoSupported() &&
-                    ((this.playback_mode === 'Live' && this.quality_profile.tv_data_saver_mode === true) ||
-                     (this.playback_mode === 'Video' && this.quality_profile.video_data_saver_mode === true))) {
-                    hevc_prefix = '-hevc';
-                }
+                // H.265 / HEVC 再生時のみ、API に渡す画質に -hevc のプレフィックスをつける
+                const hevc_prefix = is_hevc_playback === true ? '-hevc' : '';
 
                 // ライブ視聴: チャンネル情報がセットされているはず
                 if (this.playback_mode === 'Live') {
-
                     // ライブストリーミング API のベース URL
                     const streaming_api_base_url = `${Utils.api_base_url}/streams/live/${channels_store.channel.current.display_channel_id}`;
-
                     // ラジオチャンネルの場合
                     // API が受け付ける画質の値は通常のチャンネルと同じだが (手抜き…)、実際の画質は 48KHz/192kbps で固定される
                     // ラジオチャンネルの場合は、1080p と渡しても 48kHz/192kbps 固定の音声だけの MPEG-TS が配信される
@@ -263,10 +266,8 @@ class PlayerController {
                             type: 'mpegts',
                             url: `${streaming_api_base_url}/1080p/mpegts`,
                         });
-
                     // 通常のチャンネルの場合
                     } else {
-
                         // 画質リストを作成
                         for (const quality_name of LIVE_STREAMING_QUALITIES) {
                             qualities.push({
@@ -277,14 +278,12 @@ class PlayerController {
                             });
                         }
                     }
-
                     // デフォルトの画質
                     // ラジオチャンネルのみ常に 48KHz/192kbps に固定する
                     let default_quality: string = this.quality_profile.tv_streaming_quality;
                     if (channels_store.channel.current.is_radiochannel) {
                         default_quality = '48kHz/192kbps';
                     }
-
                     return {
                         quality: qualities,
                         defaultQuality: default_quality,
@@ -292,10 +291,8 @@ class PlayerController {
 
                 // ビデオ視聴: 録画番組情報がセットされているはず
                 } else {
-
                     // ビデオストリーミング API のベース URL
                     const streaming_api_base_url = `${Utils.api_base_url}/streams/video/${player_store.recorded_program.id}`;
-
                     // 画質リストを作成
                     for (const quality_name of VIDEO_STREAMING_QUALITIES) {
                         qualities.push({
@@ -305,11 +302,9 @@ class PlayerController {
                             url: `${streaming_api_base_url}/${quality_name}${hevc_prefix}/playlist`,
                         });
                     }
-
                     // デフォルトの画質
                     // 録画ではラジオは考慮しない
                     const default_quality: string = this.quality_profile.video_streaming_quality;
-
                     return {
                         quality: qualities,
                         defaultQuality: default_quality,
@@ -402,10 +397,9 @@ class PlayerController {
                         enableWorker: true,
                         // Media Source Extensions API 向けの Web Worker を有効にする
                         // メインスレッドから再生処理を分離することで、低スペック端末で DOM 描画の遅延が影響して映像再生が詰まる問題が解消される
-                        // MSE in Workers が使えるかは MediaSource.canConstructInDedicatedWorker が true かどうかで判定できる
-                        // MediaSource.canConstructInDedicatedWorker は TypeScript の仕様上型定義の追加が難しいため any で回避している
-                        // ref: https://developer.mozilla.org/en-US/docs/Web/API/MediaSource/canConstructInDedicatedWorker_static
-                        enableWorkerForMSE: window.MediaSource && (window.MediaSource as any).canConstructInDedicatedWorker === true,
+                        // MSE in Worker が使えない環境では自動的に mpegts.js 側でフォールバックされるため、基本的に true を設定する
+                        // ただし Windows 版 Microsoft Edge では MSE in Worker 有効時のみ H.265 / HEVC 再生が動作しないため、この場合のみ無効化する
+                        enableWorkerForMSE: (is_hevc_playback === true && is_hevc_video_supported_in_worker === false) ? false : true,
                         // 再生開始まで 2048KB のバッファを貯める (?)
                         // あまり大きくしすぎてもどうも効果がないようだが、小さくしたり無効化すると特に Safari で不安定になる
                         enableStashBuffer: true,
@@ -487,7 +481,14 @@ class PlayerController {
                     // 文字スーパーレンダラーを無効にするかどうか
                     disableSuperimposeRenderer: is_show_superimpose === false,
                     // 描画フォント
-                    normalFont: `"${settings_store.settings.caption_font}", "Rounded M+ 1m for ARIB", sans-serif`,
+                    normalFont: (() => {
+                        let font = settings_store.settings.caption_font;
+                        if (font === 'Yu Gothic') {
+                            // 游ゴシックのみ、Windows と Mac で名前が異なる
+                            font = 'Yu Gothic Medium","Yu Gothic","YuGothic';
+                        }
+                        return `"${font}", "Rounded M+ 1m for ARIB", sans-serif`;
+                    })(),
                     // 縁取りする色
                     forceStrokeColor: settings_store.settings.always_border_caption_text,
                     // 背景色
@@ -521,35 +522,27 @@ class PlayerController {
                     })(),
                     // 文字スーパーの PRA (内蔵音再生コマンド) のコールバックを指定
                     PRACallback: async (index: number) => {
-
                         // 設定で文字スーパーが無効なら実行しない
                         if (is_show_superimpose === false) return;
-
                         // index に応じた内蔵音を鳴らす
                         // ref: https://ics.media/entry/200427/
                         // ref: https://www.ipentec.com/document/javascript-web-audio-api-change-volume
-
                         // 自動再生ポリシーに引っかかったなどで AudioContext が一時停止されている場合、一度 resume() する必要がある
                         // resume() するまでに何らかのユーザーのジェスチャーが行われているはず…
                         // なくても動くこともあるみたいだけど、念のため
                         if (this.romsounds_context.state === 'suspended') {
                             await this.romsounds_context.resume();
                         }
-
                         // index で指定された音声データを読み込み
                         const buffer_source_node = this.romsounds_context.createBufferSource();
                         buffer_source_node.buffer = this.romsounds_buffers[index];
-
                         // GainNode につなげる
                         const gain_node = this.romsounds_context.createGain();
                         buffer_source_node.connect(gain_node);
-
                         // 出力につなげる
                         gain_node.connect(this.romsounds_context.destination);
-
                         // 音量を元の wav の3倍にする (1倍だと結構小さめ)
                         gain_node.gain.value = 3;
-
                         // 再生開始
                         buffer_source_node.start(0);
                     }
@@ -584,7 +577,7 @@ class PlayerController {
         // DPlayer の設定パネルを無理やり拡張し、KonomiTV 独自の項目を追加する
         this.setupSettingPanelHandler();
 
-        // LShaped Screen Crop の設定が変更されたときのイベントハンドラーを登録する
+        // L字画面のクロップ設定が変更されたときのイベントハンドラーを登録する
         this.setupLShapedScreenCropHandler();
 
         // KonomiTV 本体の UI を含むプレイヤー全体のコンテナ要素がリサイズされたときのイベントハンドラーを登録する
@@ -754,7 +747,7 @@ class PlayerController {
         // この時点で映像が停止していて、かつ readyState が HAVE_FUTURE_DATA な場合、復旧を試みる
         // Safari ではタイミングによっては this.player.video が null になる場合があるらしいので ? を付ける
         if (player_store.is_video_buffering === true && this.player?.video?.readyState < 3) {
-            console.warn('\u001b[31m[PlayerController] Video still buffering. (HTMLVideoElement.readyState < HAVE_FUTURE_DATA) trying to recover.');
+            console.warn('\u001b[31m[PlayerController] Video still buffering. (HTMLVideoElement.readyState < HAVE_FUTURE_DATA) Trying to recover.');
 
             // 一旦停止して、0.25 秒間を置く
             this.player.video.pause();
@@ -773,7 +766,7 @@ class PlayerController {
             // さらに 0.5 秒待った時点で映像が停止している場合、復旧を試みる
             await Utils.sleep(0.5);
             if (player_store.is_video_buffering === true && this.player?.video?.readyState < 3) {
-                console.warn('\u001b[31m[PlayerController] Video still buffering. (HTMLVideoElement.readyState < HAVE_FUTURE_DATA) trying to recover.');
+                console.warn('\u001b[31m[PlayerController] Video still buffering. (HTMLVideoElement.readyState < HAVE_FUTURE_DATA) Trying to recover.');
 
                 // 一旦停止して、0.25 秒間を置く
                 this.player.video.pause();
@@ -941,6 +934,29 @@ class PlayerController {
                 // 一旦音量をミュートする
                 this.player.video.muted = true;
 
+                // この時点で HTMLVideoElement.paused が true のとき、再生できるようになるまで 0.05 秒間を開けて 5 回試す
+                if (this.player.video.paused === true) {
+                    let attempts = 0;
+                    const maxAttempts = 5;  // 試行回数
+                    const attemptInterval = 0.05;  // 試行間隔 (秒)
+                    const attemptPlay = async (): Promise<void> => {
+                        if (attempts >= maxAttempts) {
+                            console.warn(`\u001b[31m[PlayerController] Failed to start playback after ${maxAttempts} attempts.`);
+                            return;
+                        }
+                        try {
+                            await this.player?.video.play();
+                            console.log('\u001b[31m[PlayerController] Playback started successfully.');
+                        } catch (error) {
+                            console.warn(`\u001b[31m[PlayerController] Attempt ${attempts + 1} to start playback failed:`, error);
+                            attempts++;
+                            await Utils.sleep(attemptInterval);
+                            await attemptPlay();
+                        }
+                    };
+                    await attemptPlay();
+                }
+
                 // 再生準備ができた段階で再生バッファを調整し、再生準備ができた段階でローディング中の背景画像を非表示にするイベントハンドラーを登録
                 let on_canplay_called = false;
                 const on_canplay = async () => {
@@ -948,12 +964,13 @@ class PlayerController {
                     // 重複実行を回避する
                     if (this.player === null) return;
                     if (on_canplay_called === true) return;
+                    this.player.video.oncanplay = null;
                     this.player.video.oncanplaythrough = null;
                     on_canplay_called = true;
 
                     // 再生バッファ調整のため、一旦停止させる
                     // this.player.video.pause() を使うとプレイヤーの UI アイコンが停止してしまうので、代わりに playbackRate を使う
-                    console.log('\u001b[31m[PlayerController] buffering...');
+                    console.log('\u001b[31m[PlayerController] Buffering...');
                     this.player.video.playbackRate = 0;
 
                     // 再生バッファが live_playback_buffer_seconds を超えるまで 0.1 秒おきに再生バッファをチェックする
@@ -969,7 +986,7 @@ class PlayerController {
 
                     // 再生バッファ調整のため一旦停止していた再生を再び開始
                     this.player.video.playbackRate = 1;
-                    console.log('\u001b[31m[PlayerController] buffering completed.');
+                    console.log('\u001b[31m[PlayerController] Buffering completed.');
 
                     // ローディング状態を解除し、映像を表示する
                     player_store.is_loading = false;
@@ -1005,19 +1022,44 @@ class PlayerController {
                     // 上記ロジックでは丸め誤差の関係で完全に current_volume とは一致しないことがあるため
                     this.player.video.volume = current_volume;
                 };
+                this.player.video.oncanplay = on_canplay;
                 this.player.video.oncanplaythrough = on_canplay;
 
-                // 万が一 canplaythrough が発火しなかった場合のための処理
+                // 万が一 canplay(through) が発火しなかった場合のために (ほぼ Safari 向け) 、
+                // mpegts.js 側でメディア情報が取得できたタイミングでも再生開始を試みる
+                // 特に Safari 18 以降では MSE の canplay(through) が場合によっては発火しなかったり、発火が異常に遅かったりする…
+                // Safari 18 以降、MSE において canplay(through) の発火タイミングと readyState の値は信頼できない
+                this.player.plugins.mpegts?.on(mpegts.Events.MEDIA_INFO, async (info: {[key: string]: any}) => {
+                    console.log('\u001b[31m[PlayerController] mpegts.js media info:', info);
+                    // 一応ブラウザネイティブの canplay(through) を優先したいので、0.25 秒待ってから再生開始を試みる
+                    // 既に再生開始処理を実行済みの場合は実行しない
+                    await Utils.sleep(0.25);
+                    if (on_canplay_called === false) {
+                        console.warn('\u001b[31m[PlayerController] mpegts.js media info fired, but canplay(through) event not fired. Trying to manually start playback.');
+                        on_canplay();
+                    }
+                });
+
+                // 万が一 canplay(through) が発火しなかった場合のために (ほぼ Safari 向け) 、
                 // 非同期で 0.05 秒おきに直接 readyState === HAVE_ENOUGH_DATA かどうかを確認する
-                // この処理は先に canplaythrough が発火した場合は実行されない
+                // ほとんどのケースでは 先に上記 mpegts.js の MEDIA_INFO イベントが発火するため、この処理は実行されない
                 (async () => {
+                    let have_future_data_count = 0;
                     while (this.player !== null && this.player.video.readyState < 4) {
+                        // プレイヤーが充分と判断する基準はまちまちでブラウザによっては HAVE_FUTURE_DATA のままタイムアウトするので
+                        // HAVE_FUTURE_DATA がおおむね 5 秒つづけば HAVE_ENOUGH_DATA 扱いする
+                        if (this.player.video.readyState < 3) {
+                            have_future_data_count = 0;
+                        } else if (++have_future_data_count > 100) {
+                            break;
+                        }
                         await Utils.sleep(0.05);
                     }
-                    // さらに 0.1 秒待ってから実行
+                    // ループを終えた時点で readyState === HAVE_ENOUGH_DATA になっているので、再生開始を試みる
+                    // 既に再生開始処理を実行済みの場合は実行しない
                     await Utils.sleep(0.1);
                     if (on_canplay_called === false) {
-                        console.warn('\u001b[31m[PlayerController] canplaythrough event not fired. trying to recover.');
+                        console.warn('\u001b[31m[PlayerController] canplay(through) event not fired. Trying to manually start playback.');
                         on_canplay();
                     }
                 })();
@@ -1352,11 +1394,13 @@ class PlayerController {
         crop();
 
         // 設定値が変更されたときに実行
-        watch(() => settings_store.settings.lshaped_screen_crop_enabled, crop, { immediate: true });
-        watch(() => settings_store.settings.lshaped_screen_crop_zoom_level, crop, { immediate: true });
-        watch(() => settings_store.settings.lshaped_screen_crop_x_position, crop, { immediate: true });
-        watch(() => settings_store.settings.lshaped_screen_crop_y_position, crop, { immediate: true });
-        watch(() => settings_store.settings.lshaped_screen_crop_zoom_origin, crop, { immediate: true });
+        this.lshaped_screen_crop_watchers = [
+            watch(() => settings_store.settings.lshaped_screen_crop_enabled, crop, { immediate: true }),
+            watch(() => settings_store.settings.lshaped_screen_crop_zoom_level, crop, { immediate: true }),
+            watch(() => settings_store.settings.lshaped_screen_crop_x_position, crop, { immediate: true }),
+            watch(() => settings_store.settings.lshaped_screen_crop_y_position, crop, { immediate: true }),
+            watch(() => settings_store.settings.lshaped_screen_crop_zoom_origin, crop, { immediate: true }),
+        ];
     }
 
 
@@ -1615,6 +1659,12 @@ class PlayerController {
         if (this.player_container_resize_observer !== null) {
             this.player_container_resize_observer.disconnect();
             this.player_container_resize_observer = null;
+        }
+
+        // L字画面のクロップ設定で使うウォッチャーを破棄
+        if (this.lshaped_screen_crop_watchers.length > 0) {
+            this.lshaped_screen_crop_watchers.forEach((unwatcher) => unwatcher());
+            this.lshaped_screen_crop_watchers = [];
         }
 
         // DPlayer 本体を破棄

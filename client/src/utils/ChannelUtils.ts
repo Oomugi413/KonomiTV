@@ -14,15 +14,16 @@ export class ChannelUtils {
      */
     static getChannelType(display_channel_id: string): ChannelType | null {
         try {
-            const result = display_channel_id.match('(?<channel_type>[a-z]+)[0-9]+')!.groups!.channel_type.toUpperCase();
+            const result = display_channel_id.match('(?<channel_type>[a-z]+(?:4k)?)\\d+')?.groups?.channel_type.toUpperCase();
+            if (!result) return null;
             switch (result) {
                 case 'GR': return 'GR';
                 case 'BS': return 'BS';
                 case 'CS': return 'CS';
                 case 'CATV': return 'CATV';
                 case 'SKY': return 'SKY';
-                case 'STARDIGIO': return 'STARDIGIO';
-                // 正規表現ではエラーになっていないが、ChannelType のいずれにもマッチしない
+                case 'BS4K': return 'BS4K';
+                // ChannelType のいずれにもマッチしない場合
                 default: return null;
             }
         } catch (e) {
