@@ -6,7 +6,8 @@
                 <input
                     v-model="filterQuery"
                     class="search-input"
-                    type="text"
+                    type="search"
+                    enterkeyhint="search"
                     placeholder="タイムラインを絞り込む"
                     @focus="isFilterFormFocused = true"
                     @blur="isFilterFormFocused = false"
@@ -495,6 +496,9 @@ onMounted(() => {
     font-size: 14px;
     color: rgb(var(--v-theme-text-darken-1));
     border-bottom: 1px solid rgba(var(--v-theme-on-surface), 0.12);
+    @include smartphone-horizontal {
+        font-size: 13.5px;
+    }
 
     &__item {
         display: flex;
@@ -506,8 +510,8 @@ onMounted(() => {
 
 .timeline-tweets {
     flex-grow: 1;
+    overflow-x: hidden;
     overflow-y: auto;
-    will-change: transform;
 }
 
 @keyframes spin {

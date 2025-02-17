@@ -3,6 +3,11 @@ import APIClient from  '@/services/APIClient';
 import { IChannel } from '@/services/Channels';
 import { CommentUtils } from '@/utils';
 
+/** ソート順序を表す型 */
+export type SortOrder = 'desc' | 'asc';
+
+/** マイリストのソート順序を表す型 */
+export type MylistSortOrder = 'mylist_added_desc' | 'mylist_added_asc' | 'recorded_desc' | 'recorded_asc';
 
 /** 録画ファイル情報を表すインターフェース */
 export interface IRecordedVideo {
@@ -29,7 +34,7 @@ export interface IRecordedVideo {
     secondary_audio_codec: 'AAC-LC' | null;
     secondary_audio_channel: 'Monaural' | 'Stereo' | '5.1ch' | null;
     secondary_audio_sampling_rate: number | null;
-    key_frames: { offset: number; dts: number; pts: number; }[];
+    has_key_frames: boolean;
     cm_sections: { start_time: number; end_time: number; }[];
     created_at: string;
     updated_at: string;
@@ -60,7 +65,7 @@ export const IRecordedVideoDefault: IRecordedVideo = {
     secondary_audio_codec: null,
     secondary_audio_channel: null,
     secondary_audio_sampling_rate: null,
-    key_frames: [],
+    has_key_frames: false,
     cm_sections: [],
     created_at: '2000-01-01T00:00:00+09:00',
     updated_at: '2000-01-01T00:00:00+09:00',
@@ -153,22 +158,40 @@ export interface IJikkyoComments {
     detail: string;
 }
 
+/** メタデータ再解析のレスポンスを表すインターフェース */
+export interface IReanalyzeStatus {
+    is_success: boolean;
+    detail: string;
+}
+
+/** サムネイル再作成のレスポンスを表すインターフェース */
+export interface IThumbnailRegenerationStatus {
+    is_success: boolean;
+    detail: string;
+}
 
 class Videos {
 
     /**
      * 録画番組一覧を取得する
-     * @param order ソート順序 ('desc' or 'asc')
+     * @param order ソート順序 ('desc' or 'asc' or 'ids')
      * @param page ページ番号
+     * @param ids 録画番組の ID のリスト
      * @returns 録画番組一覧情報 or 録画番組一覧情報の取得に失敗した場合は null
      */
-    static async fetchAllVideos(order: 'desc' | 'asc' = 'desc', page: number = 1): Promise<IRecordedPrograms | null> {
+    static async fetchVideos(order: 'desc' | 'asc' | 'ids' = 'desc', page: number = 1, ids: number[] | null = null): Promise<IRecordedPrograms | null> {
 
         // API リクエストを実行
         const response = await APIClient.get<IRecordedPrograms>('/videos', {
             params: {
                 order,
                 page,
+                ids,
+            },
+            // 録画番組の ID のリストを FastAPI が受け付ける &ids=1&ids=2&ids=3&... の形式にエンコードする
+            // ref: https://github.com/axios/axios/issues/5058#issuecomment-1272107602
+            paramsSerializer: {
+                indexes: null,
             },
         });
 
@@ -254,6 +277,59 @@ class Videos {
         response.data.comments = response.data.comments.filter((comment) => {
             return CommentUtils.isMutedComment(comment.text, comment.author, comment.color, comment.type, comment.size) === false;
         });
+        return response.data;
+    }
+
+
+    /**
+     * 録画番組のメタデータを再解析する
+     * @param video_id 録画番組の ID
+     * @returns メタデータ再解析結果のステータス
+     */
+    static async reanalyzeVideo(video_id: number): Promise<IReanalyzeStatus> {
+
+        // API リクエストを実行
+        const response = await APIClient.post<IReanalyzeStatus>(`/videos/${video_id}/reanalyze`);
+
+        // エラー処理
+        if (response.type === 'error') {
+            APIClient.showGenericError(response, 'メタデータの再解析に失敗しました。');
+            return {
+                is_success: false,
+                detail: 'メタデータの再解析に失敗しました。',
+            };
+        }
+
+        return response.data;
+    }
+
+
+    /**
+     * 録画番組のサムネイルを再作成する
+     * @param video_id 録画番組の ID
+     * @param skip_tile_if_exists 既に存在する場合はサムネイルタイルの生成をスキップするかどうか (デフォルト: False)
+     * @returns サムネイル再作成結果のステータス
+     */
+    static async regenerateThumbnail(video_id: number, skip_tile_if_exists: boolean = false): Promise<IThumbnailRegenerationStatus> {
+
+        // API リクエストを実行
+        const response = await APIClient.post<IThumbnailRegenerationStatus>(`/videos/${video_id}/thumbnail/regenerate`, undefined, {
+            params: {
+                skip_tile_if_exists: skip_tile_if_exists ? 'true' : 'false',
+            },
+            // 数分以上かかるのでタイムアウトを 30 分に設定
+            timeout: 30 * 60 * 1000,
+        });
+
+        // エラー処理
+        if (response.type === 'error') {
+            APIClient.showGenericError(response, 'サムネイルの再作成に失敗しました。');
+            return {
+                is_success: false,
+                detail: 'サムネイルの再作成に失敗しました。',
+            };
+        }
+
         return response.data;
     }
 }

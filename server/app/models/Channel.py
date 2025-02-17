@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import httpx
 import time
-import traceback
 from datetime import datetime
 from tortoise import fields
 from tortoise import transactions
@@ -22,7 +21,7 @@ from app.constants import HTTPX_CLIENT
 from app.utils import GetMirakurunAPIEndpointURL
 from app.utils.edcb.CtrlCmdUtil import CtrlCmdUtil
 from app.utils.edcb.EDCBUtil import EDCBUtil
-from app.utils.Jikkyo import Jikkyo
+from app.utils.JikkyoClient import JikkyoClient
 from app.utils.TSInformation import TSInformation
 
 if TYPE_CHECKING:
@@ -93,8 +92,8 @@ class Channel(TortoiseModel):
             # EDCB バックエンド
             elif Config().general.backend == 'EDCB':
                 await cls.updateFromEDCB()
-        except Exception:
-            traceback.print_exc()
+        except Exception as ex:
+            logging.error('Failed to update channels:', exc_info=ex)
 
         logging.info(f'Channels update complete. ({round(time.time() - timestamp, 3)} sec)')
 
@@ -235,9 +234,9 @@ class Channel(TortoiseModel):
                 try:
                     await duplicate_channel.delete()
                 # tortoise.exceptions.OperationalError: Can't delete unpersisted record を無視
-                except OperationalError as e:
-                    if 'Can\'t delete unpersisted record' not in str(e):
-                        raise e
+                except OperationalError as ex:
+                    if 'Can\'t delete unpersisted record' not in str(ex):
+                        raise ex
 
 
     @classmethod
@@ -419,9 +418,9 @@ class Channel(TortoiseModel):
                 try:
                     await duplicate_channel.delete()
                 # tortoise.exceptions.OperationalError: Can't delete unpersisted record を無視
-                except OperationalError as e:
-                    if 'Can\'t delete unpersisted record' not in str(e):
-                        raise e
+                except OperationalError as ex:
+                    if 'Can\'t delete unpersisted record' not in str(ex):
+                        raise ex
 
 
     async def getCurrentAndNextProgram(self) -> tuple[Program | None, Program | None]:
@@ -460,7 +459,7 @@ class Channel(TortoiseModel):
         """ チャンネル情報のうち、ニコニコ実況関連のステータスを更新する """
 
         # 全ての実況チャンネルのステータスを更新
-        await Jikkyo.updateStatuses()
+        await JikkyoClient.updateStatuses()
 
         # 全てのチャンネル情報を取得
         channels = await Channel.filter(is_watchable=True)
@@ -469,8 +468,8 @@ class Channel(TortoiseModel):
         for channel in channels:
 
             # 実況チャンネルのステータスを取得
-            jikkyo = Jikkyo(channel.network_id, channel.service_id)
-            status = await jikkyo.getStatus()
+            jikkyo_client = JikkyoClient(channel.network_id, channel.service_id)
+            status = await jikkyo_client.getStatus()
 
             # ステータスが None（実況チャンネル自体が存在しないか、コミュニティの場合で実況枠が存在しない）でなく、
             # force が -1 (何らかのエラー) でなければステータスを更新

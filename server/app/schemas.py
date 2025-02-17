@@ -114,7 +114,8 @@ class RecordedVideo(PydanticModel):
     secondary_audio_codec: Literal['AAC-LC'] | None = None
     secondary_audio_channel: Literal['Monaural', 'Stereo', '5.1ch'] | None = None
     secondary_audio_sampling_rate: int | None = None
-    key_frames: list[KeyFrame] = []
+    # key_frames はデータ量が多いため、キーフレーム情報を取得できているかを表す has_key_frames のみ返す
+    has_key_frames: bool = False
     cm_sections: list[CMSection] = []
     created_at: datetime
     updated_at: datetime
@@ -122,7 +123,6 @@ class RecordedVideo(PydanticModel):
 class KeyFrame(TypedDict):
     offset: int
     dts: int
-    pts: int
 
 class CMSection(TypedDict):
     start_time: float
@@ -147,7 +147,7 @@ class RecordedProgram(PydanticModel):
     series_title: str | None = None  # 番組タイトル解析に成功した場合のみセット
     episode_number: str | None = None  # 番組タイトル解析に成功した場合のみセット
     subtitle: str | None = None  # 番組タイトル解析に成功した場合のみセット
-    description: str = '番組情報を取得できませんでした。'
+    description: str = '番組概要を取得できませんでした。'
     detail: dict[str, str] = {}
     start_time: datetime
     end_time: datetime
@@ -284,6 +284,16 @@ class LiveStreamStatuses(BaseModel):
     ONAir: dict[str, LiveStreamStatus]
     Standby: dict[str, LiveStreamStatus]
     Offline: dict[str, LiveStreamStatus]
+
+# ***** メタデータ・サムネイル再生成 *****
+
+class ReanalyzeStatus(BaseModel):
+    is_success: bool
+    detail: str
+
+class ThumbnailRegenerationStatus(BaseModel):
+    is_success: bool
+    detail: str
 
 # ***** 録画予約 *****
 

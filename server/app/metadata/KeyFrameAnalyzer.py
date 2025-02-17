@@ -3,10 +3,14 @@ import anyio
 import asyncio
 import json
 import time
+import typer
+from pathlib import Path
+from tortoise import Tortoise
 
 from app import logging
 from app import schemas
-from app.constants import LIBRARY_PATH
+from app.config import LoadConfig
+from app.constants import DATABASE_CONFIG, LIBRARY_PATH
 from app.models.RecordedVideo import RecordedVideo
 
 
@@ -34,34 +38,37 @@ class KeyFrameAnalyzer:
         ffprobe を使い、録画ファイルから以下の情報を取得して、DB に保存する
         - キーフレームの位置 (ファイル内のバイトオフセット)
         - キーフレームの DTS (Decoding Time Stamp)
-        - キーフレームの PTS (Presentation Time Stamp)
         """
 
         start_time = time.time()
+        logging.info(f'{self.file_path}: Analyzing keyframes...')
         try:
             # ffprobe のオプションを設定
             ## -i: 入力ファイルを指定
             ## -select_streams v:0: 最初の映像ストリームのみを選択
             ## -show_packets: パケット情報を表示
-            ## -show_entries packet=pts,dts,flags,pos: パケットの PTS, DTS, フラグ, 位置を表示
+            ## -show_entries packet=pos,dts,flags: パケットの位置, DTS, フラグを表示
             ## -of json: JSON 形式で出力
             options = [
                 '-i', str(self.file_path),
                 '-select_streams', 'v:0',
                 '-show_packets',
-                '-show_entries', 'packet=pts,dts,flags,pos',
+                '-show_entries', 'packet=pos,dts,flags',
                 '-of', 'json',
             ]
 
-            # ffprobe を実行
+            # FFprobe プロセスを非同期で実行
             ffprobe_process = await asyncio.subprocess.create_subprocess_exec(
                 LIBRARY_PATH['FFprobe'],
                 *options,
+                # 明示的に標準入力を無効化しないと、親プロセスの標準入力が引き継がれてしまう
+                stdin = asyncio.subprocess.DEVNULL,
+                # 標準出力・標準エラー出力をパイプで受け取る
                 stdout = asyncio.subprocess.PIPE,
                 stderr = asyncio.subprocess.PIPE,
             )
 
-            # ffprobe の出力を取得
+            # プロセスの出力を取得
             stdout, stderr = await ffprobe_process.communicate()
 
             # 終了コードを確認
@@ -78,28 +85,24 @@ class KeyFrameAnalyzer:
                 return
 
             # キーフレーム情報を抽出
-            ## flags に 'K' が含まれているパケットがキーフレーム
             ## pos はファイル内のバイトオフセット
             ## dts は Decoding Time Stamp (デコード時刻)
-            ## pts は Presentation Time Stamp (表示時刻)
+            ## flags に 'K' が含まれているパケットがキーフレーム
             key_frames: list[schemas.KeyFrame] = []
             for packet in packets:
-                # 必要なフィールドが存在することを確認
-                if not all(field in packet for field in ['flags', 'pos', 'dts', 'pts']):
-                    logging.error(f'{self.file_path}: Invalid packet data found in ffprobe output')
-                    return
-
+                # 必要なフィールドが存在することを確認（存在しないパケットは無視）
+                if not all(field in packet for field in ['pos', 'dts', 'flags']):
+                    continue
                 # キーフレームのみを抽出
                 if 'K' in packet['flags']:
                     key_frames.append({
                         'offset': int(packet['pos']),
                         'dts': int(packet['dts']),
-                        'pts': int(packet['pts']),
                     })
 
             # パケットが1つも見つからなかった場合
             if not packets:
-                logging.error(f'{self.file_path}: No packets found in ffprobe output')
+                logging.error(f'{self.file_path}: No packets found in ffprobe output.')
                 return
 
             # 最後のフレームが非キーフレームの場合、シーク可能性のために追加
@@ -107,7 +110,6 @@ class KeyFrameAnalyzer:
                 key_frames.append({
                     'offset': int(packets[-1]['pos']),
                     'dts': int(packets[-1]['dts']),
-                    'pts': int(packets[-1]['pts']),
                 })
 
             # キーフレームが1つも見つからなかった場合
@@ -128,3 +130,17 @@ class KeyFrameAnalyzer:
 
         except Exception as ex:
             logging.error(f'{self.file_path}: Error in keyframe analysis:', exc_info=ex)
+
+
+if __name__ == '__main__':
+    # デバッグ用: 録画ファイルのパスを引数に取り、そのファイルのキーフレーム情報を解析する
+    # Usage: poetry run python -m app.metadata.KeyFrameAnalyzer /path/to/recorded_file.ts
+    def main(recorded_file_path: Path = typer.Argument(..., exists=True, file_okay=True, dir_okay=False, readable=True, resolve_path=True)):
+        LoadConfig(bypass_validation=True)  # 一度実行しておかないと設定値を参照できない
+        key_frame_analyzer = KeyFrameAnalyzer(anyio.Path(str(recorded_file_path)))
+        async def amain():
+            await Tortoise.init(config=DATABASE_CONFIG)
+            await key_frame_analyzer.analyze()
+            await Tortoise.close_connections()
+        asyncio.run(amain())
+    typer.run(main)

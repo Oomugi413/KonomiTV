@@ -6,7 +6,8 @@
                 <input
                     v-model="searchQuery"
                     class="search-input"
-                    type="text"
+                    type="search"
+                    enterkeyhint="search"
                     placeholder="検索キーワードを入力"
                     @keydown="onKeyDown($event)"
                     @focus="isSearchFormFocused = true"
@@ -438,12 +439,15 @@ onMounted(() => {
     color: rgb(var(--v-theme-text-darken-1));
     border-bottom: 1px solid rgba(var(--v-theme-on-surface), 0.12);
     user-select: none;
+    @include smartphone-horizontal {
+        font-size: 13.5px;
+    }
 }
 
 .search-tweets {
     flex-grow: 1;
+    overflow-x: hidden;
     overflow-y: auto;
-    will-change: transform;
 }
 
 @keyframes spin {

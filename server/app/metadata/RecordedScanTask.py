@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import anyio
@@ -5,20 +6,37 @@ import asyncio
 import concurrent.futures
 import pathlib
 from datetime import datetime
+from fastapi import HTTPException, status
 from tortoise import transactions
-from typing import ClassVar
+from typing import ClassVar, TypedDict
 from watchfiles import awatch, Change
 from zoneinfo import ZoneInfo
 
 from app import logging
 from app import schemas
 from app.config import Config
+from app.constants import THUMBNAILS_DIR
 from app.metadata.MetadataAnalyzer import MetadataAnalyzer
 from app.metadata.KeyFrameAnalyzer import KeyFrameAnalyzer
 from app.metadata.ThumbnailGenerator import ThumbnailGenerator
 from app.models.Channel import Channel
 from app.models.RecordedProgram import RecordedProgram
 from app.models.RecordedVideo import RecordedVideo
+from app.utils.DriveIOLimiter import DriveIOLimiter
+from app.utils.ProcessLimiter import ProcessLimiter
+
+
+class FileRecordingInfo(TypedDict):
+    """
+    - last_modified: ファイルの最終更新日時
+    - last_checked: ファイルの最終チェック日時
+    - file_size: ファイルのサイズ
+    - mtime_continuous_start_at: ファイルの最終更新日時が継続的に更新されている場合の継続更新の開始日時
+    """
+    last_modified: datetime
+    last_checked: datetime
+    file_size: int
+    mtime_continuous_start_at: datetime | None
 
 
 class RecordedScanTask:
@@ -30,14 +48,17 @@ class RecordedScanTask:
     - 録画中ファイルの状態管理
     """
 
+    # シングルトンインスタンス
+    __instance: ClassVar[RecordedScanTask | None] = None
+
     # スキャン対象の拡張子
     SCAN_TARGET_EXTENSIONS: ClassVar[list[str]] = ['.ts', '.m2t', '.m2ts', '.mts']
 
-    # 録画中ファイルの更新イベントを間引く間隔 (秒)
+    # 録画中ファイルの更新イベントを間引く間隔 (ログ出力用) (秒)
     UPDATE_THROTTLE_SECONDS: ClassVar[int] = 30
 
     # 録画完了と判断するまでの無更新時間 (秒)
-    RECORDING_COMPLETE_SECONDS: ClassVar[int] = 30
+    RECORDING_COMPLETE_SECONDS: ClassVar[int] = 15
 
     # 録画中と判断する最大の経過時間 (秒)
     RECORDING_MAX_AGE_SECONDS: ClassVar[int] = 300  # 5分
@@ -45,26 +66,55 @@ class RecordedScanTask:
     # 録画中ファイルの最小データ長 (秒)
     MINIMUM_RECORDING_SECONDS: ClassVar[int] = 60
 
+    # 継続更新を録画中と判断する最小時間 (秒)
+    CONTINUOUS_UPDATE_THRESHOLD_SECONDS: ClassVar[int] = 60
+
+    # 継続更新を強制的に完了とする時間 (秒)
+    CONTINUOUS_UPDATE_MAX_SECONDS: ClassVar[int] = 86400  # 24時間
+
+
+    def __new__(cls) -> RecordedScanTask:
+        """
+        シングルトンインスタンスを作成または取得する
+        既にインスタンスが存在する場合はそれを返し、存在しない場合は新規作成する
+
+        Returns:
+            RecordedScanTask: シングルトンインスタンス
+        """
+
+        if cls.__instance is None:
+            cls.__instance = super().__new__(cls)
+        return cls.__instance
+
 
     def __init__(self) -> None:
         """
         録画フォルダの監視タスクを初期化する
         """
 
+        # 初期化済みの場合は何もしない
+        if hasattr(self, '_initialized') and self._initialized:
+            return
+
         # 設定を読み込む
         self.config = Config()
         self.recorded_folders = [anyio.Path(folder) for folder in self.config.video.recorded_folders]
 
         # 録画中ファイルの状態管理
-        ## path: (last_modified, last_checked, file_size)
-        self._recording_files: dict[anyio.Path, tuple[datetime, datetime, int]] = {}
+        self._recording_files: dict[anyio.Path, FileRecordingInfo] = {}
 
         # タスクの状態管理
         self._is_running = False
         self._task: asyncio.Task[None] | None = None
 
+        # 録画フォルダ以下の一括スキャンを実行中かどうか
+        self._is_batch_scan_running = False
+
         # バックグラウンドタスクの状態管理
         self._background_tasks: dict[anyio.Path, asyncio.Task[None]] = {}
+
+        # 初期化済みフラグをセット
+        self._initialized = True
 
 
     async def start(self) -> None:
@@ -105,16 +155,19 @@ class RecordedScanTask:
 
     async def run(self) -> None:
         """
-        録画フォルダ以下の一括スキャンと DB への同期を実行した後、
-        録画フォルダ以下のファイルシステム変更の監視を開始し、変更があれば随時メタデータを解析後、DB に永続化する
+        録画フォルダ以下の一括スキャンと DB への同期と録画フォルダ以下のファイルシステム変更の監視を開始し、
+        変更があれば随時メタデータを解析後、DB に永続化する
         このメソッドは start() 経由でサーバー起動時に app.py から自動的に呼ばれ、サーバーの起動中は常時稼働し続ける
         """
 
         try:
-            # サーバー起動時の一括スキャン・同期を実行
-            await self.runBatchScan()
-            # 録画フォルダの監視を開始
-            await self.watchRecordedFolders()
+            # runBatchScan() が完了しなくても新しく録画されたファイルの監視を開始するため、同時に実行する
+            await asyncio.gather(
+                # サーバー起動時の一括スキャン・同期を実行
+                self.runBatchScan(),
+                # 録画フォルダの監視を開始
+                self.watchRecordedFolders(),
+            )
         except asyncio.CancelledError:
             raise
         except Exception as ex:
@@ -131,7 +184,16 @@ class RecordedScanTask:
         - 存在しない録画ファイルに対応するレコードを一括削除
         """
 
+        # 既に一括スキャンを実行中の場合は HTTPException を発生させる
+        # API から手動で一括スキャンを実行した際に重複して実行されないようにするためのバリデーション
+        if self._is_batch_scan_running:
+            raise HTTPException(
+                status_code = status.HTTP_429_TOO_MANY_REQUESTS,
+                detail = 'Batch scan of recording folders is already running',
+            )
+
         logging.info('Batch scan of recording folders has been started.')
+        self._is_batch_scan_running = True
 
         # 現在登録されている全ての RecordedVideo レコードをキャッシュ
         existing_db_recorded_videos = {
@@ -143,6 +205,9 @@ class RecordedScanTask:
         for folder in self.recorded_folders:
             async for file_path in folder.rglob('*'):
                 try:
+                    # シンボリックリンクはスキップ
+                    if await file_path.is_symlink():
+                        continue
                     # Mac の metadata ファイルをスキップ
                     if file_path.name.startswith('._'):
                         continue
@@ -155,7 +220,7 @@ class RecordedScanTask:
                         continue
 
                     # 見つかったファイルを処理
-                    await self.__processRecordedFile(file_path, existing_db_recorded_videos)
+                    await self.processRecordedFile(file_path, existing_db_recorded_videos)
                 except Exception as ex:
                     logging.error(f'{file_path}: Failed to process recorded file:', exc_info=ex)
 
@@ -170,13 +235,44 @@ class RecordedScanTask:
                     await existing_db_recorded_video.recorded_program.delete()
                     logging.info(f'{file_path}: Deleted record for non-existent file.')
 
+        # 不要なサムネイルファイルを削除
+        ## DB に存在する全ての RecordedVideo レコードのハッシュを取得
+        db_recorded_video_hashes = {video.file_hash for video in await RecordedVideo.all()}
+
+        ## サムネイルフォルダ内の全ファイルをスキャン
+        thumbnails_dir = anyio.Path(str(THUMBNAILS_DIR))
+        if await thumbnails_dir.is_dir():
+            async for thumbnail_path in thumbnails_dir.glob('*'):
+                try:
+                    # .git から始まるファイルは無視
+                    if thumbnail_path.name.startswith('.git'):
+                        continue
+
+                    # ファイル名からハッシュを抽出
+                    ## ファイル名は "{hash}.webp" または "{hash}_tile.webp" の形式
+                    ## JPEG フォールバックの場合は ".jpg" の可能性もある
+                    file_name = thumbnail_path.stem
+                    if file_name.endswith('_tile'):
+                        file_hash = file_name[:-5]  # "_tile" を除去
+                    else:
+                        file_hash = file_name
+
+                    # DB に存在しないハッシュのファイルを削除
+                    if file_hash not in db_recorded_video_hashes:
+                        await thumbnail_path.unlink()
+                        logging.info(f'{thumbnail_path.name}: Deleted orphaned thumbnail file.')
+                except Exception as ex:
+                    logging.error(f'{thumbnail_path}: Error deleting orphaned thumbnail file:', exc_info=ex)
+
         logging.info('Batch scan of recording folders has been completed.')
+        self._is_batch_scan_running = False
 
 
-    async def __processRecordedFile(
+    async def processRecordedFile(
         self,
         file_path: anyio.Path,
         existing_db_recorded_videos: dict[anyio.Path, RecordedVideo] | None,
+        force_update: bool = False,
     ) -> None:
         """
         指定された録画ファイルのメタデータを解析し、DB に永続化する
@@ -186,18 +282,26 @@ class RecordedScanTask:
             file_path (anyio.Path): 処理対象のファイルパス
             existing_db_recorded_videos (dict[anyio.Path, RecordedVideo] | None): 既に DB に永続化されている録画ファイルパスと RecordedVideo レコードのマッピング
                 (ファイル変更イベントから呼ばれた場合、watchfiles 初期化時に取得した全レコードと今で状態が一致しているとは限らないため、None が入る)
+            force_update (bool): 既に DB に登録されている録画ファイルのメタデータを強制的に再解析するかどうか
         """
 
         try:
             # 万が一この時点でファイルが存在しない場合はスキップ
             if not await file_path.is_file():
+                logging.warning(f'{file_path}: File does not exist now! ignored.')
                 return
 
             # ファイルの状態をチェック
             stat = await file_path.stat()
-            last_modified = datetime.fromtimestamp(stat.st_mtime, tz=ZoneInfo('Asia/Tokyo'))
             now = datetime.now(tz=ZoneInfo('Asia/Tokyo'))
             file_size = stat.st_size
+            file_created_at = datetime.fromtimestamp(stat.st_ctime, tz=ZoneInfo('Asia/Tokyo'))
+            file_modified_at = datetime.fromtimestamp(stat.st_mtime, tz=ZoneInfo('Asia/Tokyo'))
+
+            # 全く録画できていない0バイトのファイルをスキップ
+            if file_size == 0:
+                logging.warning(f'{file_path}: File size is 0. ignored.')
+                return
 
             # 同じファイルパスの既存レコードがあれば取り出す
             if existing_db_recorded_videos is not None:
@@ -213,59 +317,92 @@ class RecordedScanTask:
                     file_path=str(file_path)
                 ).select_related('recorded_program', 'recorded_program__channel')
 
+            # 同じファイルパスの既存レコードがあり、ファイルの基本情報（作成日時、更新日時、サイズ）が前回と一致した場合、
+            # ファイル内容は変更されておらず、レコード内容は更新不要と判断してスキップ
+            ## こうすることで、録画済みファイルに対しては HDD への I/O 負荷が高いハッシュ算出やメタデータ解析処理を省略できる
+            ## 万が一前回実行時からファイルサイズや最終更新日時の変更を伴わずに録画が完了した場合に状態を適切に反映できるよう、録画中はスキップしない
+            if (force_update is False and
+                existing_db_recorded_video is not None and
+                existing_db_recorded_video.status == 'Recorded'):
+                if (existing_db_recorded_video.file_created_at == file_created_at and
+                    existing_db_recorded_video.file_modified_at == file_modified_at and
+                    existing_db_recorded_video.file_size == file_size):
+                    # logging.debug_simple(f'{file_path}: File metadata unchanged, skipping...')
+                    return
+
             # 現在録画中とマークされているファイルの処理
             is_recording = file_path in self._recording_files
             if is_recording:
                 # 既に DB に登録済みで録画中の場合は再解析しない
                 if existing_db_recorded_video is not None and existing_db_recorded_video.status == 'Recording':
                     return
-                # ファイルサイズが前回と変わっていない場合はスキップ
-                last_size = self._recording_files[file_path][2]
+                # まだ DB に登録されていない＆ファイルサイズが前回から変化していない場合
+                recording_info = self._recording_files[file_path]
+                last_size = recording_info['file_size']
+                mtime_continuous_start_at = recording_info['mtime_continuous_start_at']
                 if file_size == last_size:
-                    return
-
-            # 現在のファイルハッシュを計算
-            try:
-                analyzer = MetadataAnalyzer(pathlib.Path(str(file_path)))  # anyio.Path -> pathlib.Path に変換
-                file_hash = analyzer.calculateTSFileHash()
-            except ValueError:
-                # ファイルサイズが小さすぎる場合はスキップ
-                logging.warning(f'{file_path}: File size is too small. ignored.')
-                return
-
-            # 同じファイルパスの既存レコードがある場合、先ほど計算した最新のハッシュと変わっていない場合は
-            # レコードの内容を更新する必要がないのでスキップ
-            if existing_db_recorded_video is not None and existing_db_recorded_video.file_hash == file_hash:
-                return
+                    # 最終更新日時の継続更新中でない場合はスキップ
+                    if mtime_continuous_start_at is None:
+                        logging.warning(f'{file_path}: File is not recording. ignored.')
+                        return
+                    # 最終更新日時の継続更新が1分未満の場合もスキップ
+                    continuous_duration = (now - mtime_continuous_start_at).total_seconds()
+                    if continuous_duration < self.CONTINUOUS_UPDATE_THRESHOLD_SECONDS:
+                        return
+                    # 最終更新日時の継続更新が24時間を超えた場合は何かがおかしい可能性が高いため打ち切る
+                    if continuous_duration >= self.CONTINUOUS_UPDATE_MAX_SECONDS:
+                        logging.warning(f'{file_path}: Continuous mtime updates for {continuous_duration:.1f} seconds (> {self.CONTINUOUS_UPDATE_MAX_SECONDS}s). ignored.')
+                        return
+                    # ここまで到達した時点で（ファイルサイズこそ変化していないが）最終更新日時の推移から1分以上ファイル内容の更新が続いているとみなし、
+                    # 後続の処理でメタデータを解析し、解析に成功次第 DB に録画中として登録する
+                    # 録画開始前にファイルアロケーションを行う録画予約ソフトでは、録画中も表面上ファイルサイズが変化しない問題への対処
+                    pass
 
             # ProcessPoolExecutor を使い、別プロセス上でメタデータを解析
             ## メタデータ解析処理は実装上同期 I/O で実装されており、また CPU-bound な処理のため、別プロセスで実行している
             ## with 文で括ることで、with 文を抜けたときに ProcessPoolExecutor がクリーンアップされるようにする
             ## さもなければサーバーの終了後もプロセスが残り続けてゾンビプロセス化し、メモリリークを引き起こしてしまう
             loop = asyncio.get_running_loop()
-            with concurrent.futures.ProcessPoolExecutor() as executor:
-                recorded_program = await loop.run_in_executor(executor, analyzer.analyze)
-
-            if recorded_program is None:
-                # メタデータ解析に失敗した場合はエラーとして扱う
-                logging.error(f'{file_path}: Failed to analyze metadata.')
+            analyzer = MetadataAnalyzer(pathlib.Path(str(file_path)))  # anyio.Path -> pathlib.Path に変換
+            try:
+                with concurrent.futures.ProcessPoolExecutor(max_workers=1) as executor:
+                    recorded_program = await loop.run_in_executor(executor, analyzer.analyze)
+                if recorded_program is None:
+                    # メタデータ解析に失敗した場合はエラーとして扱う
+                    logging.error(f'{file_path}: Failed to analyze metadata.')
+                    return
+            except Exception as ex:
+                logging.error(f'{file_path}: Error analyzing metadata:', exc_info=ex)
                 return
 
             # 60秒未満のファイルは録画失敗または切り抜きとみなしてスキップ
             # 録画中だがまだ60秒に満たない場合、今後のファイル変更イベント発火時に60秒を超えていれば録画中ファイルとして処理される
             if recorded_program.recorded_video.duration < self.MINIMUM_RECORDING_SECONDS:
-                logging.debug_simple(f'{file_path}: This file is too short (duration < {self.MINIMUM_RECORDING_SECONDS}s). Skipped.')
+                logging.debug_simple(f'{file_path}: This file is too short (duration {recorded_program.recorded_video.duration:.1f}s < {self.MINIMUM_RECORDING_SECONDS}s). Skipped.')
+                return
+
+            # 同じファイルパスの既存レコードがあり、先ほど計算した最新のハッシュと変わっていない場合は、レコード内容は更新不要と判断してスキップ
+            ## 万が一前回実行時からファイルサイズや最終更新日時の変更を伴わずに録画が完了した場合に状態を適切に反映できるよう、録画中はスキップしない
+            if (force_update is False and
+                existing_db_recorded_video is not None and
+                existing_db_recorded_video.status == 'Recorded' and
+                existing_db_recorded_video.file_hash == recorded_program.recorded_video.file_hash):
                 return
 
             # 録画中のファイルとして処理
             ## 他ドライブからファイルコピー中のファイルも、実際の録画処理より高速に書き込まれるだけで随時書き込まれることに変わりはないので、
             ## 録画中として判断されることがある（その場合、ファイルコピーが完了した段階で「録画完了」扱いとなる）
-            if is_recording or (now - last_modified).total_seconds() < self.RECORDING_COMPLETE_SECONDS:
+            if is_recording or (now - file_modified_at).total_seconds() < self.RECORDING_COMPLETE_SECONDS:
                 # status を Recording に設定
                 recorded_program.recorded_video.status = 'Recording'
                 # 状態を更新
-                self._recording_files[file_path] = (last_modified, now, file_size)
-                logging.debug_simple(f'{file_path}: This file is recording or copying (duration >= {self.MINIMUM_RECORDING_SECONDS}s).')
+                self._recording_files[file_path] = {
+                    'last_modified': file_modified_at,
+                    'last_checked': now,
+                    'file_size': file_size,
+                    'mtime_continuous_start_at': file_modified_at,  # 初回は必ず mtime_continuous_start_at を設定
+                }
+                logging.debug_simple(f'{file_path}: This file is recording or copying (duration {recorded_program.recorded_video.duration:.1f}s >= {self.MINIMUM_RECORDING_SECONDS}s).')
             else:
                 # status を Recorded に設定
                 # MetadataAnalyzer 側で既に Recorded に設定されているが、念のため
@@ -281,7 +418,6 @@ class RecordedScanTask:
 
         except Exception as ex:
             logging.error(f'{file_path}: Error processing file:', exc_info=ex)
-            raise
 
 
     @staticmethod
@@ -385,7 +521,6 @@ class RecordedScanTask:
             db_recorded_video.secondary_audio_codec = recorded_program.recorded_video.secondary_audio_codec
             db_recorded_video.secondary_audio_channel = recorded_program.recorded_video.secondary_audio_channel
             db_recorded_video.secondary_audio_sampling_rate = recorded_program.recorded_video.secondary_audio_sampling_rate
-            db_recorded_video.key_frames = recorded_program.recorded_video.key_frames
             db_recorded_video.cm_sections = recorded_program.recorded_video.cm_sections
             await db_recorded_video.save()
 
@@ -405,13 +540,18 @@ class RecordedScanTask:
         file_path = anyio.Path(recorded_program.recorded_video.file_path)
 
         try:
-            # 時間のかかる各種解析タスクを非同期に同時実行
-            await asyncio.gather(
-                # 録画ファイルのキーフレーム解析
-                KeyFrameAnalyzer(file_path).analyze(),
-                # サムネイル生成
-                ThumbnailGenerator.fromRecordedProgram(recorded_program).generate(),
-            )
+            # ProcessLimiter で稼働中のバックグラウンドタスクの同時実行数を CPU コア数の 50% に制限
+            async with ProcessLimiter.getSemaphore('RecordedScanTask'):
+                # DriveIOLimiter で同一 HDD に対してのバックグラウンドタスクの同時実行数を原則1セッションに制限
+                async with DriveIOLimiter.getSemaphore(file_path):
+                    await asyncio.gather(
+                        # 録画ファイルのキーフレーム情報を解析し DB に保存
+                        KeyFrameAnalyzer(file_path).analyze(),
+                        # シークバー用サムネイルとリスト表示用の代表サムネイルの両方を生成
+                        ## skip_tile_if_exists=True を指定し、同一内容のファイルが複数ある場合などに
+                        ## 既に生成されている時間のかかるシークバー用サムネイルを使い回し、処理時間短縮を図る
+                        ThumbnailGenerator.fromRecordedProgram(recorded_program).generate(skip_tile_if_exists=True),
+                    )
             logging.info(f'{file_path}: Background analysis completed.')
 
         except Exception as ex:
@@ -481,6 +621,7 @@ class RecordedScanTask:
         ファイル追加・変更イベントを受け取り、適切な頻度で __processFile() を呼び出す
         - 録画中ファイルの状態管理
         - メタデータ解析のスロットリング
+        - 最終更新日時の継続更新検出による録画中判定
 
         Args:
             path (anyio.Path): 追加・変更があったファイルのパス
@@ -495,21 +636,60 @@ class RecordedScanTask:
 
             # 既に録画中とマークされているファイルの処理
             if file_path in self._recording_files:
-                last_checked = self._recording_files[file_path][1]
-                # 状態を更新
-                self._recording_files[file_path] = (last_modified, now, file_size)
-                # 前回のチェックから30秒以上経過していない場合はスキップ
-                if (now - last_checked).total_seconds() < self.UPDATE_THROTTLE_SECONDS:
-                    return
-                # メタデータ解析を実行
-                await self.__processRecordedFile(file_path, None)
-                return
+                recording_info = self._recording_files[file_path]
+                last_checked = recording_info['last_checked']
+                last_size = recording_info['file_size']
+                mtime_continuous_start_at = recording_info['mtime_continuous_start_at']
 
-            # 最終更新時刻から一定時間以上経過している場合は録画中とみなさない
-            # それ以外の場合、今後継続的に追記されていく（＝録画中）可能性もあるので、録画中マークをつけておく
-            if (now - last_modified).total_seconds() <= self.RECORDING_MAX_AGE_SECONDS:
-                self._recording_files[file_path] = (last_modified, now, file_size)
-            await self.__processRecordedFile(file_path, None)
+                # 前回のチェックから UPDATE_THROTTLE_SECONDS 秒以上経過していない場合はログを間引く（状態自体は更新する）
+                throttle_event = False
+                if (now - last_checked).total_seconds() < self.UPDATE_THROTTLE_SECONDS:
+                    throttle_event = True
+
+                # ファイルサイズが変化している場合は継続更新判定をリセット
+                if file_size != last_size:
+                    mtime_continuous_start_at = None
+                    if not throttle_event:
+                        logging.debug_simple(f'{file_path}: File size changed.')
+                # mtime が変化している場合は継続更新判定を更新
+                elif last_modified > recording_info['last_modified']:
+                    if mtime_continuous_start_at is None:
+                        mtime_continuous_start_at = last_modified
+                        if not throttle_event:
+                            logging.debug_simple(f'{file_path}: File modified time changed.')
+                    else:
+                        continuous_duration = (now - mtime_continuous_start_at).total_seconds()
+                        if continuous_duration >= self.CONTINUOUS_UPDATE_THRESHOLD_SECONDS:
+                            if not throttle_event:
+                                logging.debug_simple(f'{file_path}: Still recording (continuous mtime updates for {continuous_duration:.1f} seconds).')
+
+                # 状態を更新
+                self._recording_files[file_path] = {
+                    'last_modified': last_modified,
+                    # 前回のチェックから UPDATE_THROTTLE_SECONDS 秒以上経過していない場合は前回のチェック日時を使う
+                    'last_checked': last_checked if throttle_event else now,
+                    'file_size': file_size,
+                    'mtime_continuous_start_at': mtime_continuous_start_at,
+                }
+
+                # メタデータ解析を実行
+                await self.processRecordedFile(file_path, None)
+
+            # まだ録画中とマークされていないファイルの処理
+            else:
+                # 最終更新時刻から一定時間以上経過している場合は録画中とみなさない
+                # それ以外の場合、今後継続的に追記されていく（＝録画中）可能性もあるので、録画中マークをつけておく
+                if (now - last_modified).total_seconds() <= self.RECORDING_MAX_AGE_SECONDS:
+                    self._recording_files[file_path] = {
+                        'last_modified': last_modified,
+                        'last_checked': now,
+                        'file_size': file_size,
+                        'mtime_continuous_start_at': last_modified,  # 初回は必ず mtime_continuous_start_at を設定
+                    }
+                    logging.info(f'{file_path}: New recording or copying file detected.')
+
+                # メタデータ解析を実行
+                await self.processRecordedFile(file_path, None)
 
         except FileNotFoundError:
             # ファイルが既に削除されている場合
@@ -555,16 +735,16 @@ class RecordedScanTask:
                 completed_files: list[anyio.Path] = []
 
                 # 録画中ファイルをチェック
-                for file_path, (_, _, last_size) in self._recording_files.items():
+                for file_path, recording_info in self._recording_files.items():
                     try:
                         # ファイルの現在の状態を取得
                         stat = await file_path.stat()
                         current_modified = datetime.fromtimestamp(stat.st_mtime, tz=ZoneInfo('Asia/Tokyo'))
                         current_size = stat.st_size
 
-                        # 30秒以上更新がなく、かつファイルサイズが変化していない場合は録画完了と判断
+                        # RECORDING_COMPLETE_SECONDS 秒以上更新がなく、かつファイルサイズが変化していない場合は録画完了と判断
                         if ((now - current_modified).total_seconds() >= self.RECORDING_COMPLETE_SECONDS and
-                            current_size == last_size):
+                            current_size == recording_info['file_size']):
                             completed_files.append(file_path)
                     except FileNotFoundError:
                         # ファイルが削除された場合は記録から削除
@@ -582,7 +762,7 @@ class RecordedScanTask:
                         if await file_path.is_file():
                             # この時点で、録画（またはファイルコピー）が確実に完了しているはず
                             logging.info(f'{file_path}: Recording or copying has just completed or has already completed.')
-                            await self.__processRecordedFile(file_path, None)
+                            await self.processRecordedFile(file_path, None)
                     except Exception as ex:
                         logging.error(f'{file_path}: Error processing completed file:', exc_info=ex)
 

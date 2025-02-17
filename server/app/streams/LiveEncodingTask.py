@@ -3,6 +3,7 @@
 # ref: https://stackoverflow.com/a/33533514/17124142
 from __future__ import annotations
 
+import anyio
 import aiofiles
 import aiohttp
 import asyncio
@@ -37,6 +38,10 @@ class LiveEncodingTask:
     # H.265 再生時のエンコード後のストリームの GOP 長 (秒)
     GOP_LENGTH_SECONDS_H265: ClassVar[float] = float(2)
 
+    # エンコードタスクの最大リトライ回数
+    ## この数を超えた場合はエンコードタスクを再起動しない（無限ループを避ける）
+    MAX_RETRY_COUNT: ClassVar[int] = 10  # 10回まで
+
     # チューナーから放送波 TS を読み取る際のタイムアウト (秒)
     TUNER_TS_READ_TIMEOUT: ClassVar[int] = 15
 
@@ -63,10 +68,6 @@ class LiveEncodingTask:
 
         # エンコードタスクのリトライ回数のカウント
         self._retry_count = 0
-
-        # エンコードタスクの最大リトライ回数
-        ## この数を超えた場合はエンコードタスクを再起動しない（無限ループを避ける）
-        self._max_retry_count = 5  # 5 回まで
 
 
     def isFullHDChannel(self, network_id: int, service_id: int) -> bool:
@@ -135,7 +136,7 @@ class LiveEncodingTask:
 
         # フラグ
         ## 主に FFmpeg の起動を高速化するための設定
-        ## max_interleave_delta: mux 時に影響するオプションで、増やしすぎると CM で詰まりがちになるが、減らしすぎると LL-HLS で音ズレしやすくなる
+        ## max_interleave_delta: mux 時に影響するオプションで、増やしすぎると CM で詰まりがちになる
         ## リトライなしの場合は 500K (0.5秒) に設定し、リトライ回数に応じて 100K (0.1秒) ずつ増やす
         max_interleave_delta = round(500 + (self._retry_count * 100))
         options.append(f'-fflags nobuffer -flags low_delay -max_delay 250000 -max_interleave_delta {max_interleave_delta}K -threads auto')
@@ -218,7 +219,7 @@ class LiveEncodingTask:
 
         # フラグ
         ## 主に FFmpeg の起動を高速化するための設定
-        ## max_interleave_delta: mux 時に影響するオプションで、増やしすぎると CM で詰まりがちになるが、減らしすぎると LL-HLS で音ズレしやすくなる
+        ## max_interleave_delta: mux 時に影響するオプションで、増やしすぎると CM で詰まりがちになる
         ## リトライなしの場合は 500K (0.5秒) に設定し、リトライ回数に応じて 100K (0.1秒) ずつ増やす
         max_interleave_delta = round(500 + (self._retry_count * 100))
         options.append(f'-fflags nobuffer -flags low_delay -max_delay 250000 -max_interleave_delta {max_interleave_delta}K -threads auto')
@@ -288,7 +289,7 @@ class LiveEncodingTask:
 
         # フラグ
         ## 主に HWEncC の起動を高速化するための設定
-        ## max_interleave_delta: mux 時に影響するオプションで、増やしすぎると CM で詰まりがちになるが、減らしすぎると LL-HLS で音ズレしやすくなる
+        ## max_interleave_delta: mux 時に影響するオプションで、増やしすぎると CM で詰まりがちになる
         ## リトライなしの場合は 500K (0.5秒) に設定し、リトライ回数に応じて 100K (0.1秒) ずつ増やす
         max_interleave_delta = round(500 + (self._retry_count * 100))
         options.append('-m avioflags:direct -m fflags:nobuffer+flush_packets -m flush_packets:1 -m max_delay:250000')
@@ -924,7 +925,7 @@ class LiveEncodingTask:
             ## ref: https://note.nkmk.me/python-pathlib-name-suffix-parent/
             count = 1
             encoder_log_path = LOGS_DIR / f'KonomiTV-Encoder-{self.live_stream.live_stream_id}.log'
-            while encoder_log_path.exists():
+            while await anyio.Path(str(encoder_log_path)).exists():
                 encoder_log_path = LOGS_DIR / f'KonomiTV-Encoder-{self.live_stream.live_stream_id}-{count}.log'
                 count += 1
 
@@ -1300,7 +1301,7 @@ class LiveEncodingTask:
                 self.live_stream.tuner.unlock()
 
             # 再起動回数が最大再起動回数に達していなければ、再起動する
-            if self._retry_count < self._max_retry_count:
+            if self._retry_count < self.MAX_RETRY_COUNT:
                 self._retry_count += 1  # カウントを増やす
                 await asyncio.sleep(0.1)  # 少し待つ
                 background_tasks.add(asyncio.create_task(self.run()))  # 新しいタスクを立ち上げる
