@@ -374,8 +374,8 @@ class Program(TortoiseModel):
                     program.video_codec = None
                     program.video_resolution = None
                     if 'video' in program_info:
-                        program.video_type = ariblib.constants.COMPONENT_TYPE \
-                            [program_info['video']['streamContent']][program_info['video']['componentType']]
+                        #program.video_type = ariblib.constants.COMPONENT_TYPE \
+                            #[program_info['video']['streamContent']][program_info['video']['componentType']]
                         program.video_codec = program_info['video']['type']
                         program.video_resolution = program_info['video']['resolution']
 
@@ -403,7 +403,7 @@ class Program(TortoiseModel):
 
                         ## 副音声（存在する場合）
                         if len(program_info['audios']) == 2:
-                            program.secondary_audio_type = ariblib.constants.COMPONENT_TYPE[0x02][program_info['audios'][1]['componentType']]
+                            #program.secondary_audio_type = ariblib.constants.COMPONENT_TYPE[0x02][program_info['audios'][1]['componentType']]
                             program.secondary_audio_language = TSInformation.getISO639LanguageCodeName(program_info['audios'][1]['langs'][0])
                             program.secondary_audio_sampling_rate = str(int(program_info['audios'][1]['samplingRate'] / 1000)) + 'kHz'  # kHz に変換
                             ## デュアルモノのみ
