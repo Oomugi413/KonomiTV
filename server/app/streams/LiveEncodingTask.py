@@ -102,6 +102,27 @@ class LiveEncodingTask:
 
         return False
 
+    def is4KChannel(self, network_id: int, service_id: int) -> bool:
+        """
+        ネットワーク ID とサービス ID から、そのチャンネルでフル HD 放送が行われているかを返す
+        放送波の PSI/SI から映像の横解像度を取得する手段がないので、現状 ID 決め打ちになっている
+        ref: https://twitter.com/highwaymovies/status/1201282179390562305
+        ref: https://twitter.com/fkcb222/status/1630877111677485056
+        ref: https://scrapbox.io/ci7lus/%E5%9C%B0%E4%B8%8A%E6%B3%A2%E3%81%AA%E3%81%AE%E3%81%ABFHD%E3%81%AE%E6%94%BE%E9%80%81%E5%B1%80%E6%83%85%E5%A0%B1
+
+        Args:
+            network_id (int): ネットワーク ID
+            service_id (int): サービス ID
+
+        Returns:
+            bool: フル HD 放送が行われているチャンネルかどうか
+        """
+
+        #BS4K,CS4K
+        if network_id >= 11:
+            return True
+
+        return False
 
     def buildFFmpegOptions(self,
         quality: QUALITY_TYPES,
@@ -132,11 +153,14 @@ class LiveEncodingTask:
 
         # 入力
         ## -analyzeduration をつけることで、ストリームの分析時間を短縮できる
-        options.append(f'-f mpegts -analyzeduration {analyzeduration} -hwaccel qsv -hwaccel_output_format qsv -init_hw_device vulkan=vk:0 -filter_hw_device vk -i pipe:0')
+        if channel.network_id >= 11:
+            options.append(f'-f mmttlv -analyzeduration {analyzeduration} -hwaccel qsv -hwaccel_output_format qsv -init_hw_device vulkan=vk:0 -filter_hw_device vk -i pipe:0')
+        else:
+            options.append(f'-f mpegts -analyzeduration {analyzeduration} -hwaccel qsv -hwaccel_output_format qsv -init_hw_device vulkan=vk:0 -filter_hw_device vk -i pipe:0')
 
         # ストリームのマッピング
         ## 音声切り替えのため、主音声・副音声両方をエンコード後の TS に含む
-        options.append('-map 0:v:0 -map 0:a:0 -map 0:a:1 -map 0:d? -ignore_unknown')
+        options.append('-map 0:v:0 -map 0:a:0 -map 0:a:1? -map 0:d? -ignore_unknown')
 
         # フラグ
         ## 主に FFmpeg の起動を高速化するための設定
@@ -154,7 +178,7 @@ class LiveEncodingTask:
 
         ## ビットレートと品質
         options.append(f'-flags +cgop -vb {QUALITY[quality].video_bitrate} -maxrate {QUALITY[quality].video_bitrate_max}')
-        options.append('-preset veryfast -aspect 16:9')
+        options.append('-preset medium -aspect 16:9')
         if QUALITY[quality].is_hevc is True:
             options.append('-profile:v main')
         else:
@@ -800,6 +824,9 @@ class LiveEncodingTask:
                         # エンコードタスクが終了しているか既にエンコーダープロセスが終了していたら、タスクを終了
                         if is_running is False or encoder.returncode is not None:
                             break
+                except OSError:
+                    pass
+                    
             else:
                 try:
                     async for chunk in stream_iterator:
@@ -831,9 +858,8 @@ class LiveEncodingTask:
                         # エンコードタスクが終了しているか既にエンコーダープロセスが終了していたら、タスクを終了
                         if is_running is False or tsreadex.returncode is not None or encoder.returncode is not None:
                             break
-
-            except OSError:
-                pass
+                except OSError:
+                    pass
 
             # タスクを終える前に、チューナーとの接続を明示的に閉じる
             try:
