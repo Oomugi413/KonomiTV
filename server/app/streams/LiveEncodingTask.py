@@ -97,7 +97,7 @@ class LiveEncodingTask:
             return True
 
         #BS4K,CS4K
-        if network_id >= 11:
+        if (network_id == 11) or (network_id == 12):
             return True
 
         return False
@@ -119,13 +119,14 @@ class LiveEncodingTask:
         """
 
         #BS4K,CS4K
-        if network_id >= 11:
+        if (network_id == 11) or (network_id == 12):
             return True
 
         return False
 
     def buildFFmpegOptions(self,
         quality: QUALITY_TYPES,
+        is_4K_channel: bool = False,
         is_fullhd_channel: bool = False,
         is_sphd_channel: bool = False,
     ) -> list[str]:
@@ -153,7 +154,7 @@ class LiveEncodingTask:
 
         # 入力
         ## -analyzeduration をつけることで、ストリームの分析時間を短縮できる
-        if channel.network_id >= 11:
+        if is_4K_channel is True:
             options.append(f'-f mmttlv -analyzeduration {analyzeduration} -hwaccel qsv -hwaccel_output_format qsv -init_hw_device vulkan=vk:0 -filter_hw_device vk -i pipe:0')
         else:
             options.append(f'-f mpegts -analyzeduration {analyzeduration} -hwaccel qsv -hwaccel_output_format qsv -init_hw_device vulkan=vk:0 -filter_hw_device vk -i pipe:0')
@@ -200,11 +201,11 @@ class LiveEncodingTask:
 
         ## インターレース解除 (60i → 60p (フレームレート: 60fps))
         if QUALITY[quality].is_60fps is True:
-            options.append(f'-vf vpp_qsv=deinterlace=2:w={video_width}:h={video_height}:framerate=60000/1001')
+            options.append(f'-vf vpp_qsv=deinterlace=2:w={video_width}:h={video_height}:framerate=60000/1001:format=nv12')
             #options.append(f'-r 60000/1001 -g {int(gop_length_second * 60)}')
         ## インターレース解除 (60i → 30p (フレームレート: 30fps))
         else:
-            options.append(f'-vf vpp_qsv=deinterlace=2:w={video_width}:h={video_height}:framerate=30000/1001')
+            options.append(f'-vf vpp_qsv=deinterlace=2:w={video_width}:h={video_height}:framerate=30000/1001:format=nv12')
             #options.append(f'-r 30000/1001 -g {int(gop_length_second * 30)}')
 
         # 音声
@@ -595,6 +596,7 @@ class LiveEncodingTask:
 
         # フル HD 放送が行われているチャンネルかを取得
         is_fullhd_channel = self.isFullHDChannel(channel.network_id, channel.service_id)
+        is_4k_channel = self.is4KChannel(channel.network_id, channel.service_id)
 
         ## ラジオチャンネルでは HW エンコードの意味がないため、FFmpeg に固定する
         if channel.is_radiochannel is True:
@@ -608,11 +610,11 @@ class LiveEncodingTask:
             if channel.is_radiochannel is True:
                 encoder_options = self.buildFFmpegOptionsForRadio()
             else:
-                encoder_options = self.buildFFmpegOptions(self.live_stream.quality, is_fullhd_channel, channel.type == 'SKY')
+                encoder_options = self.buildFFmpegOptions(self.live_stream.quality, is_4k_channel, is_fullhd_channel, channel.type == 'SKY')
             logging.info(f'[Live: {self.live_stream.live_stream_id}] FFmpeg Commands:\nffmpeg {" ".join(encoder_options)}')
 
             # エンコーダープロセスを非同期で作成・実行
-            if channel.network_id >= 11:
+            if (channel.network_id == 11) or (channel.network_id == 12):
                 encoder = await asyncio.subprocess.create_subprocess_exec(
                     *[LIBRARY_PATH['FFmpeg'], *encoder_options],
                     stdin = asyncio.subprocess.PIPE,  # ストリーム入力
@@ -799,7 +801,7 @@ class LiveEncodingTask:
             stream_iterator = GetIterator(stream_reader)
 
             # EDCB / Mirakurun から受信した放送波を随時 tsreadex の入力に書き込む
-            if channel.network_id >= 11:
+            if (channel.network_id == 11) or (channel.network_id == 12):
                 try:
                     async for chunk in stream_iterator:
     
