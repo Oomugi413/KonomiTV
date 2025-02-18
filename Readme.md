@@ -1,3 +1,5 @@
+QSV専用ffmpeg, bs4k視聴対応fork. 素人のあがきなので汚コード注意、動作保証なし
+
 
 # <img width="350" src="https://user-images.githubusercontent.com/39271166/134050201-8110f076-a939-4b62-8c86-7beaa3d4728c.png" alt="KonomiTV">　<!-- omit in toc -->
 
