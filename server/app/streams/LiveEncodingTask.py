@@ -272,6 +272,7 @@ class LiveEncodingTask:
     def buildHWEncCOptions(self,
         quality: QUALITY_TYPES,
         encoder_type: Literal['QSVEncC', 'NVEncC', 'VCEEncC', 'rkmppenc'],
+        is_4K_channel: bool = False,
         is_fullhd_channel: bool = False,
         is_sphd_channel: bool = False,
     ) -> list[str]:
@@ -299,11 +300,14 @@ class LiveEncodingTask:
             ## ほかと違い H.264 コーデックが採用されていることが影響しているのかも
             input_probesize += 500
             input_analyze += 0.2
-
+        
         # 入力
         ## --input-probesize, --input-analyze をつけることで、ストリームの分析時間を短縮できる
         ## 両方つけるのが重要で、--input-analyze だけだとエンコーダーがフリーズすることがある
-        options.append(f'--input-format mpegts --fps 30000/1001 --input-probesize {input_probesize}K --input-analyze {input_analyze} --input -')
+        if is_4K_channel is True:
+            options.append(f'--input-format mmttlv --fps 60000/1001 --input-probesize {input_probesize}K --input-analyze {input_analyze} --input -')
+        else:
+            options.append(f'--input-format mpegts --fps 30000/1001 --input-probesize {input_probesize}K --input-analyze {input_analyze} --input -')
         ## VCEEncC の HW デコーダーはエラー耐性が低く TS を扱う用途では不安定なので、SW デコーダーを利用する
         if encoder_type == 'VCEEncC':
             options.append('--avsw')
@@ -633,16 +637,24 @@ class LiveEncodingTask:
         else:
 
             # オプションを取得
-            encoder_options = self.buildHWEncCOptions(self.live_stream.quality, ENCODER_TYPE, is_fullhd_channel, channel.type == 'SKY')
+            encoder_options = self.buildHWEncCOptions(self.live_stream.quality, ENCODER_TYPE, is_4k_channel, is_fullhd_channel, channel.type == 'SKY')
             logging.info(f'[Live: {self.live_stream.live_stream_id}] {ENCODER_TYPE} Commands:\n{ENCODER_TYPE} {" ".join(encoder_options)}')
 
             # エンコーダープロセスを非同期で作成・実行
-            encoder = await asyncio.subprocess.create_subprocess_exec(
-                *[LIBRARY_PATH[ENCODER_TYPE], *encoder_options],
-                stdin = tsreadex_read_pipe,  # tsreadex からの入力
-                stdout = asyncio.subprocess.PIPE,  # ストリーム出力
-                stderr = asyncio.subprocess.PIPE,  # ログ出力
-            )
+            if (channel.network_id == 11) or (channel.network_id == 12):
+                encoder = await asyncio.subprocess.create_subprocess_exec(
+                    *[LIBRARY_PATH[ENCODER_TYPE], *encoder_options],
+                    stdin = asyncio.subprocess.PIPE,  # tsreadex からの入力
+                    stdout = asyncio.subprocess.PIPE,  # ストリーム出力
+                    stderr = asyncio.subprocess.PIPE,  # ログ出力
+                )
+            else:
+                encoder = await asyncio.subprocess.create_subprocess_exec(
+                    *[LIBRARY_PATH[ENCODER_TYPE], *encoder_options],
+                    stdin = tsreadex_read_pipe,  # tsreadex からの入力
+                    stdout = asyncio.subprocess.PIPE,  # ストリーム出力
+                    stderr = asyncio.subprocess.PIPE,  # ログ出力
+                )
 
         # tsreadex の読み込み用パイプを閉じる
         os.close(tsreadex_read_pipe)
