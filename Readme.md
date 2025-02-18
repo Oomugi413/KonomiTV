@@ -532,6 +532,9 @@ Docker Compose は V1 と V2 の両方に対応していますが、できれば
 curl -LO https://github.com/Oomugi413/KonomiTV/releases/download/v0.12.0/KonomiTV-Installer.elf
 chmod a+x KonomiTV-Installer.elf
 ./KonomiTV-Installer.elf
+cd ~/git/KonomiTV/server/thirdparty/FFmpeg
+sudo cp /usr/local/bin/ffmpeg ffmpeg.elf
+sudo cp /usr/local/bin/ffprobe ffprobe.elf
 ```
 
 以上のコマンドを実行して `KonomiTV-Installer.elf` を実行し、インストーラーの通りに進めてください。  
@@ -910,8 +913,8 @@ VS Code を開発に利用しています。
 # Windows は PowerShell 7 で、Ubuntu は bash での実行を想定
 
 # リポジトリの clone
-## /Develop の部分は適宜変更すること
-cd /Develop
+## ~/git の部分は適宜変更すること
+cd ~/git
 git clone https://github.com/Oomugi413/KonomiTV.git
 
 # 設定ファイルのコピーと編集
@@ -920,8 +923,8 @@ cd KonomiTV/
 # Windows
 Copy-Item -Force config.example.yaml config.yaml
 # Linux:
-cp -a config.example.yaml config.yaml
-nano config.yaml
+# cp -a config.example.yaml config.yaml
+# nano config.yaml
 
 # 一時的な Poetry 仮想環境の構築 (UpdateThirdparty の実行に必要)
 cd server/
@@ -935,13 +938,16 @@ poetry run task update-thirdparty
 # サードパーティーライブラリ内のスタンドアローン版 Python を明示的に指定して Poetry 仮想環境を再構築
 # Windows:
 Remove-Item -Recurse -Force .venv/
-poetry env use /Develop/KonomiTV/server/thirdparty/Python/python.exe
+poetry env use ~/git/KonomiTV/server/thirdparty/Python/python.exe
 # Linux
 rm -rf .venv/
-poetry env use /Develop/KonomiTV/server/thirdparty/Python/bin/python
+poetry env use ~/git/KonomiTV/server/thirdparty/Python/bin/python
 
 # 依存パッケージのインストール
 poetry install --no-root
+cd ~/git/KonomiTV/server/thirdparty/FFmpeg
+sudo cp /usr/local/bin/ffmpeg ffmpeg.elf
+sudo cp /usr/local/bin/ffprobe ffprobe.elf
 ```
 
 ### サーバーの起動
@@ -956,7 +962,7 @@ Akebi HTTPS Server は、自己署名証明書なしでプライベートネッ�
 Uvicorn も Akebi HTTPS Server も KonomiTV.py の起動時に透過的に同時起動されるため、一般のユーザーが意識する必要はありません。
 
 ```bash
-cd /Develop/KonomiTV/server/
+cd ~/git/KonomiTV/server/
 
 # リロードモードで起動する
 poetry run task dev
@@ -1040,7 +1046,7 @@ poetry run python KonomiTV-Service.py uninstall
 事前に root 権限で PM2 がインストールされている必要があります。
 
 ```bash
-cd /Develop/KonomiTV/server/
+cd ~/git/KonomiTV/server/
 
 # PM2 サービスのインストール
 sudo pm2 start .venv/bin/python --name KonomiTV -- KonomiTV.py
@@ -1069,7 +1075,7 @@ sudo pm2 save
 Node.js 20.16.0 / yarn 1.x で開発しています。
 
 ```bash
-cd /Develop/KonomiTV/client/
+cd ~/git/KonomiTV/client/
 
 # 依存パッケージのインストール
 yarn install
