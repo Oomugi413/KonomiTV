@@ -49,9 +49,9 @@ def main(
 
     # サードパーティーライブラリのダウンロードベース URL
     if download_version == 'latest':
-        THIRDPARTY_BASE_URL = 'https://nightly.link/tsukumijima/KonomiTV/workflows/build_thirdparty.yaml/master/'
+        THIRDPARTY_BASE_URL = 'https://nightly.link/Oomugi413/KonomiTV/workflows/build_thirdparty.yaml/master/'
     else:
-        THIRDPARTY_BASE_URL = f'https://github.com/tsukumijima/KonomiTV/releases/download/v{download_version}/'
+        THIRDPARTY_BASE_URL = f'https://github.com/Oomugi413/KonomiTV/releases/download/v{download_version}/'
 
     # ***** 以下はアップデーターのサードパーティーライブラリの更新処理をベースに実装したもの *****
 
