@@ -497,7 +497,7 @@ def Installer(version: str) -> None:
         revision = 'master' if version == 'latest' else f'v{version}'
         result = RunSubprocess(
             'KonomiTV のソースコードを Git でダウンロードしています…',
-            ['git', 'clone', '-b', f'v{version}', 'https://github.com/Oomugi413/KonomiTV.git', install_path.name],
+            ['git', 'clone', '-b', revision', 'https://github.com/Oomugi413/KonomiTV.git', install_path.name],
             cwd = install_path.parent,
             error_message = 'KonomiTV のソースコードのダウンロード中に予期しないエラーが発生しました。',
             error_log_name = 'Git のエラーログ',
