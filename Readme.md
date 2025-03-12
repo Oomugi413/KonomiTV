@@ -1,3 +1,5 @@
+QSV専用ffmpeg, bs4k視聴対応fork. 素人のあがきなので汚コード注意、動作保証なし
+
 
 # <img width="350" src="https://user-images.githubusercontent.com/39271166/134050201-8110f076-a939-4b62-8c86-7beaa3d4728c.png" alt="KonomiTV">　<!-- omit in toc -->
 
@@ -134,7 +136,7 @@
 
 > [!IMPORTANT]
 > **KonomiTV サーバー本体は Windows と Linux の両方で動作するように設計されていますが、メディア配信サーバーとして動作するために、多くの外部ソフトウェアを必要とします。**  
-> 実行環境である CPython や、FFmpeg / QSVEncC などの動画エンコードやストリーミングに必要なツール類は、すべて [KonomiTV のサードパーティーライブラリ](https://github.com/tsukumijima/KonomiTV/blob/master/.github/workflows/build_thirdparty.yaml) に同梱されており、OS に依存せず単独で動作するよう細かく調整されています。  
+> 実行環境である CPython や、FFmpeg / QSVEncC などの動画エンコードやストリーミングに必要なツール類は、すべて [KonomiTV のサードパーティーライブラリ](https://github.com/Oomugi413/KonomiTV/blob/master/.github/workflows/build_thirdparty.yaml) に同梱されており、OS に依存せず単独で動作するよう細かく調整されています。  
 > そのため、通常は Linux 環境であっても追加のパッケージインストールは必要ありませんが、検証できていない新しい OS ではうまく動作しない可能性もあります。
 
 ### クライアント
@@ -299,7 +301,7 @@ sudo apt update && sudo apt install -y intel-media-va-driver-non-free intel-open
 
 > [!NOTE]  
 > **Docker でインストールする際は、ホストマシンに Intel Media Driver をインストールしなくても動作します。**  
-> [KonomiTV の Docker イメージ](https://github.com/tsukumijima/KonomiTV/blob/master/Dockerfile) には Intel Media Driver が標準でインストールされているほか、Intel Graphics 自体のドライバは Linux カーネルに取り込まれているためです。
+> [KonomiTV の Docker イメージ](https://github.com/Oomugi413/KonomiTV/blob/master/Dockerfile) には Intel Media Driver が標準でインストールされているほか、Intel Graphics 自体のドライバは Linux カーネルに取り込まれているためです。
 
 > [!NOTE]  
 > 以前 Alder Lake (第12世代) 以降の Intel CPU で必要だった `libmfx-gen1.2` は、[QSVEncC 7.38](https://github.com/rigaya/QSVEnc/releases/tag/7.38) 以降で `libmfxgen1` に置き換えられました。  
@@ -437,12 +439,12 @@ KonomiTV を共有したい家族や親戚に Tailscale アカウントを作成
 [動作環境](#動作環境) に記載のとおり、Windows 10 以降の 64bit OS にのみ対応しています。  
 Windows 8.1 以下と、32bit OS には対応していません。
 
-**[Releases](https://github.com/tsukumijima/KonomiTV/releases) ページから、最新の KonomiTV のインストーラーをダウンロードします。**  
+**[Releases](https://github.com/Oomugi413/KonomiTV/releases) ページから、最新の KonomiTV のインストーラーをダウンロードします。**  
 Assets の下にある `KonomiTV-Installer.exe` をダウンロードしてください。
 
 > [!NOTE]  
 > **`KonomiTV-Installer.exe` がウイルス対策ソフトにウイルスと扱われてしまうことがありますが、誤検知です。一般に Python 製ソフトを exe 化すると問答無用でウイルスだと扱われてしまうことが多く、頭を抱えています…。**  
-> 適宜お使いのウイルス対策ソフトで、`KonomiTV-Installer.exe` の実行を許可してください。KonomiTV のインストーラーのソースコードは [こちら](https://github.com/tsukumijima/KonomiTV/tree/master/installer) で公開しています。
+> 適宜お使いのウイルス対策ソフトで、`KonomiTV-Installer.exe` の実行を許可してください。KonomiTV のインストーラーのソースコードは [こちら](https://github.com/Oomugi413/KonomiTV/tree/master/installer) で公開しています。
 
 <img width="100%" src="https://user-images.githubusercontent.com/39271166/201462168-f898fe8f-ac1f-4942-908f-de6263389a97.png"><br>
 
@@ -531,9 +533,12 @@ Docker Compose は V1 と V2 の両方に対応していますが、できれば
 <img width="100%" src="https://user-images.githubusercontent.com/39271166/201463450-96bb686e-c5bb-493d-b907-57b5f51ac986.png"><br>
 
 ```bash
-curl -LO https://github.com/tsukumijima/KonomiTV/releases/download/v0.12.0/KonomiTV-Installer.elf
+curl -LO https://github.com/Oomugi413/KonomiTV/releases/download/v0.12.0/KonomiTV-Installer.elf
 chmod a+x KonomiTV-Installer.elf
 ./KonomiTV-Installer.elf
+cd ~/git/KonomiTV/server/thirdparty/FFmpeg
+sudo cp /usr/local/bin/ffmpeg ffmpeg.elf
+sudo cp /usr/local/bin/ffprobe ffprobe.elf
 ```
 
 以上のコマンドを実行して `KonomiTV-Installer.elf` を実行し、インストーラーの通りに進めてください。  
@@ -912,9 +917,9 @@ VS Code を開発に利用しています。
 # Windows は PowerShell 7 で、Ubuntu は bash での実行を想定
 
 # リポジトリの clone
-## /Develop の部分は適宜変更すること
-cd /Develop
-git clone https://github.com/tsukumijima/KonomiTV.git
+## ~/git の部分は適宜変更すること
+cd ~/git
+git clone https://github.com/Oomugi413/KonomiTV.git
 
 # 設定ファイルのコピーと編集
 ## config.yaml は適切に構成されている必要がある (さもなければサーバーが起動しない)
@@ -922,8 +927,8 @@ cd KonomiTV/
 # Windows
 Copy-Item -Force config.example.yaml config.yaml
 # Linux:
-cp -a config.example.yaml config.yaml
-nano config.yaml
+# cp -a config.example.yaml config.yaml
+# nano config.yaml
 
 # 一時的な Poetry 仮想環境の構築 (UpdateThirdparty の実行に必要)
 cd server/
@@ -937,13 +942,16 @@ poetry run task update-thirdparty
 # サードパーティーライブラリ内のスタンドアローン版 Python を明示的に指定して Poetry 仮想環境を再構築
 # Windows:
 Remove-Item -Recurse -Force .venv/
-poetry env use /Develop/KonomiTV/server/thirdparty/Python/python.exe
+poetry env use ~/git/KonomiTV/server/thirdparty/Python/python.exe
 # Linux
 rm -rf .venv/
-poetry env use /Develop/KonomiTV/server/thirdparty/Python/bin/python
+poetry env use ~/git/KonomiTV/server/thirdparty/Python/bin/python
 
 # 依存パッケージのインストール
 poetry install --no-root
+cd ~/git/KonomiTV/server/thirdparty/FFmpeg
+sudo cp /usr/local/bin/ffmpeg ffmpeg.elf
+sudo cp /usr/local/bin/ffprobe ffprobe.elf
 ```
 
 ### サーバーの起動
@@ -958,7 +966,7 @@ Akebi HTTPS Server は、自己署名証明書なしでプライベートネッ�
 Uvicorn も Akebi HTTPS Server も KonomiTV.py の起動時に透過的に同時起動されるため、一般のユーザーが意識する必要はありません。
 
 ```bash
-cd /Develop/KonomiTV/server/
+cd ~/git/KonomiTV/server/
 
 # リロードモードで起動する
 poetry run task dev
@@ -1042,7 +1050,7 @@ poetry run python KonomiTV-Service.py uninstall
 事前に root 権限で PM2 がインストールされている必要があります。
 
 ```bash
-cd /Develop/KonomiTV/server/
+cd ~/git/KonomiTV/server/
 
 # PM2 サービスのインストール
 sudo pm2 start .venv/bin/python --name KonomiTV -- KonomiTV.py
@@ -1071,7 +1079,7 @@ sudo pm2 save
 Node.js 20.16.0 / yarn 1.x で開発しています。
 
 ```bash
-cd /Develop/KonomiTV/client/
+cd ~/git/KonomiTV/client/
 
 # 依存パッケージのインストール
 yarn install

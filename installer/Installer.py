@@ -168,7 +168,7 @@ def Installer(version: str) -> None:
     table_03.add_row('EDCB は、220122 以降のバージョンの xtne6f / tkntrec 版の EDCB にのみ対応しています。')
     table_03.add_row('「人柱版10.66」などの古いバージョンをお使いの場合は、EDCB のアップグレードが必要です。')
     table_03.add_row('KonomiTV と連携するには、さらに EDCB に事前の設定が必要になります。')
-    table_03.add_row('詳しくは [bright_blue]https://github.com/tsukumijima/KonomiTV[/bright_blue] をご覧ください。')
+    table_03.add_row('詳しくは [bright_blue]https://github.com/Oomugi413/KonomiTV[/bright_blue] をご覧ください。')
     table_03.add_row(CreateRule())
     table_03.add_row('Mirakurun は、3.9.0 以降のバージョンを推奨します。')
     table_03.add_row('3.8.0 以下のバージョンでも動作しますが、諸問題で推奨しません。')
@@ -497,7 +497,7 @@ def Installer(version: str) -> None:
         revision = 'master' if version == 'latest' else f'v{version}'
         result = RunSubprocess(
             'KonomiTV のソースコードを Git でダウンロードしています…',
-            ['git', 'clone', '-b', revision, 'https://github.com/tsukumijima/KonomiTV.git', install_path.name],
+            ['git', 'clone', '-b', f'v{version}', 'https://github.com/Oomugi413/KonomiTV.git', install_path.name],
             cwd = install_path.parent,
             error_message = 'KonomiTV のソースコードのダウンロード中に予期しないエラーが発生しました。',
             error_log_name = 'Git のエラーログ',
@@ -516,9 +516,9 @@ def Installer(version: str) -> None:
         # GitHub からソースコードをダウンロード
         ## latest の場合は master ブランチを、それ以外は指定されたバージョンのタグをダウンロード
         if version == 'latest':
-            source_code_response = requests.get('https://codeload.github.com/tsukumijima/KonomiTV/zip/refs/heads/master')
+            source_code_response = requests.get('https://codeload.github.com/Oomugi413/KonomiTV/zip/refs/heads/master')
         else:
-            source_code_response = requests.get(f'https://codeload.github.com/tsukumijima/KonomiTV/zip/refs/tags/v{version}')
+            source_code_response = requests.get(f'https://codeload.github.com/Oomugi413/KonomiTV/zip/refs/tags/v{version}')
         task_id = progress.add_task('', total=None)
 
         # ダウンロードしたデータを随時一時ファイルに書き込む
@@ -611,9 +611,9 @@ def Installer(version: str) -> None:
 
         # GitHub からサードパーティーライブラリをダウンロード
         if version == 'latest':
-            thirdparty_base_url = 'https://nightly.link/tsukumijima/KonomiTV/workflows/build_thirdparty.yaml/master/'
+            thirdparty_base_url = 'https://nightly.link/Oomugi413/KonomiTV/workflows/build_thirdparty.yaml/master/'
         else:
-            thirdparty_base_url = f'https://github.com/tsukumijima/KonomiTV/releases/download/v{version}/'
+            thirdparty_base_url = f'https://github.com/Oomugi413/KonomiTV/releases/download/v{version}/'
         thirdparty_compressed_file_name = 'thirdparty-windows.7z'
         if platform_type == 'Linux' and is_arm_device is False:
             thirdparty_compressed_file_name = 'thirdparty-linux.tar.xz'
