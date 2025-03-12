@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import sys
 from biim.mpeg2ts import ts
@@ -26,7 +27,8 @@ class VideoEncodingTask:
 
     # エンコード後のストリームの GOP 長 (秒)
     ## ライブではないため、GOP 長は H.264 / H.265 共通で長めに設定する
-    GOP_LENGTH_SECOND: ClassVar[float] = float(2.5)  # 2.5秒
+    ## TODO: 実際のセグメント長が GOP 長で割り切れない場合にどうするか考える (特に tsreplace された TS)
+    GOP_LENGTH_SECOND: ClassVar[float] = float(3)  # 3秒
 
     # エンコードタスクの最大リトライ回数
     ## この数を超えた場合はエンコードタスクを再起動しない（無限ループを避ける）
@@ -98,7 +100,7 @@ class VideoEncodingTask:
         analyzeduration = round(500000 + (self._retry_count * 250000))  # リトライ回数に応じて少し増やす
         if self.video_stream.recorded_program.recorded_video.video_codec != 'MPEG-2':
             # MPEG-2 以外のコーデックではは入力ストリームの解析時間を長めにする (その方がうまくいく)
-            analyzeduration += 250000
+            analyzeduration += 500000
 
         # 入力
         ## -analyzeduration をつけることで、ストリームの分析時間を短縮できる
@@ -110,9 +112,10 @@ class VideoEncodingTask:
 
         # フラグ
         ## 主に FFmpeg の起動を高速化するための設定
-        ## max_interleave_delta: mux 時に影響するオプションで、増やしすぎると CM で詰まりがちになる
-        ## リトライなしの場合は 500K (0.5秒) に設定し、リトライ回数に応じて 100K (0.1秒) ずつ増やす
-        max_interleave_delta = round(500 + (self._retry_count * 100))
+        ## max_interleave_delta: mux 時に影響するオプションで、ライブ再生では増やしすぎると CM で詰まりがちになる
+        ## 録画再生では逆に大きめでないと映像/音声のずれが大きくなりセグメント分割時に問題が生じるため、
+        ## 5000K (5秒) に設定し、リトライ回数に応じて 500K (0.5秒) ずつ増やす
+        max_interleave_delta = round(5000 + (self._retry_count * 500))
         options.append(f'-fflags nobuffer -flags low_delay -max_delay 0 -tune zerolatency -max_interleave_delta {max_interleave_delta}K -threads auto')
 
         # 映像
@@ -124,7 +127,7 @@ class VideoEncodingTask:
 
         ## ビットレートと品質
         options.append(f'-flags +cgop+global_header -vb {QUALITY[quality].video_bitrate} -maxrate {QUALITY[quality].video_bitrate_max}')
-        options.append('-preset veryfast -aspect 16:9')
+        options.append('-preset veryfast -aspect 16:9 -pix_fmt:v yuv420p')
         if QUALITY[quality].is_hevc is True:
             options.append('-profile:v main')
         else:
@@ -139,7 +142,7 @@ class VideoEncodingTask:
              self.video_stream.recorded_program.recorded_video.video_resolution_height == 1080):
             video_width = 1920
 
-        # インターレース映像のみ
+        ## インターレース映像のみ
         if self.video_stream.recorded_program.recorded_video.video_scan_type == 'Interlaced':
             ## インターレース解除 (60i → 60p (フレームレート: 60fps))
             if QUALITY[quality].is_60fps is True:
@@ -149,11 +152,12 @@ class VideoEncodingTask:
             else:
                 options.append(f'-vf yadif=mode=0:parity=-1:deint=1,scale={video_width}:{video_height}')
                 options.append(f'-r 30000/1001 -g {int(self.GOP_LENGTH_SECOND * 30)}')
-        # プログレッシブ映像
-        ## プログレッシブ映像の場合は 60fps 化する方法はないため、無視して 30fps でエンコードする
+        ## プログレッシブ映像
+        ## プログレッシブ映像の場合は 60fps 化する方法はないため、無視して入力ファイルと同じ fps でエンコードする
         elif self.video_stream.recorded_program.recorded_video.video_scan_type == 'Progressive':
+            int_fps = math.ceil(self.video_stream.recorded_program.recorded_video.video_frame_rate)  # 29.97 -> 30
             options.append(f'-vf scale={video_width}:{video_height}')
-            options.append(f'-r 30000/1001 -g {int(self.GOP_LENGTH_SECOND * 30)}')
+            options.append(f'-g {int(self.GOP_LENGTH_SECOND * int_fps)}')
 
         # 音声
         ## 音声が 5.1ch かどうかに関わらず、ステレオにダウンミックスする
@@ -199,8 +203,8 @@ class VideoEncodingTask:
         input_analyze = round(0.7 + (self._retry_count * 0.5), 1)  # リトライ回数に応じて少し増やす
         if self.video_stream.recorded_program.recorded_video.video_codec != 'MPEG-2':
             # MPEG-2 以外のコーデックではは入力ストリームの解析時間を長めにする (その方がうまくいく)
-            input_probesize += 500
-            input_analyze += 1.3
+            input_probesize += 1000
+            input_analyze += 4.3
 
         # 入力
         ## --input-probesize, --input-analyze をつけることで、ストリームの分析時間を短縮できる
@@ -220,11 +224,12 @@ class VideoEncodingTask:
 
         # フラグ
         ## 主に HWEncC の起動を高速化するための設定
-        ## max_interleave_delta: mux 時に影響するオプションで、増やしすぎると CM で詰まりがちになる
-        ## リトライなしの場合は 500K (0.5秒) に設定し、リトライ回数に応じて 100K (0.1秒) ずつ増やす
-        max_interleave_delta = round(500 + (self._retry_count * 100))
-        options.append('-m avioflags:direct -m fflags:nobuffer+flush_packets -m flush_packets:1 -m max_delay:250000')
-        options.append(f'-m max_interleave_delta:{max_interleave_delta}K --output-thread 0 --lowlatency')
+        ## max_interleave_delta: mux 時に影響するオプションで、ライブ再生では増やしすぎると CM で詰まりがちになる
+        ## 録画再生では逆に大きめでないと映像/音声のずれが大きくなりセグメント分割時に問題が生じるため、
+        ## 5000K (5秒) に設定し、リトライ回数に応じて 500K (0.5秒) ずつ増やす
+        max_interleave_delta = round(5000 + (self._retry_count * 500))
+        options.append('-m avioflags:direct -m fflags:nobuffer+flush_packets -m flush_packets:1 -m max_delay:0')
+        options.append(f'-m max_interleave_delta:{max_interleave_delta}K')
         ## QSVEncC と rkmppenc では OpenCL を使用しないので、無効化することで初期化フェーズを高速化する
         if encoder_type == 'QSVEncC' or encoder_type == 'rkmppenc':
             options.append('--disable-opencl')
@@ -260,6 +265,13 @@ class VideoEncodingTask:
         if encoder_type != 'VCEEncC':
             options.append('--repeat-headers')
 
+        ## GOP 長を固定
+        ## VCEEncC / rkmppenc では下記オプションは存在しない
+        if encoder_type == 'QSVEncC':
+            options.append('--strict-gop')
+        elif encoder_type == 'NVEncC':
+            options.append('--no-i-adapt')
+
         ## 品質
         if encoder_type == 'QSVEncC':
             options.append('--quality balanced')
@@ -275,13 +287,7 @@ class VideoEncodingTask:
             options.append('--profile high')
         options.append('--dar 16:9')
 
-        # GOP 長を固定にする
-        if encoder_type == 'QSVEncC':
-            options.append('--strict-gop')
-        elif encoder_type == 'NVEncC':
-            options.append('--no-i-adapt')
-
-        # インターレース映像のみ
+        ## インターレース映像のみ
         if self.video_stream.recorded_program.recorded_video.video_scan_type == 'Interlaced':
             # インターレース映像として読み込む
             options.append('--interlace tff')
@@ -309,10 +315,11 @@ class VideoEncodingTask:
                 elif encoder_type == 'rkmppenc':
                     options.append('--vpp-deinterlace normal_i5')
                 options.append(f'--avsync vfr --gop-len {int(self.GOP_LENGTH_SECOND * 30)}')
-        # プログレッシブ映像
-        ## プログレッシブ映像の場合は 60fps 化する方法はないため、無視して 30fps でエンコードする
+        ## プログレッシブ映像
+        ## プログレッシブ映像の場合は 60fps 化する方法はないため、無視して入力ファイルと同じ fps でエンコードする
         elif self.video_stream.recorded_program.recorded_video.video_scan_type == 'Progressive':
-            options.append(f'--avsync vfr --gop-len {int(self.GOP_LENGTH_SECOND * 30)}')
+            int_fps = math.ceil(self.video_stream.recorded_program.recorded_video.video_frame_rate)  # 29.97 -> 30
+            options.append(f'--avsync vfr --gop-len {int(self.GOP_LENGTH_SECOND * int_fps)}')
 
         ## 指定された品質の解像度が 1440×1080 (1080p) かつ入力ストリームがフル HD (1920×1080) の場合のみ、
         ## 特別に縦解像度を 1920 に変更してフル HD (1920×1080) でエンコードする
@@ -375,7 +382,7 @@ class VideoEncodingTask:
             # セグメント開始位置よりも後のキーフレームは採用せず、直前の DTS を記録
             if kf['offset'] > self._current_segment.start_file_position:
                 break
-            output_ts_offset = kf['dts'] / ts.HZ
+            output_ts_offset = kf['dts'] / ts.HZ  # 秒単位
 
         # 録画ファイルを開く
         file = open(self.video_stream.recorded_program.recorded_video.file_path, 'rb')
@@ -467,8 +474,7 @@ class VideoEncodingTask:
                         LIBRARY_PATH['FFmpeg'], *encoder_options,
                         stdin = tsreadex_read_pipe,  # tsreadex からの入力
                         stdout = asyncio.subprocess.PIPE,  # ストリーム出力
-                        # エンコーダーデバッグ時のみログをコンソールに出力
-                        stderr = None if CONFIG.general.debug_encoder is True else asyncio.subprocess.DEVNULL,
+                        stderr = asyncio.subprocess.PIPE,  # ストリーム出力
                     )
 
                 # HWEncC
@@ -482,8 +488,7 @@ class VideoEncodingTask:
                         LIBRARY_PATH[ENCODER_TYPE], *encoder_options,
                         stdin = tsreadex_read_pipe,  # tsreadex からの入力
                         stdout = asyncio.subprocess.PIPE,  # ストリーム出力
-                        # エンコーダーデバッグ時のみログをコンソールに出力
-                        stderr = None if CONFIG.general.debug_encoder is True else asyncio.subprocess.DEVNULL,
+                        stderr = asyncio.subprocess.PIPE,  # ストリーム出力
                     )
 
                 # エンコーダーの出力を読み取り、MPEG-TS パーサーでパースする
@@ -593,11 +598,12 @@ class VideoEncodingTask:
                     elif pid == self._video_pid:
                         self._video_parser.push(packet)
                         for video in self._video_parser:
-                            timestamp = cast(int, video.dts() or video.pts()) / ts.HZ
+                            current_timestamp = cast(int, video.dts() or video.pts()) / ts.HZ  # 秒単位
+                            next_segment_start_timestamp = (self._current_segment.start_dts / ts.HZ) + self._current_segment.duration_seconds  # 秒単位
 
-                            # セグメントの終了時刻を超えたら、現在のセグメントを確定して次のセグメントへ
-                            if self._current_segment is not None and \
-                                timestamp >= (self._current_segment.start_dts + self._current_segment.duration_seconds * ts.HZ) / ts.HZ:
+                            # 次のセグメントの開始時刻以上になったら、現在のセグメントを確定して次のセグメントへ
+                            # TODO: 現在の映像 PES がキーフレームかどうかを厳密にチェックしてから、当該 PES 以前まででセグメントを確定するようにする
+                            if self._current_segment is not None and current_timestamp >= next_segment_start_timestamp:
                                 # Future がまだ未完了の場合にのみ結果を設定する
                                 if not self._current_segment.encoded_segment_ts_future.done():
                                     self._current_segment.encoded_segment_ts_future.set_result(bytes(encoded_segment))
@@ -612,6 +618,8 @@ class VideoEncodingTask:
                                     logging.info(f'{self.video_stream.log_prefix} Reached the final segment.')
                                     break
 
+                                # 新しいセグメント用のデータと状態を初期化
+                                ## ここで encoded_segment は空にリセットされる
                                 logging.info(f'{self.video_stream.log_prefix}[Segment {current_sequence}] Encoding...')
                                 self._current_segment = self.video_stream.segments[current_sequence]
                                 self._current_segment.encode_status = 'Encoding'
@@ -657,7 +665,6 @@ class VideoEncodingTask:
                             await asyncio.wait_for(self._encoder_process.wait(), timeout=5.0)  # プロセスの終了を待機
                     except (Exception, asyncio.TimeoutError) as ex:
                         logging.error(f'{self.video_stream.log_prefix} Failed to terminate encoder process:', exc_info=ex)
-                    self._encoder_process = None
 
                 # tsreadex プロセスを終了
                 if self._tsreadex_process is not None:
@@ -667,24 +674,53 @@ class VideoEncodingTask:
                             await asyncio.wait_for(self._tsreadex_process.wait(), timeout=5.0)  # プロセスの終了を待機
                     except (Exception, asyncio.TimeoutError) as ex:
                         logging.error(f'{self.video_stream.log_prefix} Failed to terminate tsreadex process:', exc_info=ex)
-                    self._tsreadex_process = None
 
-                # video_pid と audio_pid が取得できていない場合は、エンコーダーの起動をリトライする
+                # この時点で video_pid と audio_pid が取得できていない場合、正常にエンコード済み TS が出力されていないと考えられるため、
+                # エンコーダー起動をリトライする
                 if self._video_pid is None or self._audio_pid is None:
                     self._retry_count += 1
                     if self._retry_count < self.MAX_RETRY_COUNT:
                         logging.warning(f'{self.video_stream.log_prefix} Failed to get video/audio PID. Retrying... ({self._retry_count}/{self.MAX_RETRY_COUNT})')
+                        # エンコーダーのデバッグログが有効な場合のみ、全てのログを出力
+                        if CONFIG.general.debug_encoder is True:
+                            logging.debug_simple(f'{self.video_stream.log_prefix} Encoder stderr:')
+                            assert self._encoder_process.stderr is not None
+                            while True:
+                                try:
+                                    line = await self._encoder_process.stderr.readline()
+                                    if not line:  # EOF
+                                        break
+                                    logging.debug_simple(f'{self.video_stream.log_prefix} [{ENCODER_TYPE}] {line.decode("utf-8").strip()}')
+                                except Exception:
+                                    pass
+                        self._encoder_process = None
+                        self._tsreadex_process = None
                         continue
                     else:
                         logging.error(f'{self.video_stream.log_prefix} Failed to get video/audio PID after {self.MAX_RETRY_COUNT} retries.')
                         break
 
-                # video_pid と audio_pid が取得できている場合は、ループを抜ける
+                # 正常に最終セグメントまでエンコードできたか途中でキャンセルされたと考えられるため、リトライループを抜ける
                 break
 
         finally:
             # ファイルを閉じる
             file.close()
+
+            # エンコーダーのデバッグログが有効 or リトライ失敗時のみ、全てのログを出力
+            if CONFIG.general.debug_encoder is True or self._retry_count >= self.MAX_RETRY_COUNT:
+                logging.debug_simple(f'{self.video_stream.log_prefix} Encoder stderr:')
+                assert self._encoder_process is not None and self._encoder_process.stderr is not None
+                while True:
+                    try:
+                        line = await self._encoder_process.stderr.readline()
+                        if not line:  # EOF
+                            break
+                        logging.debug_simple(f'{self.video_stream.log_prefix} [{ENCODER_TYPE}] {line.decode("utf-8").strip()}')
+                    except Exception:
+                        pass
+            self._encoder_process = None
+            self._tsreadex_process = None
 
             # このエンコードタスクがキャンセルされている場合は何もしない
             if self._is_cancelled is True:
@@ -725,7 +761,6 @@ class VideoEncodingTask:
                         self._tsreadex_process.kill()
                 except Exception as ex:
                     logging.error(f'{self.video_stream.log_prefix} Failed to terminate tsreadex process:', exc_info=ex)
-                self._tsreadex_process = None
 
             # エンコーダープロセスを強制終了する
             if self._encoder_process is not None:
@@ -734,4 +769,8 @@ class VideoEncodingTask:
                         self._encoder_process.kill()
                 except Exception as ex:
                     logging.error(f'{self.video_stream.log_prefix} Failed to terminate encoder process:', exc_info=ex)
-                self._encoder_process = None
+
+            # 少し待ってから完全に破棄
+            await asyncio.sleep(0.1)
+            self._tsreadex_process = None
+            self._encoder_process = None
