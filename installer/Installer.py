@@ -168,7 +168,7 @@ def Installer(version: str) -> None:
     table_03.add_row('EDCB は、220122 以降のバージョンの xtne6f / tkntrec 版の EDCB にのみ対応しています。')
     table_03.add_row('「人柱版10.66」などの古いバージョンをお使いの場合は、EDCB のアップグレードが必要です。')
     table_03.add_row('KonomiTV と連携するには、さらに EDCB に事前の設定が必要になります。')
-    table_03.add_row('詳しくは [bright_blue]https://github.com/Oomugi413/KonomiTV[/bright_blue] をご覧ください。')
+    table_03.add_row('詳しくは [bright_blue]https://github.com/tsukumijima/KonomiTV[/bright_blue] をご覧ください。')
     table_03.add_row(CreateRule())
     table_03.add_row('Mirakurun は、3.9.0 以降のバージョンを推奨します。')
     table_03.add_row('3.8.0 以下のバージョンでも動作しますが、諸問題で推奨しません。')
@@ -497,7 +497,7 @@ def Installer(version: str) -> None:
         revision = 'master' if version == 'latest' else f'v{version}'
         result = RunSubprocess(
             'KonomiTV のソースコードを Git でダウンロードしています…',
-            ['git', 'clone', '-b', revision', 'https://github.com/Oomugi413/KonomiTV.git', install_path.name],
+            ['git', 'clone', '-b', revision, 'https://github.com/Oomugi413/KonomiTV.git', install_path.name],
             cwd = install_path.parent,
             error_message = 'KonomiTV のソースコードのダウンロード中に予期しないエラーが発生しました。',
             error_log_name = 'Git のエラーログ',
