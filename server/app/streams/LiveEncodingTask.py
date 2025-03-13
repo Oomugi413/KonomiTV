@@ -103,10 +103,30 @@ class LiveEncodingTask:
 
         return False
 
+    def isSDRHDRChannel(self, network_id: int, service_id: int) -> bool:
+        """
+        ネットワーク ID とサービス ID から、そのチャンネルで強制HDRコンバートが行われているかを返す
+        放送波の PSI/SI から映像の横解像度を取得する手段がないので、現状 ID 決め打ちになっている
+
+        Args:
+            network_id (int): ネットワーク ID
+            service_id (int): サービス ID
+
+        Returns:
+            bool: フル HD 放送が行われているチャンネルかどうか
+        """
+
+        # BS4K で強制HDRコンバートを行っているチャンネルのサービス ID と一致する
+        if network_id == 0x000B and service_id in [141, 151, 161, 171, 181, 211, 221]:
+            return True
+
+        return False
+
     def buildFFmpegOptions(self,
         quality: QUALITY_TYPES,
         channel_type: Literal['GR', 'BS', 'CS', 'CATV', 'SKY', 'BS4K'],
         is_fullhd_channel: bool,
+        is_SDRHDR_channel: bool,
     ) -> list[str]:
         """
         FFmpeg に渡すオプションを組み立てる
@@ -178,7 +198,17 @@ class LiveEncodingTask:
             gop_length_second = self.GOP_LENGTH_SECONDS_H265
 
         ## BS4K は 60p (プログレッシブ) で放送されているので、インターレース解除を行わず 60fps でエンコードする
-        if channel_type == "BS4K":
+        if channel_type == "BS4K" and is_SDRHDR_channel is True:
+            ## インターレース解除 (60i → 60p (フレームレート: 60fps))
+            if QUALITY[quality].is_60fps is True:
+                options.append(f'-vf "hwupload,libplacebo=format=gbrpf32le:color_trc=linear:tonemapping=4:gamut_mode=2:extra_opts=knee_offset=0.5,libplacebo=colorspace=bt709:color_primaries=bt709:color_trc=bt709:w={video_width}:h={video_height}:format=nv12"')
+                #options.append(f'-r 60000/1001 -g {int(gop_length_second * 60)}')
+            ## インターレース解除 (60i → 30p (フレームレート: 30fps))
+            else:
+                options.append(f'-vf "hwupload,libplacebo=format=gbrpf32le:color_trc=linear:tonemapping=4:gamut_mode=2:extra_opts=knee_offset=0.5,libplacebo=colorspace=bt709:color_primaries=bt709:color_trc=bt709:w={video_width}:h={video_height}:fps=30000/1001:format=nv12"')
+                #options.append(f'-r 30000/1001 -g {int(gop_length_second * 30)}')
+        ## BS4K は 60p (プログレッシブ) で放送されているので、インターレース解除を行わず 60fps でエンコードする
+        elif channel_type == "BS4K":
             ## インターレース解除 (60i → 60p (フレームレート: 60fps))
             if QUALITY[quality].is_60fps is True:
                 options.append(f'-vf vpp_qsv=deinterlace=0:w={video_width}:h={video_height}:framerate=60000/1001:format=nv12')
@@ -292,7 +322,7 @@ class LiveEncodingTask:
         # 入力
         ## --input-probesize, --input-analyze をつけることで、ストリームの分析時間を短縮できる
         ## 両方つけるのが重要で、--input-analyze だけだとエンコーダーがフリーズすることがある
-        if channel_type == 'BS4K'
+        if channel_type == 'BS4K':
             options.append(f'--input-format mmttlv --input-probesize {input_probesize}K --input-analyze {input_analyze} --input -')
         else:
             options.append(f'--input-format mpegts --fps 30000/1001 --input-probesize {input_probesize}K --input-analyze {input_analyze} --input -')
