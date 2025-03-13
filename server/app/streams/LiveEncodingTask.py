@@ -187,7 +187,7 @@ class LiveEncodingTask:
         ## 特別に縦解像度を 1920 に変更してフル HD (1920×1080) でエンコードする
         video_width = QUALITY[quality].width
         video_height = QUALITY[quality].height
-        if video_width == 1440 and video_height == 1080 and _channel is True:
+        if video_width == 1440 and video_height == 1080 and is_fullhd_channel is True:
             video_width = 1920
 
         ## 最大 GOP 長 (秒)
@@ -201,11 +201,11 @@ class LiveEncodingTask:
         if channel_type == "BS4K" and is_SDRHDR_channel is True:
             ## インターレース解除 (60i → 60p (フレームレート: 60fps))
             if QUALITY[quality].is_60fps is True:
-                options.append(f'-vf "hwupload,libplacebo=format=gbrpf32le:color_trc=linear:tonemapping=4:gamut_mode=2:extra_opts=knee_offset=0.5,libplacebo=colorspace=bt709:color_primaries=bt709:color_trc=bt709:w={video_width}:h={video_height}:format=nv12"')
+                options.append(f'-vf vpp_qsv=deinterlace=0:w={video_width}:h={video_height}:framerate=60000/1001:format=nv12')
                 #options.append(f'-r 60000/1001 -g {int(gop_length_second * 60)}')
             ## インターレース解除 (60i → 30p (フレームレート: 30fps))
             else:
-                options.append(f'-vf "hwupload,libplacebo=format=gbrpf32le:color_trc=linear:tonemapping=4:gamut_mode=2:extra_opts=knee_offset=0.5,libplacebo=colorspace=bt709:color_primaries=bt709:color_trc=bt709:w={video_width}:h={video_height}:fps=30000/1001:format=nv12"')
+                options.append(f'-vf vpp_qsv=deinterlace=0:w={video_width}:h={video_height}:framerate=30000/1001:format=nv12')
                 #options.append(f'-r 30000/1001 -g {int(gop_length_second * 30)}')
         ## BS4K は 60p (プログレッシブ) で放送されているので、インターレース解除を行わず 60fps でエンコードする
         elif channel_type == "BS4K":
@@ -480,9 +480,7 @@ class LiveEncodingTask:
         # Mirakurun / mirakc は通常チャンネルタイプが GR, BS, CS, SKY しかないので、
         # フォールバックとして BS4K を BS に、CATV を CS に変換する
         fallback_channel_type = channel_type
-        if channel_type == 'BS4K':
-            fallback_channel_type = 'BS'
-        elif channel_type == 'CATV':
+        if channel_type == 'CATV':
             fallback_channel_type = 'CS'
 
         mirakurun_or_mirakc = 'Mirakurun'
