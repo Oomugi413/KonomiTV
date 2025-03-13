@@ -187,7 +187,7 @@ class LiveEncodingTask:
         ## 特別に縦解像度を 1920 に変更してフル HD (1920×1080) でエンコードする
         video_width = QUALITY[quality].width
         video_height = QUALITY[quality].height
-        if video_width == 1440 and video_height == 1080 and is_fullhd_channel is True:
+        if video_width == 1440 and video_height == 1080 and _channel is True:
             video_width = 1920
 
         ## 最大 GOP 長 (秒)
@@ -293,6 +293,7 @@ class LiveEncodingTask:
         encoder_type: Literal['QSVEncC', 'NVEncC', 'VCEEncC', 'rkmppenc'],
         channel_type: Literal['GR', 'BS', 'CS', 'CATV', 'SKY', 'BS4K'],
         is_fullhd_channel: bool,
+        is_SDRHDR_channel: bool,
     ) -> list[str]:
         """
         QSVEncC・NVEncC・VCEEncC・rkmppenc (便宜上 HWEncC と総称) に渡すオプションを組み立てる
@@ -632,7 +633,10 @@ class LiveEncodingTask:
 
         # フル HD 放送が行われているチャンネルかを取得
         is_fullhd_channel = self.isFullHDChannel(channel.network_id, channel.service_id)
-
+        
+        # 強制HDR変換が行われているチャンネルかを取得
+        is_SDRHDR_channel = self.isSDRHDRChannel(channel.network_id, channel.service_id)
+        
         ## ラジオチャンネルでは HW エンコードの意味がないため、FFmpeg に固定する
         if channel.is_radiochannel is True:
             ENCODER_TYPE = 'FFmpeg'
@@ -645,7 +649,7 @@ class LiveEncodingTask:
             if channel.is_radiochannel is True:
                 encoder_options = self.buildFFmpegOptionsForRadio()
             else:
-                encoder_options = self.buildFFmpegOptions(self.live_stream.quality, channel.type, is_fullhd_channel)
+                encoder_options = self.buildFFmpegOptions(self.live_stream.quality, channel.type, is_fullhd_channel, is_SDRHDR_channel)
             logging.info(f'[Live: {self.live_stream.live_stream_id}] FFmpeg Commands:\nffmpeg {" ".join(encoder_options)}')
 
             # エンコーダープロセスを非同期で作成・実行
@@ -668,7 +672,7 @@ class LiveEncodingTask:
         else:
 
             # オプションを取得
-            encoder_options = self.buildHWEncCOptions(self.live_stream.quality, ENCODER_TYPE, channel.type, is_fullhd_channel)
+            encoder_options = self.buildHWEncCOptions(self.live_stream.quality, ENCODER_TYPE, channel.type, is_fullhd_channel, is_SDRHDR_channel)
             logging.info(f'[Live: {self.live_stream.live_stream_id}] {ENCODER_TYPE} Commands:\n{ENCODER_TYPE} {" ".join(encoder_options)}')
 
             # エンコーダープロセスを非同期で作成・実行
