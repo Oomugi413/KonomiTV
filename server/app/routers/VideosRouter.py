@@ -1,23 +1,25 @@
 
-import anyio
 import json
 import pathlib
 from email.utils import parsedate
-from fastapi import APIRouter
-from fastapi import Depends
-from fastapi import HTTPException
-from fastapi import Path
-from fastapi import Query
-from fastapi import Request
-from fastapi import Response
-from fastapi import status
+from typing import Annotated, Any, Literal
+
+import anyio
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Path,
+    Query,
+    Request,
+    Response,
+    status,
+)
 from fastapi.responses import FileResponse
 from starlette.datastructures import Headers
 from tortoise import connections
-from typing import Annotated, Any, Literal, Union
 
-from app import logging
-from app import schemas
+from app import logging, schemas
 from app.constants import STATIC_DIR, THUMBNAILS_DIR
 from app.metadata.RecordedScanTask import RecordedScanTask
 from app.metadata.ThumbnailGenerator import ThumbnailGenerator
@@ -156,7 +158,7 @@ async def GetThumbnailResponse(
     request: Request,
     recorded_program: RecordedProgram,
     return_tiled: bool = False,
-) -> Union[FileResponse, Response]:
+) -> FileResponse | Response:
     """
     サムネイル画像のレスポンスを生成する共通処理
     ETags と Last-Modified を使ったキャッシュ制御を行う
@@ -596,12 +598,12 @@ async def VideosSearchAPI(
     params.extend([str(PAGE_SIZE), str((page - 1) * PAGE_SIZE)])
 
     # 総数を取得するクエリを構築
-    total_query = """
+    total_query = f"""
         SELECT COUNT(*) as count
         FROM recorded_programs rp
         LEFT JOIN channels ch ON rp.channel_id = ch.id
         WHERE {where_clause}
-    """.format(where_clause=where_clause)
+    """
     total_params = params[:-2]  # LIMIT と OFFSET を除外
 
     try:
@@ -849,6 +851,13 @@ async def VideoDeleteAPI(
         # 1. データベースから録画番組情報・録画ファイル情報を削除
         # RecordedVideo も CASCADE 制約で削除される
         try:
+            # 同じ file_hash を持つ他のレコードが存在するかチェック
+            duplicate_records = await RecordedProgram.filter(
+                recorded_video__file_hash=file_hash,
+            ).exclude(id=recorded_program.id).count()
+            has_duplicates = duplicate_records > 0
+
+            # データベースから録画番組情報を削除
             await recorded_program.delete()
         except Exception as ex:
             logging.error('[VideoDeleteAPI] Failed to delete recorded program from database:', exc_info=ex)
@@ -858,8 +867,9 @@ async def VideoDeleteAPI(
             )
 
         # 2. サムネイルファイルの削除
+        # 同じ file_hash を持つ他のレコードが存在する場合はスキップ
         thumbnails_dir = anyio.Path(str(THUMBNAILS_DIR))
-        if await thumbnails_dir.is_dir():
+        if await thumbnails_dir.is_dir() and not has_duplicates:
             # 通常サムネイル (.webp または .jpg)
             for ext in ['.webp', '.jpg']:
                 thumbnail_path = thumbnails_dir / f'{file_hash}{ext}'
@@ -889,6 +899,8 @@ async def VideoDeleteAPI(
                         )
                 elif ext == '.webp':  # JPEG はよほど長尺でない限り発生しないので WebP のみチェック
                     logging.warning(f'[VideoDeleteAPI] Tile thumbnail file does not exist: {tile_thumbnail_path}')
+        elif has_duplicates:
+            logging.info(f'[VideoDeleteAPI] Skip deleting thumbnail files because other records with the same file_hash exist: {file_hash}')
 
         # 3. 関連する補助ファイルの削除 (.ts.program.txt, .ts.err)
         ## .ts.program.txt ファイル (録画ファイルが hoge.ts の場合は hoge.ts.program.txt)

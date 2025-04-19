@@ -7,17 +7,19 @@ import asyncio
 import math
 import os
 import sys
+from typing import TYPE_CHECKING, ClassVar, Literal, cast
+
 from biim.mpeg2ts import ts
-from biim.mpeg2ts.parser import SectionParser, PESParser
+from biim.mpeg2ts.packetize import packetize_pes, packetize_section
+from biim.mpeg2ts.parser import PESParser, SectionParser
 from biim.mpeg2ts.pat import PATSection
-from biim.mpeg2ts.pmt import PMTSection
 from biim.mpeg2ts.pes import PES
-from biim.mpeg2ts.packetize import packetize_section, packetize_pes
-from typing import cast, ClassVar, Literal, TYPE_CHECKING
+from biim.mpeg2ts.pmt import PMTSection
 
 from app import logging
 from app.config import Config
 from app.constants import LIBRARY_PATH, QUALITY, QUALITY_TYPES
+
 
 if TYPE_CHECKING:
     from app.streams.VideoStream import VideoStream, VideoStreamSegment
@@ -233,9 +235,9 @@ class VideoEncodingTask:
         ## QSVEncC と rkmppenc では OpenCL を使用しないので、無効化することで初期化フェーズを高速化する
         if encoder_type == 'QSVEncC' or encoder_type == 'rkmppenc':
             options.append('--disable-opencl')
-        ## NVEncC では NVML によるモニタリングと DX11 を無効化することで初期化フェーズを高速化する
+        ## NVEncC では NVML によるモニタリングと DX11, Vulkan を無効化することで初期化フェーズを高速化する
         if encoder_type == 'NVEncC':
-            options.append('--disable-nvml 1 --disable-dx11')
+            options.append('--disable-nvml 1 --disable-dx11 --disable-vulkan')
 
         # 映像
         ## コーデック
@@ -306,12 +308,12 @@ class VideoEncodingTask:
             ## インターレース解除 (60i → 30p (フレームレート: 30fps))
             ## NVEncC の --vpp-deinterlace normal は GPU 機種次第では稀に解除漏れのジャギーが入るらしいので、代わりに --vpp-afs を使う
             ## NVIDIA GPU は当然ながら Intel の内蔵 GPU よりも性能が高いので、GPU フィルタを使ってもパフォーマンスに問題はないと判断
-            ## VCEEncC では --vpp-deinterlace 自体が使えないので、代わりに --vpp-afs を使う
+            ## VCEEncC では --vpp-deinterlace 自体が使えないので、代わりに --vpp-afs を使う (ただし、 timestamp を変えないよう coeff_shift=0 を指定する)
             else:
                 if encoder_type == 'QSVEncC':
                     options.append('--vpp-deinterlace normal')
                 elif encoder_type == 'NVEncC' or encoder_type == 'VCEEncC':
-                    options.append('--vpp-afs preset=default')
+                    options.append('--vpp-afs preset=default,coeff_shift=0')
                 elif encoder_type == 'rkmppenc':
                     options.append('--vpp-deinterlace normal_i5')
                 options.append(f'--avsync vfr --gop-len {int(self.GOP_LENGTH_SECOND * 30)}')
@@ -337,6 +339,8 @@ class VideoEncodingTask:
 
         # 出力 TS のタイムスタンプオフセット
         options.append(f'-m output_ts_offset:{output_ts_offset}')
+        # dts 合わせにするため、B フレームによる pts-dts ずれ量を補正する
+        options.append('--offset-video-dts-advance')
 
         # 出力
         options.append('--output-format mpegts')  # MPEG-TS 出力ということを明示
@@ -598,8 +602,8 @@ class VideoEncodingTask:
                     elif pid == self._video_pid:
                         self._video_parser.push(packet)
                         for video in self._video_parser:
-                            current_timestamp = cast(int, video.dts() or video.pts()) / ts.HZ  # 秒単位
-                            next_segment_start_timestamp = (self._current_segment.start_dts / ts.HZ) + self._current_segment.duration_seconds  # 秒単位
+                            current_timestamp = cast(int, video.dts() or video.pts())
+                            next_segment_start_timestamp = self._current_segment.start_dts + int(self._current_segment.duration_seconds * ts.HZ + 0.5)
 
                             # 次のセグメントの開始時刻以上になったら、現在のセグメントを確定して次のセグメントへ
                             # TODO: 現在の映像 PES がキーフレームかどうかを厳密にチェックしてから、当該 PES 以前まででセグメントを確定するようにする
@@ -663,7 +667,7 @@ class VideoEncodingTask:
                         if self._encoder_process.returncode is None:
                             self._encoder_process.kill()
                             await asyncio.wait_for(self._encoder_process.wait(), timeout=5.0)  # プロセスの終了を待機
-                    except (Exception, asyncio.TimeoutError) as ex:
+                    except (TimeoutError, Exception) as ex:
                         logging.error(f'{self.video_stream.log_prefix} Failed to terminate encoder process:', exc_info=ex)
 
                 # tsreadex プロセスを終了
@@ -672,7 +676,7 @@ class VideoEncodingTask:
                         if self._tsreadex_process.returncode is None:
                             self._tsreadex_process.kill()
                             await asyncio.wait_for(self._tsreadex_process.wait(), timeout=5.0)  # プロセスの終了を待機
-                    except (Exception, asyncio.TimeoutError) as ex:
+                    except (TimeoutError, Exception) as ex:
                         logging.error(f'{self.video_stream.log_prefix} Failed to terminate tsreadex process:', exc_info=ex)
 
                 # この時点で video_pid と audio_pid が取得できていない場合、正常にエンコード済み TS が出力されていないと考えられるため、
