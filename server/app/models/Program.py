@@ -401,7 +401,7 @@ class Program(TortoiseModel):
 
                         ## 副音声（存在する場合）
                         if len(program_info['audios']) == 2:
-                            program.secondary_audio_type = ariblib.constants.COMPONENT_TYPE[0x02].get(program_info['audios'][1]['componentType'], 'Unknown')
+                            #program.secondary_audio_type = ariblib.constants.COMPONENT_TYPE[0x02].get(program_info['audios'][1]['componentType'], 'Unknown')
                             program.secondary_audio_language = TSInformation.getISO639LanguageCodeName(program_info['audios'][1]['langs'][0])
                             program.secondary_audio_sampling_rate = str(int(program_info['audios'][1]['samplingRate'] / 1000)) + 'kHz'  # kHz に変換
                             ## デュアルモノのみ

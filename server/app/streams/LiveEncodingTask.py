@@ -53,10 +53,10 @@ class LiveEncodingTask:
     MAX_RETRY_COUNT: ClassVar[int] = 10  # 10回まで
 
     # チューナーから放送波 TS を読み取る際のタイムアウト (秒)
-    TUNER_TS_READ_TIMEOUT: ClassVar[int] = 15
+    TUNER_TS_READ_TIMEOUT: ClassVar[int] = 30
 
     # エンコーダーの出力を読み取る際のタイムアウト (Standby 時) (秒)
-    ENCODER_TS_READ_TIMEOUT_STANDBY: ClassVar[int] = 20
+    ENCODER_TS_READ_TIMEOUT_STANDBY: ClassVar[int] = 30
 
     # エンコーダーの出力を読み取る際のタイムアウト (ONAir 時) (秒)
     # VCEEncC 利用時のみ起動時に OpenCL シェーダーがコンパイルされる関係で起動が遅いため、10 秒に設定
@@ -113,11 +113,30 @@ class LiveEncodingTask:
 
         return False
 
+    def isSDRHDRChannel(self, network_id: int, service_id: int) -> bool:
+        """
+        ネットワーク ID とサービス ID から、そのチャンネルで強制HDRコンバートが行われているかを返す
+        放送波の PSI/SI から映像の横解像度を取得する手段がないので、現状 ID 決め打ちになっている
+
+        Args:
+            network_id (int): ネットワーク ID
+            service_id (int): サービス ID
+
+        Returns:
+            bool: フル HD 放送が行われているチャンネルかどうか
+        """
+
+        # BS4K で強制HDRコンバートを行っているチャンネルのサービス ID と一致する
+        if network_id == 0x000B and service_id in [141, 151, 161, 171, 181, 211, 221]:
+            return True
+
+        return False
 
     def buildFFmpegOptions(self,
         quality: QUALITY_TYPES,
         channel_type: Literal['GR', 'BS', 'CS', 'CATV', 'SKY', 'BS4K'],
         is_fullhd_channel: bool,
+        is_SDRHDR_channel: bool,
     ) -> list[str]:
         """
         FFmpeg に渡すオプションを組み立てる
@@ -143,11 +162,14 @@ class LiveEncodingTask:
 
         # 入力
         ## -analyzeduration をつけることで、ストリームの分析時間を短縮できる
-        options.append(f'-f mpegts -analyzeduration {analyzeduration} -i pipe:0')
+        if channel_type == 'BS4K':
+            options.append(f'-f mmttlv -analyzeduration {analyzeduration} -hwaccel qsv -hwaccel_output_format qsv -init_hw_device vulkan=vk:0 -filter_hw_device vk -i pipe:0')
+        else:
+            options.append(f'-f mpegts -analyzeduration {analyzeduration} -hwaccel qsv -hwaccel_output_format qsv -init_hw_device vulkan=vk:0 -filter_hw_device vk -i pipe:0')
 
         # ストリームのマッピング
         ## 音声切り替えのため、主音声・副音声両方をエンコード後の TS に含む
-        options.append('-map 0:v:0 -map 0:a:0 -map 0:a:1 -map 0:d? -ignore_unknown')
+        options.append('-map 0:v:0 -map 0:a:0 -map 0:a:1? -map 0:d? -ignore_unknown')
 
         # フラグ
         ## 主に FFmpeg の起動を高速化するための設定
@@ -159,17 +181,17 @@ class LiveEncodingTask:
         # 映像
         ## コーデック
         if QUALITY[quality].is_hevc is True:
-            options.append('-vcodec libx265')  # H.265/HEVC (通信節約モード)
+            options.append('-vcodec hevc_qsv')  # H.265/HEVC (通信節約モード)
         else:
-            options.append('-vcodec libx264')  # H.264
+            options.append('-vcodec h264_qsv')  # H.264
 
         ## ビットレートと品質
         options.append(f'-flags +cgop -vb {QUALITY[quality].video_bitrate} -maxrate {QUALITY[quality].video_bitrate_max}')
-        options.append('-preset veryfast -aspect 16:9')
+        options.append('-preset medium -aspect 16:9')
         if QUALITY[quality].is_hevc is True:
             options.append('-profile:v main')
         else:
-            options.append('-profile:v high')
+            options.append('-profile:v main')
 
         ## フル HD 放送が行われているチャンネルかつ、指定された品質の解像度が 1440×1080 (1080p) の場合のみ、
         ## 特別に縦解像度を 1920 に変更してフル HD (1920×1080) でエンコードする
@@ -186,18 +208,34 @@ class LiveEncodingTask:
             gop_length_second = self.GOP_LENGTH_SECONDS_H265
 
         ## BS4K は 60p (プログレッシブ) で放送されているので、インターレース解除を行わず 60fps でエンコードする
-        if channel_type == "BS4K":
-            options.append(f'-vf scale={video_width}:{video_height}')
-            options.append(f'-r 60000/1001 -g {int(gop_length_second * 60)}')
+        if channel_type == "BS4K" and is_SDRHDR_channel is True:
+            ## インターレース解除 (60i → 60p (フレームレート: 60fps))
+            if QUALITY[quality].is_60fps is True:
+                options.append(f'-vf vpp_qsv=deinterlace=0:w={video_width}:h={video_height}:framerate=60000/1001:format=nv12')
+                #options.append(f'-r 60000/1001 -g {int(gop_length_second * 60)}')
+            ## インターレース解除 (60i → 30p (フレームレート: 30fps))
+            else:
+                options.append(f'-vf vpp_qsv=deinterlace=0:w={video_width}:h={video_height}:framerate=30000/1001:format=nv12')
+                #options.append(f'-r 30000/1001 -g {int(gop_length_second * 30)}')
+        ## BS4K は 60p (プログレッシブ) で放送されているので、インターレース解除を行わず 60fps でエンコードする
+        elif channel_type == "BS4K":
+            ## インターレース解除 (60i → 60p (フレームレート: 60fps))
+            if QUALITY[quality].is_60fps is True:
+                options.append(f'-vf vpp_qsv=deinterlace=0:w={video_width}:h={video_height}:framerate=60000/1001:format=nv12')
+                #options.append(f'-r 60000/1001 -g {int(gop_length_second * 60)}')
+            ## インターレース解除 (60i → 30p (フレームレート: 30fps))
+            else:
+                options.append(f'-vf vpp_qsv=deinterlace=0:w={video_width}:h={video_height}:framerate=30000/1001:format=nv12')
+                #options.append(f'-r 30000/1001 -g {int(gop_length_second * 30)}')
         else:
             ## インターレース解除 (60i → 60p (フレームレート: 60fps))
             if QUALITY[quality].is_60fps is True:
-                options.append(f'-vf yadif=mode=1:parity=-1:deint=1,scale={video_width}:{video_height}')
-                options.append(f'-r 60000/1001 -g {int(gop_length_second * 60)}')
+                options.append(f'-vf vpp_qsv=deinterlace=2:w={video_width}:h={video_height}:framerate=60000/1001:format=nv12')
+                #options.append(f'-r 60000/1001 -g {int(gop_length_second * 60)}')
             ## インターレース解除 (60i → 30p (フレームレート: 30fps))
             else:
-                options.append(f'-vf yadif=mode=0:parity=-1:deint=1,scale={video_width}:{video_height}')
-                options.append(f'-r 30000/1001 -g {int(gop_length_second * 30)}')
+                options.append(f'-vf vpp_qsv=deinterlace=2:w={video_width}:h={video_height}:framerate=30000/1001:format=nv12')
+                #options.append(f'-r 30000/1001 -g {int(gop_length_second * 30)}')
 
         # 音声
         ## 音声が 5.1ch かどうかに関わらず、ステレオにダウンミックスする
@@ -265,6 +303,7 @@ class LiveEncodingTask:
         encoder_type: Literal['QSVEncC', 'NVEncC', 'VCEEncC', 'rkmppenc'],
         channel_type: Literal['GR', 'BS', 'CS', 'CATV', 'SKY', 'BS4K'],
         is_fullhd_channel: bool,
+        is_SDRHDR_channel: bool,
     ) -> list[str]:
         """
         QSVEncC・NVEncC・VCEEncC・rkmppenc (便宜上 HWEncC と総称) に渡すオプションを組み立てる
@@ -290,13 +329,15 @@ class LiveEncodingTask:
             ## ほかと違い H.264 コーデックが採用されていることが影響しているのかも
             input_probesize += 500
             input_analyze += 0.2
-
+        
         # 入力
         ## --input-probesize, --input-analyze をつけることで、ストリームの分析時間を短縮できる
         ## 両方つけるのが重要で、--input-analyze だけだとエンコーダーがフリーズすることがある
-        options.append(f'--input-format mpegts --input-probesize {input_probesize}K --input-analyze {input_analyze}')
         ## BS4K 以外では 29.97fps (59.94i) を指定する
-        if channel_type != 'BS4K':
+        if channel_type == 'BS4K':
+            options.append(f'--input-format mmttlv --input-probesize {input_probesize}K --input-analyze {input_analyze}')
+        elif channel_type != 'BS4K':
+            options.append(f'--input-format mpegts --input-probesize {input_probesize}K --input-analyze {input_analyze}')
             options.append('--fps 30000/1001')
         ## 入力を指定する
         options.append('--input -')
@@ -453,9 +494,7 @@ class LiveEncodingTask:
         # Mirakurun / mirakc は通常チャンネルタイプが GR, BS, CS, SKY しかないので、
         # フォールバックとして BS4K を BS に、CATV を CS に変換する
         fallback_channel_type = channel_type
-        if channel_type == 'BS4K':
-            fallback_channel_type = 'BS'
-        elif channel_type == 'CATV':
+        if channel_type == 'CATV':
             fallback_channel_type = 'CS'
 
         mirakurun_or_mirakc = 'Mirakurun'
@@ -606,7 +645,10 @@ class LiveEncodingTask:
 
         # フル HD 放送が行われているチャンネルかを取得
         is_fullhd_channel = self.isFullHDChannel(channel.network_id, channel.service_id)
-
+        
+        # 強制HDR変換が行われているチャンネルかを取得
+        is_SDRHDR_channel = self.isSDRHDRChannel(channel.network_id, channel.service_id)
+        
         ## ラジオチャンネルでは HW エンコードの意味がないため、FFmpeg に固定する
         if channel.is_radiochannel is True:
             ENCODER_TYPE = 'FFmpeg'
@@ -619,31 +661,47 @@ class LiveEncodingTask:
             if channel.is_radiochannel is True:
                 encoder_options = self.buildFFmpegOptionsForRadio()
             else:
-                encoder_options = self.buildFFmpegOptions(self.live_stream.quality, channel.type, is_fullhd_channel)
+                encoder_options = self.buildFFmpegOptions(self.live_stream.quality, channel.type, is_fullhd_channel, is_SDRHDR_channel)
             logging.info(f'[Live: {self.live_stream.live_stream_id}] FFmpeg Commands:\nffmpeg {" ".join(encoder_options)}')
 
             # エンコーダープロセスを非同期で作成・実行
-            encoder = await asyncio.subprocess.create_subprocess_exec(
-                *[LIBRARY_PATH['FFmpeg'], *encoder_options],
-                stdin = tsreadex_read_pipe,  # tsreadex からの入力
-                stdout = asyncio.subprocess.PIPE,  # ストリーム出力
-                stderr = asyncio.subprocess.PIPE,  # ログ出力
-            )
+            if channel.type == 'BS4K':
+                encoder = await asyncio.subprocess.create_subprocess_exec(
+                    *[LIBRARY_PATH['FFmpeg'], *encoder_options],
+                    stdin = asyncio.subprocess.PIPE,  # ストリーム入力
+                    stdout = asyncio.subprocess.PIPE,  # ストリーム出力
+                    stderr = asyncio.subprocess.PIPE,  # ログ出力
+                )
+            else:
+                encoder = await asyncio.subprocess.create_subprocess_exec(
+                    *[LIBRARY_PATH['FFmpeg'], *encoder_options],
+                    stdin = tsreadex_read_pipe,  # tsreadex からの入力
+                    stdout = asyncio.subprocess.PIPE,  # ストリーム出力
+                    stderr = asyncio.subprocess.PIPE,  # ログ出力
+                )
 
         # HWEncC
         else:
 
             # オプションを取得
-            encoder_options = self.buildHWEncCOptions(self.live_stream.quality, ENCODER_TYPE, channel.type, is_fullhd_channel)
+            encoder_options = self.buildHWEncCOptions(self.live_stream.quality, ENCODER_TYPE, channel.type, is_fullhd_channel, is_SDRHDR_channel)
             logging.info(f'[Live: {self.live_stream.live_stream_id}] {ENCODER_TYPE} Commands:\n{ENCODER_TYPE} {" ".join(encoder_options)}')
 
             # エンコーダープロセスを非同期で作成・実行
-            encoder = await asyncio.subprocess.create_subprocess_exec(
-                *[LIBRARY_PATH[ENCODER_TYPE], *encoder_options],
-                stdin = tsreadex_read_pipe,  # tsreadex からの入力
-                stdout = asyncio.subprocess.PIPE,  # ストリーム出力
-                stderr = asyncio.subprocess.PIPE,  # ログ出力
-            )
+            if channel.type == 'BS4K':
+                encoder = await asyncio.subprocess.create_subprocess_exec(
+                    *[LIBRARY_PATH[ENCODER_TYPE], *encoder_options],
+                    stdin = asyncio.subprocess.PIPE,  # tsreadex からの入力
+                    stdout = asyncio.subprocess.PIPE,  # ストリーム出力
+                    stderr = asyncio.subprocess.PIPE,  # ログ出力
+                )
+            else:
+                encoder = await asyncio.subprocess.create_subprocess_exec(
+                    *[LIBRARY_PATH[ENCODER_TYPE], *encoder_options],
+                    stdin = tsreadex_read_pipe,  # tsreadex からの入力
+                    stdout = asyncio.subprocess.PIPE,  # ストリーム出力
+                    stderr = asyncio.subprocess.PIPE,  # ログ出力
+                )
 
         # tsreadex の読み込み用パイプを閉じる
         os.close(tsreadex_read_pipe)
@@ -801,40 +859,69 @@ class LiveEncodingTask:
             assert stream_reader is not None
             stream_iterator = GetIterator(stream_reader)
 
-            # EDCB / Mirakurun から受信した放送波を随時 tsreadex の入力に書き込む
-            try:
-                async for chunk in stream_iterator:
-
-                    # チューナーからの放送波 TS の最終読み取り時刻を更新
-                    async with tuner_ts_read_at_lock:
-                        tuner_ts_read_at = time.monotonic()
-
-                    # tsreadex の標準入力が閉じられていたら、タスクを終了
-                    if cast(asyncio.StreamWriter, tsreadex.stdin).is_closing():
-                        break
-
-                    try:
-                        # ストリームデータを tsreadex の標準入力に書き込む
-                        cast(asyncio.StreamWriter, tsreadex.stdin).write(chunk)
-                        await cast(asyncio.StreamWriter, tsreadex.stdin).drain()
-
-                        # 生の放送波の TS パケットを PSI/SI データアーカイバーに送信する
-                        ## 放送波の tsreadex への書き込みを最優先で行うため、非同期タスクとして実行する
-                        ## ここで tsreadex への書き込みがブロックされると放送波の受信ループが止まり、ライブストリームの異常終了に繋がりかねない
-                        if self.live_stream.psi_data_archiver is not None:
-                            background_tasks.add(asyncio.create_task(self.live_stream.psi_data_archiver.pushTSPacketData(chunk)))
-
-                    # 並列タスク処理中に何らかの例外が発生した
-                    # BrokenPipeError・asyncio.TimeoutError などが想定されるが、何が発生するかわからないためすべての例外をキャッチする
-                    except Exception:
-                        break
-
-                    # エンコードタスクが終了しているか既にエンコーダープロセスが終了していたら、タスクを終了
-                    if is_running is False or tsreadex.returncode is not None or encoder.returncode is not None:
-                        break
-
-            except OSError:
-                pass
+            # EDCB / Mirakurun から受信した放送波をBS4Kのみ横流し
+            if channel.type == 'BS4K':
+                try:
+                    async for chunk in stream_iterator:
+    
+                        # チューナーからの放送波 TS の最終読み取り時刻を更新
+                        async with tuner_ts_read_at_lock:
+                            tuner_ts_read_at = time.monotonic()
+    
+                        # encoder の標準入力が閉じられていたら、タスクを終了
+                        if cast(asyncio.StreamWriter, encoder.stdin).is_closing():
+                            break
+    
+                        try:
+                            # ストリームデータを encoder の標準入力に書き込む
+                            cast(asyncio.StreamWriter, encoder.stdin).write(chunk)
+                            await cast(asyncio.StreamWriter, encoder.stdin).drain()
+    
+                        # 並列タスク処理中に何らかの例外が発生した
+                        # BrokenPipeError・asyncio.TimeoutError などが想定されるが、何が発生するかわからないためすべての例外をキャッチする
+                        except Exception:
+                            break
+    
+                        # エンコードタスクが終了しているか既にエンコーダープロセスが終了していたら、タスクを終了
+                        if is_running is False or encoder.returncode is not None:
+                            break
+                except OSError:
+                    pass
+ 
+            # EDCB / Mirakurun から受信した放送波を随時 tsreadex の入力に書き込む                   
+            else:
+                try:
+                    async for chunk in stream_iterator:
+    
+                        # チューナーからの放送波 TS の最終読み取り時刻を更新
+                        async with tuner_ts_read_at_lock:
+                            tuner_ts_read_at = time.monotonic()
+    
+                        # tsreadex の標準入力が閉じられていたら、タスクを終了
+                        if cast(asyncio.StreamWriter, tsreadex.stdin).is_closing():
+                            break
+    
+                        try:
+                            # ストリームデータを tsreadex の標準入力に書き込む
+                            cast(asyncio.StreamWriter, tsreadex.stdin).write(chunk)
+                            await cast(asyncio.StreamWriter, tsreadex.stdin).drain()
+    
+                            # 生の放送波の TS パケットを PSI/SI データアーカイバーに送信する
+                            ## 放送波の tsreadex への書き込みを最優先で行うため、非同期タスクとして実行する
+                            ## ここで tsreadex への書き込みがブロックされると放送波の受信ループが止まり、ライブストリームの異常終了に繋がりかねない
+                            if self.live_stream.psi_data_archiver is not None:
+                                background_tasks.add(asyncio.create_task(self.live_stream.psi_data_archiver.pushTSPacketData(chunk)))
+    
+                        # 並列タスク処理中に何らかの例外が発生した
+                        # BrokenPipeError・asyncio.TimeoutError などが想定されるが、何が発生するかわからないためすべての例外をキャッチする
+                        except Exception:
+                            break
+    
+                        # エンコードタスクが終了しているか既にエンコーダープロセスが終了していたら、タスクを終了
+                        if is_running is False or tsreadex.returncode is not None or encoder.returncode is not None:
+                            break
+                except OSError:
+                    pass
 
             # タスクを終える前に、チューナーとの接続を明示的に閉じる
             try:
