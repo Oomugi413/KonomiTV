@@ -43,10 +43,10 @@ class LiveEncodingTask:
     MAX_RETRY_COUNT: ClassVar[int] = 10  # 10回まで
 
     # チューナーから放送波 TS を読み取る際のタイムアウト (秒)
-    TUNER_TS_READ_TIMEOUT: ClassVar[int] = 15
+    TUNER_TS_READ_TIMEOUT: ClassVar[int] = 20
 
     # エンコーダーの出力を読み取る際のタイムアウト (Standby 時) (秒)
-    ENCODER_TS_READ_TIMEOUT_STANDBY: ClassVar[int] = 20
+    ENCODER_TS_READ_TIMEOUT_STANDBY: ClassVar[int] = 30
 
     # エンコーダーの出力を読み取る際のタイムアウト (ONAir 時) (秒)
     # VCEEncC 利用時のみ起動時に OpenCL シェーダーがコンパイルされる関係で起動が遅いため、10 秒に設定
@@ -96,6 +96,10 @@ class LiveEncodingTask:
         if network_id == 4 and service_id in [103, 191, 192, 193, 211]:
             return True
 
+        #BS4K,CS4K
+        if network_id >= 11:
+            return True
+
         return False
 
 
@@ -128,7 +132,7 @@ class LiveEncodingTask:
 
         # 入力
         ## -analyzeduration をつけることで、ストリームの分析時間を短縮できる
-        options.append(f'-f mpegts -analyzeduration {analyzeduration} -i pipe:0')
+        options.append(f'-f mpegts -analyzeduration {analyzeduration} -hwaccel qsv -hwaccel_output_format qsv -init_hw_device vulkan=vk:0 -filter_hw_device vk -i pipe:0')
 
         # ストリームのマッピング
         ## 音声切り替えのため、主音声・副音声両方をエンコード後の TS に含む
@@ -144,9 +148,9 @@ class LiveEncodingTask:
         # 映像
         ## コーデック
         if QUALITY[quality].is_hevc is True:
-            options.append('-vcodec libx265')  # H.265/HEVC (通信節約モード)
+            options.append('-vcodec hevc_qsv')  # H.265/HEVC (通信節約モード)
         else:
-            options.append('-vcodec libx264')  # H.264
+            options.append('-vcodec h264_qsv')  # H.264
 
         ## ビットレートと品質
         options.append(f'-flags +cgop -vb {QUALITY[quality].video_bitrate} -maxrate {QUALITY[quality].video_bitrate_max}')
@@ -154,7 +158,7 @@ class LiveEncodingTask:
         if QUALITY[quality].is_hevc is True:
             options.append('-profile:v main')
         else:
-            options.append('-profile:v high')
+            options.append('-profile:v main')
 
         ## フル HD 放送が行われているチャンネルかつ、指定された品質の解像度が 1440×1080 (1080p) の場合のみ、
         ## 特別に縦解像度を 1920 に変更してフル HD (1920×1080) でエンコードする
@@ -172,11 +176,11 @@ class LiveEncodingTask:
 
         ## インターレース解除 (60i → 60p (フレームレート: 60fps))
         if QUALITY[quality].is_60fps is True:
-            options.append(f'-vf yadif=mode=1:parity=-1:deint=1,scale={video_width}:{video_height}')
+            options.append(f'-vf vpp_qsv=deinterlace=2:w={video_width}:h={video_height}:framerate=60000/1001')
             options.append(f'-r 60000/1001 -g {int(gop_length_second * 60)}')
         ## インターレース解除 (60i → 30p (フレームレート: 30fps))
         else:
-            options.append(f'-vf yadif=mode=0:parity=-1:deint=1,scale={video_width}:{video_height}')
+            options.append(f'-vf vpp_qsv=deinterlace=2:w={video_width}:h={video_height}:framerate=30000/1001')
             options.append(f'-r 30000/1001 -g {int(gop_length_second * 30)}')
 
         # 音声
@@ -420,7 +424,7 @@ class LiveEncodingTask:
         assert BACKEND_TYPE == 'Mirakurun', 'This method is only for Mirakurun backend.'
 
         # Mirakurun / mirakc はチャンネルタイプが GR, BS, CS, SKY しかないので、BS4K を BS に、CATV を CS に変換する
-        channel_type = 'BS' if channel_type == 'BS4K' else channel_type
+        # channel_type = 'BS' if channel_type == 'BS4K' else channel_type
         channel_type = 'CS' if channel_type == 'CATV' else channel_type
 
         mirakurun_or_mirakc = 'Mirakurun'
