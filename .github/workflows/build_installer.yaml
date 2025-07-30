@@ -70,7 +70,7 @@ jobs:
           - arch: arm64
             runner: ubuntu-22.04-arm
             artifact_suffix: '-ARM'
-    runs-on: "${{ matrix.runner }}"
+    runs-on: ${{ matrix.runner }}
     steps:
 
       # Docker Buildx のセットアップ
