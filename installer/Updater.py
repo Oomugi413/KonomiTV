@@ -274,7 +274,7 @@ def Updater(version: str) -> None:
         progress = CreateDownloadInfiniteProgress()
 
         # GitHub からソースコードをダウンロード
-        source_code_response = requests.get(f'https://codeload.github.com/tsukumijima/KonomiTV/zip/refs/tags/v{version}')
+        source_code_response = requests.get(f'https://codeload.github.com/Oomugi413/KonomiTV/zip/refs/tags/v{version}')
         task_id = progress.add_task('', total=None)
 
         # ダウンロードしたデータを随時一時ファイルに書き込む
@@ -339,7 +339,7 @@ def Updater(version: str) -> None:
             thirdparty_file = 'thirdparty-linux.tar.xz'
         elif platform_type == 'Linux' and is_arm_device is True:
             thirdparty_file = 'thirdparty-linux-arm.tar.xz'
-        thirdparty_base_url = f'https://github.com/tsukumijima/KonomiTV/releases/download/v{version}/'
+        thirdparty_base_url = f'https://github.com/Oomugi413/KonomiTV/releases/download/v{version}/'
         thirdparty_url = thirdparty_base_url + thirdparty_file
         thirdparty_response = requests.get(thirdparty_url, stream=True)
         task_id = progress.add_task('', total=float(thirdparty_response.headers['Content-length']))
