@@ -1,17 +1,18 @@
 
 import multiprocessing
 import re
+from typing import ClassVar, Literal, cast
+
 from ariblib.aribstr import AribString
 from tortoise import Tortoise, connections
 from tortoise.exceptions import ConfigurationError
 from tortoise.expressions import Q
-from typing import cast, ClassVar, Literal
 
 from app.constants import DATABASE_CONFIG
 
 
 class TSInformation:
-    """ 録画 TS ファイル内に含まれるメタデータの解析に役立つユーティリティ """
+    """ 日本の放送波の MPEG-TS PSI/SI の解析時に役立つ雑多なユーティリティ """
 
     # 映像のコーデック
     # ref: https://github.com/Chinachu/Mirakurun/blob/master/src/Mirakurun/EPG.ts#L23-L27
@@ -140,6 +141,25 @@ class TSInformation:
             '\U0001f225': '[吹]',
             '\U0001f14e': '[PPV]',
             '\U0001f200': '[ほか]',
+            '\U0001f19b': '[3D]',
+            '\U0001f19c': '[2ndScr]',
+            '\U0001f19d': '[2K]',
+            '\U0001f19e': '[4K]',
+            '\U0001f19f': '[8K]',
+            '\U0001f1a0': '[5.1]',
+            '\U0001f1a1': '[7.1]',
+            '\U0001f1a2': '[22.2]',
+            '\U0001f1a3': '[60P]',
+            '\U0001f1a4': '[120P]',
+            '\U0001f1a5': '[d]',
+            '\U0001f1a6': '[HC]',
+            '\U0001f1a7': '[HDR]',
+            '\U0001f1a8': '[Hi-Res]',
+            '\U0001f1a9': '[Lossless]',
+            '\U0001f1aa': '[SHV]',
+            '\U0001f1ab': '[UHD]',
+            '\U0001f1ac': '[VOD]',
+            '\U0001f23b': '[配]',
         }
 
         # Unicode の囲み文字を大かっこで囲った文字に置換する

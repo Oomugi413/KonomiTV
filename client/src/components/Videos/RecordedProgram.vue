@@ -116,12 +116,44 @@
                             </template>
                             <v-list-item-title class="ml-3">サムネイルを再作成</v-list-item-title>
                         </v-list-item>
+                        <v-divider></v-divider>
+                        <v-list-item @click="showDeleteConfirmation" :disabled="program.recorded_video.status === 'Recording'" class="recorded-program__menu-list-item--danger">
+                            <template v-slot:prepend>
+                                <Icon icon="fluent:delete-24-regular" width="20px" height="20px" />
+                            </template>
+                            <v-list-item-title class="ml-3">録画ファイルを削除</v-list-item-title>
+                        </v-list-item>
                     </v-list>
                 </v-menu>
             </div>
         </div>
     </router-link>
     <RecordedFileInfoDialog :program="program" v-model:show="show_video_info" />
+
+    <!-- 録画ファイル削除確認ダイアログ -->
+    <v-dialog max-width="750" v-model="show_delete_confirmation">
+        <v-card>
+            <v-card-title class="d-flex justify-center pt-6 font-weight-bold">本当に録画ファイルを削除しますか？</v-card-title>
+            <v-card-text class="pt-2 pb-0">
+                <div class="delete-confirmation__file-path mb-4">{{ program.recorded_video.file_path }}</div>
+                <div class="text-error-lighten-1 font-weight-bold">
+                    この録画ファイルに関連するすべてのデータ (サムネイル / .ts.program.txt / .ts.err を含む) が削除されます。<br>
+                    元に戻すことはできません。本当に録画ファイルを削除しますか？
+                </div>
+            </v-card-text>
+            <v-card-actions class="pt-4 px-6 pb-6">
+                <v-spacer></v-spacer>
+                <v-btn color="text" variant="text" @click="show_delete_confirmation = false">
+                    <Icon icon="fluent:dismiss-20-regular" width="18px" height="18px" />
+                    <span class="ml-1">キャンセル</span>
+                </v-btn>
+                <v-btn class="px-3" color="error" variant="flat" @click="deleteVideo">
+                    <Icon icon="fluent:delete-20-regular" width="18px" height="18px" />
+                    <span class="ml-1">録画ファイルを削除</span>
+                </v-btn>
+            </v-card-actions>
+        </v-card>
+    </v-dialog>
 </template>
 <script lang="ts" setup>
 
@@ -131,6 +163,7 @@ import RecordedFileInfoDialog from '@/components/Videos/Dialogs/RecordedFileInfo
 import Message from '@/message';
 import Videos, { IRecordedProgram } from '@/services/Videos';
 import useSettingsStore from '@/stores/SettingsStore';
+import useUserStore from '@/stores/UserStore';
 import Utils, { ProgramUtils } from '@/utils';
 
 // Props
@@ -143,8 +176,15 @@ const props = withDefaults(defineProps<{
     forWatchedHistory: false,
 });
 
+// Emits
+const emit = defineEmits<{
+    (e: 'deleted', id: number): void;
+}>();
+
 // ファイル情報ダイアログの表示状態
 const show_video_info = ref(false);
+// 削除確認ダイアログの表示状態
+const show_delete_confirmation = ref(false);
 
 // 録画ファイルのダウンロード (location.href を変更し、ダウンロード自体はブラウザに任せる)
 const downloadVideo = () => {
@@ -155,7 +195,7 @@ const downloadVideo = () => {
 const reanalyzeVideo = async () => {
     Message.success('メタデータの再解析を開始します。完了までしばらくお待ちください。');
     const result = await Videos.reanalyzeVideo(props.program.id);
-    if (result.is_success) {
+    if (result === true) {
         Message.success('メタデータの再解析が完了しました。');
     }
 };
@@ -164,7 +204,7 @@ const reanalyzeVideo = async () => {
 const regenerateThumbnail = async (skip_tile_if_exists: boolean = false) => {
     Message.success('サムネイルの再作成を開始しました。完了までしばらくお待ちください。');
     const result = await Videos.regenerateThumbnail(props.program.id, skip_tile_if_exists);
-    if (result.is_success) {
+    if (result === true) {
         Message.success('サムネイルの再作成が完了しました。');
     }
 };
@@ -210,6 +250,29 @@ const removeFromWatchedHistory = () => {
         return history.video_id !== props.program.id;
     });
     Message.show('視聴履歴から削除しました。');
+};
+
+// 録画ファイル削除確認ダイアログを表示
+const showDeleteConfirmation = () => {
+    const userStore = useUserStore();
+    if (userStore.user === null || userStore.user.is_admin === false) {
+        Message.warning('録画ファイルを削除するには管理者権限が必要です。\n管理者アカウントでログインし直してください。');
+        return;
+    }
+    show_delete_confirmation.value = true;
+};
+
+// 録画ファイル削除
+const deleteVideo = async () => {
+    show_delete_confirmation.value = false;
+    Message.info('録画ファイルの削除を開始します。完了までしばらくお待ちください。');
+
+    const result = await Videos.deleteVideo(props.program.id);
+    if (result === true) {
+        Message.success('録画ファイルを削除しました。');
+        // 親コンポーネントに削除イベントを発行
+        emit('deleted', props.program.id);
+    }
 };
 
 </script>
@@ -375,14 +438,16 @@ const removeFromWatchedHistory = () => {
             -webkit-box-orient: vertical;
             @include tablet-vertical {
                 font-size: 15px;
+                line-height: 1.4;
+                -webkit-line-clamp: 2;  // 2行までに制限
             }
             @include smartphone-horizontal {
                 font-size: 14px;
             }
             @include smartphone-vertical {
-                margin-right: 24px;
+                margin-right: 12px;
                 font-size: 13px;
-                line-height: 1.45;
+                line-height: 1.4;
                 -webkit-line-clamp: 2;  // 2行までに制限
             }
         }
@@ -397,10 +462,12 @@ const removeFromWatchedHistory = () => {
             }
             @include smartphone-horizontal {
                 margin-top: 6px;
-                flex-wrap: wrap;
+                flex-direction: column;
+                align-items: flex-start;
             }
             @include smartphone-vertical {
-                flex-wrap: wrap;
+                flex-direction: column;
+                align-items: flex-start;
                 margin-top: 4px;
                 font-size: 12px;
             }
@@ -419,6 +486,9 @@ const removeFromWatchedHistory = () => {
                     // 読み込まれるまでのアイコンの背景
                     background: linear-gradient(150deg, rgb(var(--v-theme-gray)), rgb(var(--v-theme-background-lighten-2)));
                     object-fit: cover;
+                    @include smartphone-horizontal {
+                        margin-right: 8px;
+                    }
                     @include smartphone-vertical {
                         margin-right: 4px;
                         width: 24px;
@@ -439,7 +509,7 @@ const removeFromWatchedHistory = () => {
                     }
                     @include smartphone-vertical {
                         margin-left: 4px;
-                        font-size: 12px;
+                        font-size: 11.5px;
                     }
                 }
             }
@@ -447,32 +517,30 @@ const removeFromWatchedHistory = () => {
             &-time {
                 display: inline-block;
                 flex-shrink: 0;
-                margin-left: 10px;
+                margin-left: auto;
                 color: rgb(var(--v-theme-text-darken-1));
-                border-left: 1px solid rgb(var(--v-theme-text-darken-1));
-                padding-left: 10px;
                 height: 16px;
                 line-height: 15.5px;
+                @include desktop {
+                    min-width: 236.5px;
+                }
+                @include tablet-horizontal {
+                    min-width: 236.5px;
+                }
                 @include tablet-vertical {
                     margin-top: 2px;
                     margin-left: 0px;
-                    border-left: none;
-                    padding-left: 0px;
                     font-size: 12px;
                 }
                 @include smartphone-horizontal {
                     margin-top: 2px;
                     margin-left: 0px;
-                    border-left: none;
-                    padding-left: 0px;
                     font-size: 12px;
                 }
                 @include smartphone-vertical {
                     margin-top: 1px;
                     margin-left: 0px;
-                    border-left: none;
-                    padding-left: 0px;
-                    font-size: 11.4px;
+                    font-size: 11px;
                 }
             }
         }
@@ -492,16 +560,17 @@ const removeFromWatchedHistory = () => {
             @include tablet-vertical {
                 margin-top: 3.5px;
                 font-size: 11px;
+                -webkit-line-clamp: 1;  // 1行までに制限
             }
             @include smartphone-horizontal {
                 margin-top: 3.5px;
                 font-size: 11px;
             }
             @include smartphone-vertical {
-                margin-top: 1.5px;
-                font-size: 11px;
+                margin-top: 2.5px;
+                margin-right: 12px;
+                font-size: 10px;
                 line-height: 1.45;
-                -webkit-line-clamp: 1;  // 1行までに制限
             }
         }
     }
@@ -729,6 +798,21 @@ const removeFromWatchedHistory = () => {
 @keyframes progress-rotate {
     0% { transform: rotate(0deg); }
     100% { transform: rotate(360deg); }
+}
+
+.delete-confirmation {
+    &__file-path {
+        padding: 12px;
+        background-color: rgb(var(--v-theme-background-lighten-1));
+        border-radius: 4px;
+        font-size: 14px;
+        word-break: break-all;
+        white-space: pre-wrap;
+    }
+}
+
+.recorded-program__menu-list-item--danger {
+    color: rgb(var(--v-theme-error)) !important;
 }
 
 </style>

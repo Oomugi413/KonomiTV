@@ -1,15 +1,11 @@
 
 import asyncio
 import json
-from fastapi import APIRouter
-from fastapi import Depends
-from fastapi import HTTPException
-from fastapi import Path
-from fastapi import Query
-from fastapi import status
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from fastapi.responses import Response
 from sse_starlette.sse import EventSourceResponse
-from typing import Annotated
 
 from app import logging
 from app.constants import QUALITY, QUALITY_TYPES
@@ -157,9 +153,7 @@ async def VideoHLSBufferAPI(
     録画番組の HLS バッファ範囲を Server-Sent Events で随時配信する。
 
     イベントには、
-
     - バッファ範囲の更新を示す **buffer_range_update**
-
     の1種類がある。
 
     どのイベントでも配信される JSON 構造は同じ。<br>

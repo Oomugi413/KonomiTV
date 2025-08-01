@@ -1,21 +1,15 @@
 
 import asyncio
-import httpx
 import socket
 import time
-from fastapi import APIRouter
-from fastapi import Form
-from fastapi import HTTPException
-from fastapi import Path
-from fastapi import Query
-from fastapi import Request
-from fastapi import status
-from fastapi.responses import StreamingResponse
-from ping3 import ping
 from typing import Annotated
 
-from app import logging
-from app import schemas
+import httpx
+from fastapi import APIRouter, Form, HTTPException, Path, Query, Request, status
+from fastapi.responses import StreamingResponse
+from ping3 import ping
+
+from app import logging, schemas
 from app.constants import API_REQUEST_HEADERS
 
 
@@ -70,13 +64,13 @@ async def BMLBrowserRequestGETProxyAPI(
     async with httpx.AsyncClient(headers={**API_REQUEST_HEADERS, **headers}, follow_redirects=True, verify=False) as client:
         try:
             response = await client.get(request_url)
-        except Exception as e:
+        except Exception as ex:
             # リクエスト中に例外が発生した場合は、エラーメッセージをログに出力して 500 エラーを返す
             ## HTTP リクエスト自体が DNS 名前解決エラーや接続エラーで失敗した場合に発生する
-            logging.error(f'[DataBroadcastingRouter][BMLBrowserRequestGETProxyAPI] Failed to request: {e}')
+            logging.error('[DataBroadcastingRouter][BMLBrowserRequestGETProxyAPI] Failed to request:', exc_info=ex)
             raise HTTPException(
                 status_code = status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail = f'Failed to request: {e}',
+                detail = f'Failed to request: {ex}',
             )
 
     allowed_response_headers = [
@@ -136,13 +130,13 @@ async def BMLBrowserRequestPOSTProxyAPI(
     async with httpx.AsyncClient(headers={**API_REQUEST_HEADERS, **headers}, follow_redirects=True, verify=False) as client:
         try:
             response = await client.post(request_url, content=f'Denbun={Denbun}')
-        except Exception as e:
+        except Exception as ex:
             # リクエスト中に例外が発生した場合は、エラーメッセージをログに出力して 500 エラーを返す
             ## HTTP リクエスト自体が DNS 名前解決エラーや接続エラーで失敗した場合に発生する
-            logging.error(f'[DataBroadcastingRouter][BMLBrowserRequestPOSTProxyAPI] Failed to request: {e}')
+            logging.error('[DataBroadcastingRouter][BMLBrowserRequestPOSTProxyAPI] Failed to request:', exc_info=ex)
             raise HTTPException(
                 status_code = status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail = f'Failed to request: {e}',
+                detail = f'Failed to request: {ex}',
             )
 
     allowed_response_headers = [

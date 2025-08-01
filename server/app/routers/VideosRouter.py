@@ -1,27 +1,31 @@
 
-import anyio
 import json
 import pathlib
 from email.utils import parsedate
-from fastapi import APIRouter
-from fastapi import Depends
-from fastapi import HTTPException
-from fastapi import Path
-from fastapi import Query
-from fastapi import Request
-from fastapi import Response
-from fastapi import status
+from typing import Annotated, Any, Literal
+
+import anyio
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Path,
+    Query,
+    Request,
+    Response,
+    status,
+)
 from fastapi.responses import FileResponse
 from starlette.datastructures import Headers
 from tortoise import connections
-from typing import Annotated, Any, Literal, Union
 
-from app import logging
-from app import schemas
+from app import logging, schemas
 from app.constants import STATIC_DIR, THUMBNAILS_DIR
 from app.metadata.RecordedScanTask import RecordedScanTask
 from app.metadata.ThumbnailGenerator import ThumbnailGenerator
 from app.models.RecordedProgram import RecordedProgram
+from app.models.User import User
+from app.routers.UsersRouter import GetCurrentAdminUser
 from app.utils.DriveIOLimiter import DriveIOLimiter
 from app.utils.JikkyoClient import JikkyoClient
 
@@ -39,11 +43,14 @@ PAGE_SIZE = 30
 async def ConvertRowToRecordedProgram(row: dict[str, Any]) -> schemas.RecordedProgram:
     """ データベースの行データを RecordedProgram Pydantic モデルに変換する共通処理 """
 
-    # key_frames の JSON は巨大なので、存在確認のみ行う
-    has_key_frames: bool = row['key_frames'] != '[]'
+    # key_frames の存在確認
+    # 高速化のため、SQL で計算された has_key_frames を直接参照する
+    has_key_frames: bool = bool(row['has_key_frames'])
 
     # cm_sections は小さいので、通常通りパースする
-    cm_sections: list[schemas.CMSection] = json.loads(row['cm_sections'])
+    cm_sections: list[schemas.CMSection] | None = None
+    if row['cm_sections'] is not None:
+        cm_sections = json.loads(row['cm_sections'])
 
     # recorded_video のデータを構築
     recorded_video_dict = {
@@ -154,7 +161,7 @@ async def GetThumbnailResponse(
     request: Request,
     recorded_program: RecordedProgram,
     return_tiled: bool = False,
-) -> Union[FileResponse, Response]:
+) -> FileResponse | Response:
     """
     サムネイル画像のレスポンスを生成する共通処理
     ETags と Last-Modified を使ったキャッシュ制御を行う
@@ -246,10 +253,16 @@ async def GetThumbnailResponse(
 
     # If-None-Match と If-Modified-Since の検証
     # FileResponse が実装していない 304 判定を行う
-    if IsContentNotModified(Headers(dict(response.headers)), Headers(scope=request.scope)):
+    if IsContentNotModified(response.headers, request.headers):
+        # 304 レスポンスでは Content-Length ヘッダーを除外する必要がある
+        # （大文字小文字を区別せずにフィルタリング）
+        headers_304 = {
+            key: value for key, value in response.headers.items()
+            if key.lower() != 'content-length'
+        }
         return Response(
             status_code = 304,
-            headers = dict(response.headers),
+            headers = headers_304,
         )
 
     return response
@@ -267,7 +280,7 @@ async def VideosAPI(
     ids: Annotated[list[int] | None, Query(description='録画番組 ID のリスト。指定時は指定された ID の録画番組のみを返す。')] = None,
 ):
     """
-    すべての録画番組を一度に 100 件ずつ取得する。<br>
+    すべての録画番組を一度に 30 件ずつ取得する。<br>
     order には "desc" か "asc" か "ids" を指定する。"ids" を指定すると、ids パラメータで指定された順序を維持する。<br>
     page (ページ番号) には 1 以上の整数を指定する。<br>
     ids には録画番組 ID のリストを指定できる。指定時は指定された ID の録画番組のみを返す。
@@ -275,14 +288,6 @@ async def VideosAPI(
 
     # 生 SQL クエリを構築
     base_query = """
-        WITH target_records AS (
-            SELECT rp.id, rp.start_time
-            FROM recorded_programs rp
-            WHERE 1=1
-            {where_clause}
-            ORDER BY rp.start_time {order}, rp.id {order}
-            LIMIT ? OFFSET ?
-        )
         SELECT
             rp.id AS rp_id,
             rp.recording_start_margin,
@@ -334,7 +339,9 @@ async def VideosAPI(
             rv.secondary_audio_codec,
             rv.secondary_audio_channel,
             rv.secondary_audio_sampling_rate,
-            rv.key_frames,
+            -- key_frames は巨大なデータなので実際のデータは取得せず
+            -- 空かどうかの判定結果だけを取得する
+            CASE WHEN rv.key_frames != '[]' THEN 1 ELSE 0 END AS has_key_frames,
             rv.cm_sections,
             ch.id AS ch_id,
             ch.display_channel_id,
@@ -349,11 +356,13 @@ async def VideosAPI(
             ch.is_subchannel,
             ch.is_radiochannel,
             ch.is_watchable
-        FROM target_records tr
-        JOIN recorded_programs rp ON tr.id = rp.id
+        FROM recorded_programs rp
         JOIN recorded_videos rv ON rp.id = rv.recorded_program_id
         LEFT JOIN channels ch ON rp.channel_id = ch.id
-        ORDER BY tr.start_time {order}, tr.id {order}
+        WHERE 1=1
+        {where_clause}
+        ORDER BY rp.start_time {order}, rp.id {order}
+        LIMIT ? OFFSET ?
     """
 
     # ids が指定されている場合は、指定された ID の録画番組のみを返す
@@ -375,7 +384,7 @@ async def VideosAPI(
                 where_clause = f'AND rp.id IN ({placeholders})',
                 order = 'DESC'  # order は無視されるが、SQL の構文上必要
             )
-            params = [*target_ids, PAGE_SIZE, 0]  # OFFSET は 0 固定
+            params = [*target_ids, str(PAGE_SIZE), '0']  # OFFSET は 0 固定
 
             # 総数を取得
             total_query = 'SELECT COUNT(*) as count FROM recorded_programs WHERE id IN ({})'.format(
@@ -389,7 +398,7 @@ async def VideosAPI(
                 where_clause = f'AND rp.id IN ({",".join(["?" for _ in ids])})',
                 order = 'DESC' if order == 'desc' else 'ASC'
             )
-            params = [*ids, PAGE_SIZE, (page - 1) * PAGE_SIZE]
+            params = [*ids, str(PAGE_SIZE), str((page - 1) * PAGE_SIZE)]
 
             # 総数を取得
             total_query = 'SELECT COUNT(*) as count FROM recorded_programs WHERE id IN ({})'.format(
@@ -403,7 +412,7 @@ async def VideosAPI(
             where_clause = '',
             order = 'DESC' if order == 'desc' else 'ASC'
         )
-        params = [PAGE_SIZE, (page - 1) * PAGE_SIZE]
+        params = [str(PAGE_SIZE), str((page - 1) * PAGE_SIZE)]
 
         # 総数を取得
         total_query = 'SELECT COUNT(*) as count FROM recorded_programs'
@@ -453,7 +462,7 @@ async def VideosSearchAPI(
     page: Annotated[int, Query(description='ページ番号。')] = 1,
 ):
     """
-    指定されたキーワードで録画番組を一度に 100 件ずつ検索する。<br>
+    指定されたキーワードで録画番組を一度に 30 件ずつ検索する。<br>
     キーワードは title または series_title または subtitle のいずれかに部分一致する録画番組を検索する。<br>
     order には "desc" か "asc" を指定する。<br>
     page (ページ番号) には 1 以上の整数を指定する。<br>
@@ -505,14 +514,6 @@ async def VideosSearchAPI(
 
     # 生 SQL クエリを構築
     base_query = """
-        WITH target_records AS (
-            SELECT rp.id, rp.start_time
-            FROM recorded_programs rp
-            LEFT JOIN channels ch ON rp.channel_id = ch.id
-            WHERE {where_clause}
-            ORDER BY rp.start_time {order}, rp.id {order}
-            LIMIT ? OFFSET ?
-        )
         SELECT
             rp.id AS rp_id,
             rp.recording_start_margin,
@@ -564,7 +565,9 @@ async def VideosSearchAPI(
             rv.secondary_audio_codec,
             rv.secondary_audio_channel,
             rv.secondary_audio_sampling_rate,
-            rv.key_frames,
+            -- key_frames は巨大なデータなので実際のデータは取得せず
+            -- 空かどうかの判定結果だけを取得する
+            CASE WHEN rv.key_frames != '[]' THEN 1 ELSE 0 END AS has_key_frames,
             rv.cm_sections,
             ch.id AS ch_id,
             ch.display_channel_id,
@@ -579,11 +582,12 @@ async def VideosSearchAPI(
             ch.is_subchannel,
             ch.is_radiochannel,
             ch.is_watchable
-        FROM target_records tr
-        JOIN recorded_programs rp ON tr.id = rp.id
+        FROM recorded_programs rp
         JOIN recorded_videos rv ON rp.id = rv.recorded_program_id
         LEFT JOIN channels ch ON rp.channel_id = ch.id
-        ORDER BY tr.start_time {order}, tr.id {order}
+        WHERE {where_clause}
+        ORDER BY rp.start_time {order}, rp.id {order}
+        LIMIT ? OFFSET ?
     """
 
     # クエリとパラメータを構築
@@ -594,12 +598,12 @@ async def VideosSearchAPI(
     params.extend([str(PAGE_SIZE), str((page - 1) * PAGE_SIZE)])
 
     # 総数を取得するクエリを構築
-    total_query = """
+    total_query = f"""
         SELECT COUNT(*) as count
         FROM recorded_programs rp
         LEFT JOIN channels ch ON rp.channel_id = ch.id
         WHERE {where_clause}
-    """.format(where_clause=where_clause)
+    """
     total_params = params[:-2]  # LIMIT と OFFSET を除外
 
     try:
@@ -709,14 +713,13 @@ async def VideoJikkyoCommentsAPI(
 @router.post(
     '/{video_id}/reanalyze',
     summary = '録画番組メタデータ再解析 API',
-    response_description = 'メタデータ再解析結果のステータス。',
-    response_model = schemas.ReanalyzeStatus,
+    status_code = status.HTTP_204_NO_CONTENT,
 )
 async def VideoReanalyzeAPI(
     recorded_program: Annotated[RecordedProgram, Depends(GetRecordedProgram)],
 ):
     """
-    指定された録画番組のメタデータ（動画情報・番組情報・キーフレーム情報など）を再解析する。<br>
+    指定された録画番組のメタデータ（動画情報・番組情報・キーフレーム情報・CM 区間情報など）を再解析する。<br>
     生成に時間のかかるシークバー用サムネイルタイルは既存ファイルがあれば再利用されるが、代表サムネイルはメタデータと同時に再度生成される。
     """
 
@@ -731,17 +734,12 @@ async def VideoReanalyzeAPI(
                 force_update = True,
             )
 
-        return {
-            'is_success': True,
-            'detail': 'Successfully reanalyzed the video.',
-        }
-
     except Exception as ex:
-        logging.error(f'Failed to reanalyze the video_id {recorded_program.id}:', exc_info=ex)
-        return {
-            'is_success': False,
-            'detail': f'Failed to reanalyze the video: {ex!s}',
-        }
+        logging.error(f'[VideoReanalyzeAPI] Failed to reanalyze the video_id {recorded_program.id}:', exc_info=ex)
+        raise HTTPException(
+            status_code = status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail = f'Failed to reanalyze the video: {ex!s}',
+        )
 
 
 @router.get(
@@ -793,8 +791,7 @@ async def VideoThumbnailTileAPI(
 @router.post(
     '/{video_id}/thumbnail/regenerate',
     summary = 'サムネイル再生成 API',
-    response_description = 'サムネイル再生成結果のステータス。',
-    response_model = schemas.ThumbnailRegenerationStatus,
+    status_code = status.HTTP_204_NO_CONTENT,
 )
 async def VideoThumbnailRegenerateAPI(
     recorded_program: Annotated[RecordedProgram, Depends(GetRecordedProgram)],
@@ -814,16 +811,139 @@ async def VideoThumbnailRegenerateAPI(
         async with DriveIOLimiter.getSemaphore(file_path):
             # サムネイル生成を実行
             generator = ThumbnailGenerator.fromRecordedProgram(recorded_program_schema)
-            await generator.generate(skip_tile_if_exists=skip_tile_if_exists)
-
-        return {
-            'is_success': True,
-            'detail': 'Successfully regenerated thumbnails.',
-        }
+            await generator.generateAndSave(skip_tile_if_exists=skip_tile_if_exists)
 
     except Exception as ex:
-        logging.error(f'Failed to regenerate thumbnails for video_id {recorded_program.id}:', exc_info=ex)
-        return {
-            'is_success': False,
-            'detail': f'Failed to regenerate thumbnails: {ex!s}',
-        }
+        logging.error(f'[VideoThumbnailRegenerateAPI] Failed to regenerate thumbnails for video_id {recorded_program.id}:', exc_info=ex)
+        raise HTTPException(
+            status_code = status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail = f'Failed to regenerate thumbnails: {ex!s}',
+        )
+
+
+@router.delete(
+    '/{video_id}',
+    summary = '録画ファイル削除 API',
+    status_code = status.HTTP_204_NO_CONTENT,
+)
+async def VideoDeleteAPI(
+    recorded_program: Annotated[RecordedProgram, Depends(GetRecordedProgram)],
+    current_user: Annotated[User, Depends(GetCurrentAdminUser)],
+):
+    """
+    指定された録画番組のファイルとメタデータを削除する。不可逆な処理であるため、慎重に実行すること。
+    - データベースから録画番組情報・録画ファイル情報を削除
+    - 録画ファイルに紐づくサムネイルファイルを削除
+    - 録画ファイルに関連する補助ファイル (.ts.program.txt, .ts.err) を削除
+    - 録画ファイル本体を削除
+
+    JWT エンコードされたアクセストークンがリクエストの Authorization: Bearer に設定されていて、かつ管理者アカウントでないとアクセスできない。
+    """
+
+    # 録画ファイルの情報を取得
+    file_path = anyio.Path(recorded_program.recorded_video.file_path)
+    file_hash = recorded_program.recorded_video.file_hash
+    file_name = file_path.name
+    file_dir = file_path.parent
+
+    # 万が一処理が失敗してもダメージが比較的少ない順に実行する
+    try:
+        # 1. データベースから録画番組情報・録画ファイル情報を削除
+        # RecordedVideo も CASCADE 制約で削除される
+        try:
+            # 同じ file_hash を持つ他のレコードが存在するかチェック
+            duplicate_records = await RecordedProgram.filter(
+                recorded_video__file_hash=file_hash,
+            ).exclude(id=recorded_program.id).count()
+            has_duplicates = duplicate_records > 0
+
+            # データベースから録画番組情報を削除
+            await recorded_program.delete()
+        except Exception as ex:
+            logging.error('[VideoDeleteAPI] Failed to delete recorded program from database:', exc_info=ex)
+            raise HTTPException(
+                status_code = status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail = f'Failed to delete recorded program from database: {ex!s}',
+            )
+
+        # 2. サムネイルファイルの削除
+        # 同じ file_hash を持つ他のレコードが存在する場合はスキップ
+        thumbnails_dir = anyio.Path(str(THUMBNAILS_DIR))
+        if await thumbnails_dir.is_dir() and not has_duplicates:
+            # 通常サムネイル (.webp または .jpg)
+            for ext in ['.webp', '.jpg']:
+                thumbnail_path = thumbnails_dir / f'{file_hash}{ext}'
+                if await thumbnail_path.is_file():
+                    try:
+                        await thumbnail_path.unlink()
+                    except Exception as ex:
+                        logging.error(f'[VideoDeleteAPI] Failed to delete thumbnail file: {thumbnail_path}', exc_info=ex)
+                        raise HTTPException(
+                            status_code = status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail = f'Failed to delete thumbnail file: {ex!s}',
+                        )
+                elif ext == '.webp':  # JPEG はよほど長尺でない限り発生しないので WebP のみチェック
+                    logging.warning(f'[VideoDeleteAPI] Thumbnail file does not exist: {thumbnail_path}')
+
+            # タイルサムネイル (.webp または .jpg)
+            for ext in ['.webp', '.jpg']:
+                tile_thumbnail_path = thumbnails_dir / f'{file_hash}_tile{ext}'
+                if await tile_thumbnail_path.is_file():
+                    try:
+                        await tile_thumbnail_path.unlink()
+                    except Exception as ex:
+                        logging.error(f'[VideoDeleteAPI] Failed to delete tile thumbnail file: {tile_thumbnail_path}', exc_info=ex)
+                        raise HTTPException(
+                            status_code = status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail = f'Failed to delete tile thumbnail file: {ex!s}',
+                        )
+                elif ext == '.webp':  # JPEG はよほど長尺でない限り発生しないので WebP のみチェック
+                    logging.warning(f'[VideoDeleteAPI] Tile thumbnail file does not exist: {tile_thumbnail_path}')
+        elif has_duplicates:
+            logging.info(f'[VideoDeleteAPI] Skip deleting thumbnail files because other records with the same file_hash exist: {file_hash}')
+
+        # 3. 関連する補助ファイルの削除 (.ts.program.txt, .ts.err)
+        ## .ts.program.txt ファイル (録画ファイルが hoge.ts の場合は hoge.ts.program.txt)
+        ts_program_txt_path = anyio.Path(f'{file_dir}/{file_name}.program.txt')
+        if await ts_program_txt_path.is_file():
+            try:
+                await ts_program_txt_path.unlink()
+            except Exception as ex:
+                logging.error(f'[VideoDeleteAPI] Failed to delete .ts.program.txt file: {ts_program_txt_path}', exc_info=ex)
+                raise HTTPException(
+                    status_code = status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail = f'Failed to delete .ts.program.txt file: {ex!s}',
+                )
+        ## .ts.err ファイル (録画ファイルが hoge.ts の場合は hoge.ts.err)
+        ts_err_path = anyio.Path(f'{file_dir}/{file_name}.err')
+        if await ts_err_path.is_file():
+            try:
+                await ts_err_path.unlink()
+            except Exception as ex:
+                logging.error(f'[VideoDeleteAPI] Failed to delete .ts.err file: {ts_err_path}', exc_info=ex)
+                raise HTTPException(
+                    status_code = status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail = f'Failed to delete .ts.err file: {ex!s}',
+                )
+
+        # 4. 録画ファイル本体の削除
+        if await file_path.is_file():
+            try:
+                await file_path.unlink()
+                logging.info(f'[VideoDeleteAPI] Successfully deleted recorded video file: {file_path}')
+            except Exception as ex:
+                # 録画ファイル本体の削除に失敗した場合はクリティカルなエラー
+                logging.error(f'[VideoDeleteAPI] Failed to delete recorded video file: {file_path}', exc_info=ex)
+                raise HTTPException(
+                    status_code = status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail = f'Failed to delete recorded video file: {ex!s}',
+                )
+        else:
+            logging.warning(f'[VideoDeleteAPI] Recorded video file does not exist: {file_path}')
+
+    except Exception as ex:
+        logging.error('[VideoDeleteAPI] Failed to delete recorded program:', exc_info=ex)
+        raise HTTPException(
+            status_code = status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail = f'Failed to delete recorded program: {ex!s}',
+        )
