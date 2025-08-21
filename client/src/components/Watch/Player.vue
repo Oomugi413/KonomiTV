@@ -77,9 +77,6 @@ const handleSettingCoverClick = () => {
 
 // DPlayer のデフォルトスタイルを上書き
 .watch-player__dplayer {
-    @include smartphone-vertical {
-        overflow: visible !important;
-    }
     svg circle, svg path {
         fill: rgb(var(--v-theme-text)) !important;
     }
@@ -332,6 +329,9 @@ const handleSettingCoverClick = () => {
     .dplayer-setting-box {
         z-index: 10 !important;
         @include tablet-vertical {
+            height: calc(100% - 60px) !important;
+        }
+        @include smartphone-vertical {
             height: calc(100% - 60px) !important;
         }
         .dplayer-setting-origin-panel {
