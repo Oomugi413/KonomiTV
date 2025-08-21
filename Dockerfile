@@ -18,10 +18,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends aria2 ca-certif
 ## サードパーティーライブラリは変更が少ないので、先にダウンロード処理を実行してビルドキャッシュを効かせる
 WORKDIR /
 ## リリース版用
-# RUN aria2c -x10 https://github.com/tsukumijima/KonomiTV/releases/download/v0.12.0/thirdparty-linux.tar.xz
+# RUN aria2c -x10 https://github.com/Oomugi413/KonomiTV/releases/download/v0.12.2/thirdparty-linux.tar.xz
 # RUN tar xvf thirdparty-linux.tar.xz
-## 開発版 (0.xx.x-dev) 用
-RUN aria2c -x10 https://nightly.link/tsukumijima/KonomiTV/actions/runs/16775962942/thirdparty-linux.tar.xz.zip
+## 開発版 (0.x.x-dev) 用
+RUN aria2c -x10 https://nightly.link/Oomugi413/KonomiTV/actions/runs/16622138414/thirdparty-linux.tar.xz.zip
 RUN unzip thirdparty-linux.tar.xz.zip && tar xvf thirdparty-linux.tar.xz
 
 # --------------------------------------------------------------------------------------------------------------
@@ -52,7 +52,7 @@ RUN yarn build
 
 # Ubuntu 22.04 LTS (with CUDA) をベースイメージとして利用
 # CUDA 付きなのは NVEncC を動かせるようにするため
-FROM nvidia/cuda:12.2.2-runtime-ubuntu22.04
+FROM nvidia/cuda:13.0.0-runtime-ubuntu22.04
 
 # タイムゾーンを東京に設定
 ENV TZ=Asia/Tokyo
