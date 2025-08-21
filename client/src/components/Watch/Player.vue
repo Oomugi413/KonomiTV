@@ -504,28 +504,28 @@ _::-webkit-full-page-media, _:future, :root .dplayer-icon:hover .dplayer-icon-co
         }
     }
 
-    .watch-player__dplayer-setting-cover {
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        background-color: rgba(0, 0, 0, 0.5);
-        opacity: 0;
-        visibility: hidden;
-        transition: opacity 0.3s, visibility 0.3s;
-        z-index: 50;
-
-        &--display {
-            // タッチデバイスかつスマホ縦画面のみ、設定パネルを開いた時にカバーを表示する
-            @media (hover: none) {
-                @include smartphone-vertical {
-                    opacity: 1;
-                    visibility: visible;
-                }
-            }
-        }
-    }
+//     .watch-player__dplayer-setting-cover {
+//         position: fixed;
+//         top: 0;
+//         left: 0;
+//         width: 100%;
+//         height: 100%;
+//         background-color: rgba(0, 0, 0, 0.5);
+//         opacity: 0;
+//         visibility: hidden;
+//         transition: opacity 0.3s, visibility 0.3s;
+//         z-index: 50;
+// 
+//         &--display {
+//             // タッチデバイスかつスマホ縦画面のみ、設定パネルを開いた時にカバーを表示する
+//             @media (hover: none) {
+//                 @include smartphone-vertical {
+//                     opacity: 1;
+//                     visibility: visible;
+//                 }
+//             }
+//         }
+//     }
 
     .watch-player__background-wrapper {
         position: absolute;
