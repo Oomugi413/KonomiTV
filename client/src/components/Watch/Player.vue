@@ -18,9 +18,11 @@
             :class="{'watch-player__buffering--display': playerStore.is_video_buffering}">
         </v-progress-circular>
         <div class="watch-player__dplayer"></div>
+        <!--
         <div class="watch-player__dplayer-setting-cover"
             :class="{'watch-player__dplayer-setting-cover--display': playerStore.is_player_setting_panel_open}"
             @click="handleSettingCoverClick"></div>
+        -->
         <div class="watch-player__button"
                 @mousemove="playerStore.event_emitter.emit('SetControlDisplayTimer', {event: $event})"
                 @touchmove="playerStore.event_emitter.emit('SetControlDisplayTimer', {event: $event})"
