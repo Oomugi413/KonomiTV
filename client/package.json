@@ -1,6 +1,6 @@
 {
     "name": "KonomiTV",
-    "version": "0.12.3",
+    "version": "0.12.4",
     "private": true,
     "scripts": {
         "akebi": "run-script-os",
