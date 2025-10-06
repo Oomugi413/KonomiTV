@@ -54,6 +54,34 @@
                         <span style="margin-left: 6px;">マイリストに追加</span>
                     </template>
                 </div>
+                <div v-ripple="!is_offline_cached" class="program-info__button program-info__button--download"
+                    :class="{
+                        'program-info__button--downloading': is_downloading || is_paused,
+                        'program-info__button--disabled': is_offline_cached
+                    }"
+                    @click="handleDownloadClick">
+                    <div class="program-info__button-progress"
+                        :style="`width: ${is_downloading || is_paused ? download_progress : (is_offline_cached ? 100 : 0)}%`"></div>
+                    <div class="program-info__button-content">
+                        <template v-if="is_offline_cached">
+                            <Icon icon="fluent:cloud-checkmark-24-filled" width="18px" height="18px"
+                                style="color: rgb(var(--v-theme-primary)); margin-bottom: -1px" />
+                            <span style="margin-left: 6px;">ダウンロード済み</span>
+                        </template>
+                        <template v-else-if="is_downloading">
+                            <Icon icon="fluent:pause-24-regular" width="18px" height="18px" style="margin-bottom: -1px" />
+                            <span style="margin-left: 6px;">ダウンロード中 {{ download_progress }}%</span>
+                        </template>
+                        <template v-else-if="is_paused">
+                            <Icon icon="fluent:play-24-regular" width="18px" height="18px" style="margin-bottom: -1px" />
+                            <span style="margin-left: 6px;">一時停止中 {{ download_progress }}%</span>
+                        </template>
+                        <template v-else>
+                            <Icon icon="fluent:arrow-circle-down-24-regular" width="18px" height="18px" style="margin-bottom: -1px" />
+                            <span style="margin-left: 6px;">オフライン用にダウンロード</span>
+                        </template>
+                    </div>
+                </div>
             </div>
         </section>
         <section class="program-detail-container">
@@ -71,9 +99,11 @@ import { mapStores } from 'pinia';
 import { defineComponent } from 'vue';
 
 import Message from '@/message';
+import DownloadManager from '@/services/DownloadManager';
+import OfflineDownload from '@/services/OfflineDownload';
 import usePlayerStore from '@/stores/PlayerStore';
 import useSettingsStore from '@/stores/SettingsStore';
-import Utils, { ProgramUtils } from '@/utils';
+import Utils, { PlayerUtils, ProgramUtils } from '@/utils';
 
 export default defineComponent({
     name: 'Panel-RecordedProgramTab',
@@ -85,6 +115,12 @@ export default defineComponent({
 
             // コメント数カウント
             comment_count: null as number | null,
+
+            // オフライン視聴用の固定画質
+            OFFLINE_QUALITY: '1080p' as const,
+
+            // オフラインキャッシュ状態
+            is_offline_cached: false,
         };
     },
     computed: {
@@ -95,6 +131,24 @@ export default defineComponent({
             return this.settingsStore.settings.mylist.some(item =>
                 item.type === 'RecordedProgram' && item.id === this.playerStore.recorded_program.id
             );
+        },
+
+        // オフライン視聴用のダウンロード状態
+        is_downloading(): boolean {
+            const task = DownloadManager.tasks.value.get(`${this.playerStore.recorded_program.id}-${this.OFFLINE_QUALITY}`);
+            return task?.status === 'downloading';
+        },
+
+        // オフライン視聴用のダウンロード進捗
+        download_progress(): number {
+            const task = DownloadManager.tasks.value.get(`${this.playerStore.recorded_program.id}-${this.OFFLINE_QUALITY}`);
+            return task?.progress || 0;
+        },
+
+        // ダウンロードが一時停止中かどうか
+        is_paused(): boolean {
+            const task = DownloadManager.tasks.value.get(`${this.playerStore.recorded_program.id}-${this.OFFLINE_QUALITY}`);
+            return task?.status === 'paused';
         },
     },
     methods: {
@@ -116,14 +170,71 @@ export default defineComponent({
                 });
             }
         },
+
+        // ダウンロードボタンのクリックハンドラー
+        async handleDownloadClick(): Promise<void> {
+            if (this.is_offline_cached) {
+                // ダウンロード済みの場合は何もしない（禁用状態）
+                return;
+            } else if (this.is_downloading) {
+                // ダウンロード中の場合は一時停止
+                await this.pauseDownload();
+            } else if (this.is_paused) {
+                // 一時停止中の場合は再開
+                await this.resumeDownload();
+            } else {
+                // 未ダウンロードの場合は開始
+                await this.downloadForOffline();
+            }
+        },
+
+        // オフライン視聴用にダウンロード
+        async downloadForOffline(): Promise<void> {
+            // HEVC サポートを検出
+            const use_hevc = PlayerUtils.isHEVCVideoSupported();
+
+            // DownloadManager のヘルパーメソッドを使用（ストレージチェック込み）
+            const success = await DownloadManager.startDownloadWithCheck(
+                this.playerStore.recorded_program.id,
+                this.OFFLINE_QUALITY,
+                this.playerStore.recorded_program.title,
+                use_hevc,
+                false, // toast は表示しない（Panel なので）
+            );
+
+            if (success) {
+                this.is_offline_cached = true;
+            }
+        },
+
+        // ダウンロードを一時停止
+        async pauseDownload(): Promise<void> {
+            DownloadManager.pauseDownload(this.playerStore.recorded_program.id, this.OFFLINE_QUALITY);
+        },
+
+        // ダウンロードを再開
+        async resumeDownload(): Promise<void> {
+            DownloadManager.resumeDownload(this.playerStore.recorded_program.id, this.OFFLINE_QUALITY);
+        },
+
+        // オフラインキャッシュを削除
+        async deleteOfflineCache(): Promise<void> {
+            const success = await DownloadManager.deleteDownload(this.playerStore.recorded_program.id, this.OFFLINE_QUALITY);
+            if (success) {
+                this.is_offline_cached = false;
+            }
+        },
     },
-    created() {
+    async created() {
         // PlayerController 側からCommentReceived イベントで過去ログコメントを受け取り、コメント数を算出する
         this.playerStore.event_emitter.on('CommentReceived', (event) => {
             if (event.is_initial_comments === true) {  // 録画では初期コメントしか発生しない
                 this.comment_count = event.comments.length;
             }
         });
+
+        // オフラインキャッシュの状態をチェック
+        this.is_offline_cached = await OfflineDownload.isVideoCached(this.playerStore.recorded_program.id, this.OFFLINE_QUALITY);
     },
     beforeUnmount() {
         // CommentReceived イベントの全てのイベントハンドラーを削除
@@ -283,6 +394,38 @@ export default defineComponent({
 
             &:hover {
                 color: rgb(var(--v-theme-text));
+            }
+
+            &--download {
+                position: relative;
+                overflow: hidden;
+            }
+
+            &--disabled {
+                opacity: 0.6;
+                cursor: not-allowed;
+
+                &:hover {
+                    color: rgb(var(--v-theme-text-darken-1));
+                }
+            }
+
+            &-progress {
+                position: absolute;
+                top: 0;
+                left: 0;
+                height: 100%;
+                background: rgb(var(--v-theme-primary));
+                opacity: 0.25;
+                transition: width 0.3s ease;
+                border-radius: 4px;
+            }
+
+            &-content {
+                position: relative;
+                display: flex;
+                align-items: center;
+                z-index: 1;
             }
         }
     }

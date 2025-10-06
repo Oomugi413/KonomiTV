@@ -75,6 +75,56 @@ class DownloadManager {
     }
 
     /**
+     * ストレージ配額をチェックしてからダウンロードを開始
+     * UI コンポーネントから直接呼び出すためのヘルパーメソッド
+     * @param video_id 録画番組 ID
+     * @param quality 画質
+     * @param title 番組タイトル
+     * @param use_hevc HEVC (H.265) でダウンロードするかどうか
+     * @param show_toast 開始時に toast メッセージを表示するかどうか（デフォルト: false）
+     * @returns ダウンロードが成功したかどうか
+     */
+    async startDownloadWithCheck(
+        video_id: number,
+        quality: string,
+        title: string,
+        use_hevc: boolean,
+        show_toast: boolean = false,
+    ): Promise<boolean> {
+        // ストレージ配額をチェック
+        const quota = await OfflineDownload.getStorageQuota();
+        if (quota) {
+            console.log(`[OfflineDownload] ストレージ使用状況: ${Utils.formatBytes(quota.usage)} / ${Utils.formatBytes(quota.quota)}`);
+
+            // 推奨最小容量: 10GB
+            const RECOMMENDED_MINIMUM = 10 * 1024 * 1024 * 1024;
+
+            // 総容量が 10GB 未満の場合は警告
+            if (quota.quota < RECOMMENDED_MINIMUM) {
+                Message.warning(`ストレージの総容量が推奨値 (10GB) より少ないです。現在: ${Utils.formatBytes(quota.quota)}`);
+            }
+
+            // 空き容量が 5GB 未満の場合は警告
+            const MINIMUM_FREE_SPACE = 5 * 1024 * 1024 * 1024;
+            if (quota.available < MINIMUM_FREE_SPACE) {
+                Message.warning(`ストレージの空き容量が不足しています: ${Utils.formatBytes(quota.available)} 残り (推奨: 5GB 以上)`);
+                // 続行するか確認
+                if (!confirm('空き容量が不足していますが、ダウンロードを続行しますか？')) {
+                    return false;
+                }
+            }
+        }
+
+        // toast メッセージを表示（オプション）
+        if (show_toast) {
+            Message.info('オフライン視聴用のダウンロードを開始しました。進捗は画面右下の円形アイコンで確認できます。');
+        }
+
+        // ダウンロードを開始
+        return this.startDownload(video_id, quality, title, use_hevc);
+    }
+
+    /**
      * ダウンロードタスクを開始
      * @param video_id 録画番組 ID
      * @param quality 画質

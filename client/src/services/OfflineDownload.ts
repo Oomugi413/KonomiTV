@@ -854,8 +854,32 @@ class OfflineDownload {
                     throw new Error(`Failed to download segment ${index + 1}: ${lastError?.message || 'Unknown error'}`);
                 }
 
-                // セグメントのダウンロード完了（Service Worker が自動的にキャッシュします）
-                console.log(`[OfflineDownload] Segment ${index + 1}/${segmentUrls.length} downloaded, size: ${segmentBlob.size} bytes`);
+                // セグメントを規範化された URL でキャッシュ（断点続伝のため）
+                let normalizedSegmentUrl = originalSegmentUrl;
+                try {
+                    const url = new URL(originalSegmentUrl);
+                    const params = new URLSearchParams(url.search);
+                    const sequence = params.get('sequence');
+                    if (sequence !== null) {
+                        url.search = `?sequence=${sequence}`;
+                        normalizedSegmentUrl = url.toString();
+                    }
+                } catch (e) {
+                    console.warn(`[OfflineDownload] Failed to normalize segment URL: ${originalSegmentUrl}`, e);
+                }
+
+                // Response を構築してキャッシュ
+                const segmentResponse = new Response(segmentBlob, {
+                    status: 200,
+                    statusText: 'OK',
+                    headers: {
+                        'Content-Type': 'video/mp2t',
+                    },
+                });
+                await cache.put(normalizedSegmentUrl, segmentResponse);
+
+                // セグメントのダウンロード完了
+                console.log(`[OfflineDownload] Segment ${index + 1}/${segmentUrls.length} downloaded and cached, size: ${segmentBlob.size} bytes`);
                 downloadedCounts.value++;
 
                 // メタデータを更新（ダウンロード済みセグメントを記録、状態は書き込まない）

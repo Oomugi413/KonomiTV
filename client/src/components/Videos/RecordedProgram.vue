@@ -295,48 +295,21 @@ onMounted(async () => {
 
 // オフライン視聴用にダウンロード
 const downloadForOffline = async () => {
-    // ストレージ配額をチェック
-    const quota = await OfflineDownload.getStorageQuota();
-    if (quota) {
-        console.log(`[OfflineDownload] ストレージ使用状況: ${Utils.formatBytes(quota.usage)} / ${Utils.formatBytes(quota.quota)}`);
-
-        // 推奨最小容量: 10GB
-        const RECOMMENDED_MINIMUM = 10 * 1024 * 1024 * 1024;
-
-        // 総容量が 10GB 未満の場合は警告
-        if (quota.quota < RECOMMENDED_MINIMUM) {
-            Message.warning(`ストレージの総容量が推奨値 (10GB) より少ないです。現在: ${Utils.formatBytes(quota.quota)}`);
-        }
-
-        // 空き容量が 5GB 未満の場合は警告
-        const MINIMUM_FREE_SPACE = 5 * 1024 * 1024 * 1024;
-        if (quota.available < MINIMUM_FREE_SPACE) {
-            Message.warning(`ストレージの空き容量が不足しています: ${Utils.formatBytes(quota.available)} 残り (推奨: 5GB 以上)`);
-            // 続行するか確認
-            if (!confirm('空き容量が不足していますが、ダウンロードを続行しますか？')) {
-                return;
-            }
-        }
-    }
-
-    // DownloadManager を使ってダウンロードを開始（バックグラウンドで実行）
-    Message.info('オフライン視聴用のダウンロードを開始しました。進捗は画面右下の円形アイコンで確認できます。');
-
     // HEVC サポートを検出
     const use_hevc = PlayerUtils.isHEVCVideoSupported();
-    console.log(`[RecordedProgram] Starting download with HEVC: ${use_hevc}`);
 
-    // 非同期でダウンロードを開始（await しない）
-    DownloadManager.startDownload(
+    // DownloadManager のヘルパーメソッドを使用（ストレージチェック込み）
+    const success = await DownloadManager.startDownloadWithCheck(
         props.program.id,
         OFFLINE_QUALITY,
         props.program.title,
         use_hevc,
-    ).then((success) => {
-        if (success) {
-            is_offline_cached.value = true;
-        }
-    });
+        true, // toast を表示（リストなので）
+    );
+
+    if (success) {
+        is_offline_cached.value = true;
+    }
 };
 
 // オフラインキャッシュを削除
