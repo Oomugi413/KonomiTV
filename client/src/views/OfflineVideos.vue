@@ -167,10 +167,7 @@
                             >
                                 <div class="offline-video__container">
                                     <router-link v-ripple class="offline-video__content"
-                                        :to="video.status === 'completed' ? `/videos/watch/${video.video_id}` : { path: '' }"
-                                        :class="{
-                                            'offline-video__content--disabled': video.status !== 'completed',
-                                        }">
+                                        :to="video.status === 'completed' || video.status === 'paused' ? `/videos/watch/${video.video_id}` : { path: '' }">
                                         <!-- サムネイル -->
                                         <div class="offline-video__thumbnail">
                                             <img
@@ -1115,11 +1112,11 @@ export default defineComponent({
     }
 
     &__container {
-        padding: 16px;
+        padding: 0px 16px;
         cursor: pointer;
         transition: background 0.15s ease;
         @include smartphone-vertical {
-            padding: 12px;
+            padding: 0px 9px;
         }
 
         &:hover {
@@ -1129,25 +1126,14 @@ export default defineComponent({
 
     &__content {
         display: flex;
-        align-items: flex-start;
+        align-items: center;
         gap: 16px;
         color: inherit;
         text-decoration: none;
+        padding: 12px 0px;
         @include smartphone-vertical {
             gap: 12px;
-        }
-
-        &--disabled {
-            cursor: not-allowed;
-            opacity: 0.6;
-
-            .offline-video__thumbnail {
-                cursor: not-allowed;
-            }
-
-            .offline-video__title {
-                cursor: not-allowed;
-            }
+            padding: 8px 0px;
         }
     }
 
@@ -1210,7 +1196,6 @@ export default defineComponent({
         font-size: 16px;
         font-weight: 600;
         line-height: 1.4;
-        cursor: pointer;
         overflow: hidden;
         text-overflow: ellipsis;
         display: -webkit-box;
@@ -1219,10 +1204,6 @@ export default defineComponent({
         -webkit-box-orient: vertical;
         @include smartphone-vertical {
             font-size: 14px;
-        }
-
-        &:hover {
-            color: rgb(var(--v-theme-primary));
         }
     }
 
@@ -1248,7 +1229,7 @@ export default defineComponent({
     &__progress-text {
         font-size: 12px;
         color: rgb(var(--v-theme-text-darken-1));
-        text-align: center;
+        text-align: right;
         @include smartphone-vertical {
             font-size: 11px;
         }
