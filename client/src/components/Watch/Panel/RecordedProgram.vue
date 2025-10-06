@@ -43,43 +43,45 @@
                     <span class="ml-2">コメント数:</span>
                     <span class="ml-2">{{comment_count ?? '--'}}</span>
                 </div>
-                <div v-ripple class="program-info__button" @click="toggleMylist">
-                    <template v-if="isInMylist">
-                        <Icon icon="fluent:checkmark-16-filled" width="18px" height="18px"
-                            style="color: rgb(var(--v-theme-primary)); margin-bottom: -1px" />
-                        <span style="margin-left: 6px;">マイリストに追加済み</span>
-                    </template>
-                    <template v-else>
-                        <Icon icon="fluent:add-16-filled" width="18px" height="18px" style="margin-bottom: -1px" />
-                        <span style="margin-left: 6px;">マイリストに追加</span>
-                    </template>
-                </div>
-                <div v-ripple="!is_offline_cached" class="program-info__button program-info__button--download"
-                    :class="{
-                        'program-info__button--downloading': is_downloading || is_paused,
-                        'program-info__button--disabled': is_offline_cached
-                    }"
-                    @click="handleDownloadClick">
-                    <div class="program-info__button-progress"
-                        :style="`width: ${is_downloading || is_paused ? download_progress : (is_offline_cached ? 100 : 0)}%`"></div>
-                    <div class="program-info__button-content">
-                        <template v-if="is_offline_cached">
-                            <Icon icon="fluent:cloud-checkmark-24-filled" width="18px" height="18px"
+                <div class="program-info__button-container">
+                    <div v-ripple class="program-info__button" @click="toggleMylist">
+                        <template v-if="isInMylist">
+                            <Icon icon="fluent:checkmark-16-filled" width="18px" height="18px"
                                 style="color: rgb(var(--v-theme-primary)); margin-bottom: -1px" />
-                            <span style="margin-left: 6px;">ダウンロード済み</span>
-                        </template>
-                        <template v-else-if="is_downloading">
-                            <Icon icon="fluent:pause-24-regular" width="18px" height="18px" style="margin-bottom: -1px" />
-                            <span style="margin-left: 6px;">ダウンロード中 {{ download_progress }}%</span>
-                        </template>
-                        <template v-else-if="is_paused">
-                            <Icon icon="fluent:play-24-regular" width="18px" height="18px" style="margin-bottom: -1px" />
-                            <span style="margin-left: 6px;">一時停止中 {{ download_progress }}%</span>
+                            <span style="margin-left: 6px;">マイリストに追加済み</span>
                         </template>
                         <template v-else>
-                            <Icon icon="fluent:arrow-circle-down-24-regular" width="18px" height="18px" style="margin-bottom: -1px" />
-                            <span style="margin-left: 6px;">オフライン用にダウンロード</span>
+                            <Icon icon="fluent:add-16-filled" width="18px" height="18px" style="margin-bottom: -1px" />
+                            <span style="margin-left: 6px;">マイリストに追加</span>
                         </template>
+                    </div>
+                    <div v-ripple="!is_offline_cached" class="program-info__button program-info__button--download"
+                        :class="{
+                            'program-info__button--downloading': is_downloading || is_paused,
+                            'program-info__button--disabled': is_offline_cached
+                        }"
+                        @click="handleDownloadClick">
+                        <div class="program-info__button-progress"
+                            :style="`width: ${is_downloading || is_paused ? download_progress : (is_offline_cached ? 100 : 0)}%`"></div>
+                        <div class="program-info__button-content">
+                            <template v-if="is_offline_cached">
+                                <Icon icon="fluent:cloud-checkmark-24-filled" width="18px" height="18px"
+                                    style="color: rgb(var(--v-theme-primary)); margin-bottom: -1px" />
+                                <span style="margin-left: 6px;">ダウンロード済み</span>
+                            </template>
+                            <template v-else-if="is_downloading">
+                                <Icon icon="fluent:pause-24-regular" width="18px" height="18px" style="margin-bottom: -1px" />
+                                <span style="margin-left: 6px;">ダウンロード中 {{ download_progress }}%</span>
+                            </template>
+                            <template v-else-if="is_paused">
+                                <Icon icon="fluent:play-24-regular" width="18px" height="18px" style="margin-bottom: -1px" />
+                                <span style="margin-left: 6px;">一時停止中 {{ download_progress }}%</span>
+                            </template>
+                            <template v-else>
+                                <Icon icon="fluent:arrow-circle-down-24-regular" width="18px" height="18px" style="margin-bottom: -1px" />
+                                <span style="margin-left: 6px;">オフライン用にダウンロード</span>
+                            </template>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -375,11 +377,18 @@ export default defineComponent({
             }
         }
 
+        .program-info__button-container {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 8px;
+            margin-top: 16px;
+        }
+
         .program-info__button {
             display: inline-flex;
             align-items: center;
             padding: 5px 8px;
-            margin-top: 16px;
             color: rgb(var(--v-theme-text-darken-1));
             font-size: 12.7px;
             line-height: 170%;
