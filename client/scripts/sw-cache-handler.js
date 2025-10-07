@@ -99,23 +99,19 @@ self.addEventListener('fetch', (event) => {
                     const trackerKey = `${videoId}-${quality}`;
                     const tracker = cacheMissTracker.get(trackerKey);
 
-                    // ダウンロードタスクあり → キャッシュ優先、なければネットワークから取得してキャッシュ
+                    // ダウンロードタスクあり → キャッシュ優先（プレイヤーは downloader の session を再利用）
                     if (tracker) {
                         const cache = await caches.open(cacheName);
                         const cachedResponse = await cache.match(normalizedUrl);
                         if (cachedResponse) {
-                            console.log(`[SW] ✓ Cache hit (playlist, download active): ${normalizedUrl}`);
+                            console.log(`[SW] ✓ Cache hit (playlist, download active, reusing session): ${normalizedUrl}`);
                             return cachedResponse;
                         }
 
-                        // キャッシュミス、ネットワークから取得してキャッシュ（ダウンローダーが新しい session を使用できるように）
+                        // キャッシュミス → 新しい session を取得するが、キャッシュしない（downloader の cache を保護）
                         try {
-                            console.log(`[SW] Cache miss, fetching playlist and caching for download: ${event.request.url}`);
+                            console.log(`[SW] Cache miss during download, fetching new session without caching: ${event.request.url}`);
                             const networkResponse = await fetch(event.request);
-                            if (networkResponse.ok) {
-                                await cache.put(normalizedUrl, networkResponse.clone());
-                                console.log(`[SW] Playlist cached for active download: ${normalizedUrl}`);
-                            }
                             return networkResponse;
                         } catch (error) {
                             console.log(`[SW] Network failed for playlist (download active): ${error}`);
@@ -183,6 +179,14 @@ self.addEventListener('fetch', (event) => {
                     console.log(`[SW] Segment cache miss, fetching from network: ${event.request.url}`);
                     const networkResponse = await fetch(event.request);
 
+                    // ダウンロードリクエストで 404 が返った場合、キャッシュされた playlist を削除
+                    // （session_id が無効になっている可能性があるため）
+                    if (cacheKey && networkResponse.status === 404) {
+                        const playlistUrl = `${url.origin}/api/streams/video/${videoId}/${quality}/playlist`;
+                        await cache.delete(playlistUrl);
+                        console.log(`[SW] Segment 404 detected, deleted cached playlist: ${playlistUrl}`);
+                    }
+
                     // ダウンロードタスクがある場合、自動的にキャッシュに保存（視聴しながら保存）
                     const trackerKey = `${videoId}-${quality}`;
                     const tracker = cacheMissTracker.get(trackerKey);
@@ -194,12 +198,27 @@ self.addEventListener('fetch', (event) => {
                     return networkResponse;
                 }
 
-                // Metadata の処理：Network First
+                // Metadata の処理：Network First + Auto Cache
                 if (metadataMatch) {
                     try {
                         console.log(`[SW] Fetching metadata from network: ${event.request.url}`);
                         const networkResponse = await fetch(event.request);
                         if (networkResponse.ok) {
+                            // 関連する offline cache がある場合、自動的にキャッシュ
+                            const allCaches = await caches.keys();
+                            const offlineCaches = allCaches.filter(name =>
+                                name.startsWith('konomitv-offline-video-') && name.includes(`-${videoId}-`)
+                            );
+
+                            if (offlineCaches.length > 0) {
+                                // 関連 cache に metadata を自動保存
+                                for (const cacheName of offlineCaches) {
+                                    const cache = await caches.open(cacheName);
+                                    await cache.put(normalizedUrl, networkResponse.clone());
+                                }
+                                console.log(`[SW] Metadata cached automatically for ${offlineCaches.length} offline cache(s)`);
+                            }
+
                             return networkResponse;
                         }
                         throw new Error(`HTTP ${networkResponse.status}`);
@@ -224,26 +243,60 @@ self.addEventListener('fetch', (event) => {
                     }
                 }
 
-                // Thumbnail の処理：Cache First（複数の画質で共有）
+                // Thumbnail の処理：Network First + Auto Cache（デフォルト画像を除外）
                 if (thumbnailMatch) {
                     const isTiled = thumbnailMatch[2] === '/tiled';
-                    const allCaches = await caches.keys();
-                    const offlineCaches = allCaches.filter(name =>
-                        name.startsWith('konomitv-offline-video-') && name.includes(`-${videoId}-`)
-                    );
+                    const DEFAULT_THUMBNAIL_SIZE = 15714; // server/static/thumbnails/default.webp のサイズ
 
-                    for (const cacheName of offlineCaches) {
-                        const cache = await caches.open(cacheName);
-                        const cachedResponse = await cache.match(normalizedUrl);
-                        if (cachedResponse) {
-                            console.log(`[SW] ✓ Cache hit (thumbnail${isTiled ? ' tiled' : ''}): ${normalizedUrl}`);
-                            return cachedResponse;
+                    try {
+                        console.log(`[SW] Fetching thumbnail from network: ${event.request.url}`);
+                        const networkResponse = await fetch(event.request);
+
+                        if (networkResponse.ok) {
+                            // Content-Length をチェックしてデフォルト画像かどうか判定
+                            const contentLength = networkResponse.headers.get('Content-Length');
+                            const isDefaultThumbnail = contentLength && parseInt(contentLength, 10) === DEFAULT_THUMBNAIL_SIZE;
+
+                            if (!isDefaultThumbnail) {
+                                // デフォルト画像でない場合のみ、関連する offline cache に自動保存
+                                const allCaches = await caches.keys();
+                                const offlineCaches = allCaches.filter(name =>
+                                    name.startsWith('konomitv-offline-video-') && name.includes(`-${videoId}-`)
+                                );
+
+                                if (offlineCaches.length > 0) {
+                                    for (const cacheName of offlineCaches) {
+                                        const cache = await caches.open(cacheName);
+                                        await cache.put(normalizedUrl, networkResponse.clone());
+                                    }
+                                    console.log(`[SW] Thumbnail${isTiled ? ' (tiled)' : ''} cached automatically for ${offlineCaches.length} offline cache(s)`);
+                                }
+                            } else {
+                                console.log(`[SW] Skipping cache for default thumbnail (size: ${contentLength} bytes)`);
+                            }
+
+                            return networkResponse;
                         }
-                    }
+                        throw new Error(`HTTP ${networkResponse.status}`);
+                    } catch (error) {
+                        // ネットワーク失敗→キャッシュから取得
+                        console.log(`[SW] Network failed for thumbnail, trying cache: ${error}`);
+                        const allCaches = await caches.keys();
+                        const offlineCaches = allCaches.filter(name =>
+                            name.startsWith('konomitv-offline-video-') && name.includes(`-${videoId}-`)
+                        );
 
-                    // キャッシュミス→ネットワークから取得
-                    console.log(`[SW] Thumbnail cache miss, fetching from network: ${event.request.url}`);
-                    return fetch(event.request);
+                        for (const cacheName of offlineCaches) {
+                            const cache = await caches.open(cacheName);
+                            const cachedResponse = await cache.match(normalizedUrl);
+                            if (cachedResponse) {
+                                console.log(`[SW] ✓ Offline cache hit (thumbnail${isTiled ? ' tiled' : ''}): ${normalizedUrl}`);
+                                return cachedResponse;
+                            }
+                        }
+                        console.log(`[SW] Cache miss (thumbnail): ${normalizedUrl}`);
+                        throw error;
+                    }
                 }
 
                 // フォールバック：ネットワークから取得

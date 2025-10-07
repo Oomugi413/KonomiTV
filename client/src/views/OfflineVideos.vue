@@ -166,8 +166,7 @@
                                 class="offline-video"
                             >
                                 <div class="offline-video__container">
-                                    <router-link v-ripple class="offline-video__content"
-                                        :to="video.status === 'completed' || video.status === 'paused' ? `/videos/watch/${video.video_id}` : { path: '' }">
+                                    <router-link v-ripple class="offline-video__content" :to="`/videos/watch/${video.video_id}`">
                                         <!-- サムネイル -->
                                         <div class="offline-video__thumbnail">
                                             <img

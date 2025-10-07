@@ -517,9 +517,8 @@ class OfflineDownload {
             const cacheName = this.getCacheName(video_id, quality);
             const cache = await caches.open(cacheName);
 
-            // 1. 録画番組のメタデータを取得してキャッシュ
-            console.log('[OfflineDownload] Caching video metadata...');
-            const metadataUrl = `${Utils.api_base_url}/videos/${video_id}`;
+            // 1. 録画番組のメタデータを取得（Service Worker が自動的にキャッシュする）
+            console.log('[OfflineDownload] Fetching video metadata...');
             let targetDownloadPercentage = 100; // デフォルトは 100%
             try {
                 const metadataResponse = await APIClient.get(`/videos/${video_id}`);
@@ -530,71 +529,43 @@ class OfflineDownload {
                         targetDownloadPercentage = 80;
                         console.log('[OfflineDownload] service_id is 333, target download percentage set to 80%');
                     }
-
-                    // JSON レスポンスを Response オブジェクトに変換
-                    const metadataResponseForCache = new Response(JSON.stringify(metadataResponse.data), {
-                        status: 200,
-                        statusText: 'OK',
-                        headers: { 'Content-Type': 'application/json' },
-                    });
-                    // 完整 URL でキャッシュ
-                    await cache.put(metadataUrl, metadataResponseForCache.clone());
-                    // 相対パスでもキャッシュ（Service Worker と同じ形式）
-                    await cache.put(`/api/videos/${video_id}`, metadataResponseForCache.clone());
+                    // Service Worker が自動的に metadata をキャッシュするため、手動キャッシュは不要
                 } else {
-                    console.warn('[OfflineDownload] Failed to cache video metadata:', metadataResponse.status);
+                    console.warn('[OfflineDownload] Failed to fetch video metadata:', metadataResponse.status);
                 }
             } catch (error) {
                 console.warn('[OfflineDownload] Failed to fetch video metadata:', error);
             }
 
-            // 2. サムネイルをキャッシュ（失敗しても続行）
-            console.log('[OfflineDownload] Caching thumbnail...');
-            const thumbnailUrl = `${Utils.api_base_url}/videos/${video_id}/thumbnail`;
+            // 2. サムネイルを取得（Service Worker が自動的にキャッシュする）
+            console.log('[OfflineDownload] Fetching thumbnail...');
             try {
                 const thumbnailResponse = await APIClient.get<Blob>(`/videos/${video_id}/thumbnail`, {
                     responseType: 'blob',
                     signal: abortSignal,
                 });
                 if (thumbnailResponse.type === 'success') {
-                    // Blob レスポンスを Response オブジェクトに変換
-                    const thumbnailResponseForCache = new Response(thumbnailResponse.data, {
-                        status: 200,
-                        statusText: 'OK',
-                        headers: { 'Content-Type': 'image/jpeg' },
-                    });
-                    // 完整 URL でキャッシュ
-                    await cache.put(thumbnailUrl, thumbnailResponseForCache.clone());
-                    // 相対パスでもキャッシュ
-                    await cache.put(`/api/videos/${video_id}/thumbnail`, thumbnailResponseForCache.clone());
+                    // Service Worker が自動的に thumbnail をキャッシュする（デフォルト画像を除く）
+                    console.log('[OfflineDownload] Thumbnail fetched successfully');
                 } else {
-                    console.warn('[OfflineDownload] Failed to cache thumbnail:', thumbnailResponse.status);
+                    console.warn('[OfflineDownload] Failed to fetch thumbnail:', thumbnailResponse.status);
                 }
             } catch (error) {
                 console.warn('[OfflineDownload] Failed to fetch thumbnail (continuing anyway):', error);
             }
 
-            // 3. タイル状サムネイル（シークバー用）をキャッシュ（失敗しても続行）
-            console.log('[OfflineDownload] Caching tiled thumbnail...');
-            const tiledThumbnailUrl = `${Utils.api_base_url}/videos/${video_id}/thumbnail/tiled`;
+            // 3. タイル状サムネイル（シークバー用）を取得（Service Worker が自動的にキャッシュする）
+            console.log('[OfflineDownload] Fetching tiled thumbnail...');
             try {
                 const tiledThumbnailResponse = await APIClient.get<Blob>(`/videos/${video_id}/thumbnail/tiled`, {
                     responseType: 'blob',
                     signal: abortSignal,
                 });
                 if (tiledThumbnailResponse.type === 'success') {
-                    // Blob レスポンスを Response オブジェクトに変換
-                    const tiledThumbnailResponseForCache = new Response(tiledThumbnailResponse.data, {
-                        status: 200,
-                        statusText: 'OK',
-                        headers: { 'Content-Type': 'image/jpeg' },
-                    });
-                    // 完整 URL でキャッシュ
-                    await cache.put(tiledThumbnailUrl, tiledThumbnailResponseForCache.clone());
-                    // 相対パスでもキャッシュ
-                    await cache.put(`/api/videos/${video_id}/thumbnail/tiled`, tiledThumbnailResponseForCache.clone());
+                    // Service Worker が自動的に tiled thumbnail をキャッシュする（デフォルト画像を除く）
+                    console.log('[OfflineDownload] Tiled thumbnail fetched successfully');
                 } else {
-                    console.warn('[OfflineDownload] Failed to cache tiled thumbnail:', tiledThumbnailResponse.status);
+                    console.warn('[OfflineDownload] Failed to fetch tiled thumbnail:', tiledThumbnailResponse.status);
                 }
             } catch (error) {
                 console.warn('[OfflineDownload] Failed to fetch tiled thumbnail (continuing anyway):', error);
@@ -605,6 +576,9 @@ class OfflineDownload {
             const session_id = crypto.randomUUID().split('-')[0];
             const cache_key = crypto.randomUUID().split('-')[0];
             const playlistUrl = this.buildPlaylistUrl(video_id, quality, use_hevc, session_id, cache_key);
+
+            // 現在の session_id を追跡（refreshPlaylist で更新される）
+            let currentSessionId = session_id;
 
             // 5. playlist を取得
             const playlistResponse = await APIClient.get<string>(playlistUrl.replace(Utils.api_base_url, ''), {
@@ -709,7 +683,20 @@ class OfflineDownload {
             // 単一セッションでダウンロード
             const downloadSegment = async (queueItem: { index: number; url: string }) => {
                 const { index, url: originalSegmentUrl } = queueItem;
-                let currentSegmentUrl = originalSegmentUrl;
+
+                // 現在の session_id で URL を更新する関数
+                const updateUrlWithCurrentSession = (url: string): string => {
+                    try {
+                        const urlObj = new URL(url);
+                        urlObj.searchParams.set('session_id', currentSessionId);
+                        return urlObj.toString();
+                    } catch (e) {
+                        console.warn('[OfflineDownload] Failed to update session_id in URL:', e);
+                        return url;
+                    }
+                };
+
+                let currentSegmentUrl = updateUrlWithCurrentSession(originalSegmentUrl);
 
                 // 中止シグナルをチェック
                 if (abortSignal?.aborted) {
@@ -744,8 +731,10 @@ class OfflineDownload {
                             // Service Worker が自動的に新しい playlist をキャッシュする
                             const newSegmentUrls = this.parseHLSPlaylistFromText(newPlaylistResponse.data, newPlaylistUrl);
                             if (newSegmentUrls[index]) {
-                                currentSegmentUrl = newSegmentUrls[index];
-                                console.log(`[OfflineDownload] Updated segment ${index + 1} URL with new session`);
+                                // グローバルな session_id を更新
+                                currentSessionId = new_session_id;
+                                currentSegmentUrl = updateUrlWithCurrentSession(originalSegmentUrl);
+                                console.log(`[OfflineDownload] Updated global session to ${currentSessionId}`);
                                 return true;
                             } else {
                                 console.warn(`[OfflineDownload] New playlist does not contain segment ${index + 1}`);
