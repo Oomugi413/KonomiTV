@@ -53,10 +53,10 @@ class LiveEncodingTask:
     MAX_RETRY_COUNT: ClassVar[int] = 10  # 10回まで
 
     # チューナーから放送波 TS を読み取る際のタイムアウト (秒)
-    TUNER_TS_READ_TIMEOUT: ClassVar[int] = 15
+    TUNER_TS_READ_TIMEOUT: ClassVar[int] = 20
 
     # エンコーダーの出力を読み取る際のタイムアウト (Standby 時) (秒)
-    ENCODER_TS_READ_TIMEOUT_STANDBY: ClassVar[int] = 20
+    ENCODER_TS_READ_TIMEOUT_STANDBY: ClassVar[int] = 30
 
     # エンコーダーの出力を読み取る際のタイムアウト (ONAir 時) (秒)
     # VCEEncC 利用時のみ起動時に OpenCL シェーダーがコンパイルされる関係で起動が遅いため、10 秒に設定
@@ -109,6 +109,10 @@ class LiveEncodingTask:
         # BS4K・CS4K (放送終了) は 4K 放送なのでフル HD 扱いとする
         # 現在の KonomiTV は 1920×1080 以上の解像度へのエンコードをサポートしていない
         if network_id == 0x000B or network_id == 0x000C:
+            return True
+
+        #BS4K,CS4K
+        if network_id >= 11:
             return True
 
         return False
@@ -187,8 +191,8 @@ class LiveEncodingTask:
 
         ## BS4K は 60p (プログレッシブ) で放送されているので、インターレース解除を行わず 60fps でエンコードする
         if channel_type == "BS4K":
-            options.append(f'-vf scale={video_width}:{video_height}')
-            options.append(f'-r 60000/1001 -g {int(gop_length_second * 60)}')
+            options.append(f'-vf vpp_qsv=deinterlace=0:w={video_width}:h={video_height}:framerate=60000/1001')
+            #options.append(f'-r 60000/1001 -g {int(gop_length_second * 60)}')
         else:
             ## インターレース解除 (60i → 60p (フレームレート: 60fps))
             if QUALITY[quality].is_60fps is True:
@@ -455,9 +459,10 @@ class LiveEncodingTask:
         # Mirakurun / mirakc は通常チャンネルタイプが GR, BS, CS, SKY しかないので、
         # フォールバックとして BS4K を BS に、CATV を CS に変換する
         fallback_channel_type = channel_type
-        if channel_type == 'BS4K':
-            fallback_channel_type = 'BS'
-        elif channel_type == 'CATV':
+        #if channel_type == 'BS4K':
+        #    fallback_channel_type = 'BS'
+        #el
+        if channel_type == 'CATV':
             fallback_channel_type = 'CS'
 
         mirakurun_or_mirakc = 'Mirakurun'
@@ -554,7 +559,7 @@ class LiveEncodingTask:
             ## ストリームが存在しない場合、無音の AAC ストリームが出力される
             ## 音声がモノラルであればステレオにする
             ## デュアルモノを2つのモノラル音声に分離し、右チャンネルを副音声として扱う
-            '-a', '13',
+            '-a', '5',
             # 副音声ストリームが常に存在する状態にする
             ## ストリームが存在しない場合、無音の AAC ストリームが出力される
             ## 音声がモノラルであればステレオにする
