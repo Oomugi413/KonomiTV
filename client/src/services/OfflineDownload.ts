@@ -606,11 +606,13 @@ class OfflineDownload {
             const normalizedPlaylistUrl = this.buildPlaylistUrl(video_id, quality, use_hevc);
             const relativePlaylistUrl = this.buildPlaylistRelativePath(video_id, quality, use_hevc);
             // Response を再構築してキャッシュ
-            const playlistResponseForCache = new Response(playlistText, {
+            const playlistBlob = new Blob([playlistText], { type: 'application/vnd.apple.mpegurl' });
+            const playlistResponseForCache = new Response(playlistBlob, {
                 status: 200,
                 statusText: 'OK',
                 headers: {
                     'Content-Type': 'application/vnd.apple.mpegurl',
+                    'Content-Length': playlistBlob.size.toString(),
                 },
             });
             // 完整 URL でキャッシュ
@@ -863,6 +865,7 @@ class OfflineDownload {
                     statusText: 'OK',
                     headers: {
                         'Content-Type': 'video/mp2t',
+                        'Content-Length': segmentBlob.size.toString(),
                     },
                 });
                 await cache.put(normalizedSegmentUrl, segmentResponse);
@@ -1271,11 +1274,19 @@ class OfflineDownload {
             let totalSize = 0;
             for (const request of requests) {
                 const response = await cache.match(request);
-                if (response && response.body) {
-                    // 尝试从 Content-Length header 获取大小
+                if (response) {
+                    // まず Content-Length ヘッダーから取得を試みる
                     const contentLength = response.headers.get('Content-Length');
                     if (contentLength) {
                         totalSize += parseInt(contentLength, 10);
+                    } else if (response.body) {
+                        // Content-Length がない場合は Blob からサイズを取得
+                        try {
+                            const blob = await response.blob();
+                            totalSize += blob.size;
+                        } catch (e) {
+                            console.warn(`[OfflineDownload] Failed to get blob size for request ${request.url}:`, e);
+                        }
                     }
                 }
             }
