@@ -444,7 +444,7 @@ class RecordedScanTask:
         logging.info(f'Manual scan started for file: {file_path_str}')
 
         # ファイルを処理 (force_update=True で強制的に再解析)
-        await self.processRecordedFile(file_path, None, force_update)
+        await self.processRecordedFile(file_path, None, None, force_update)
 
         logging.info(f'Manual scan completed for file: {file_path_str}')
 
