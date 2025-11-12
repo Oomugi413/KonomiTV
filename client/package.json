@@ -10,7 +10,8 @@
         "build": "vue-tsc --noEmit && vite build && node scripts/inject-sw-cache-handler.js",
         "preview": "concurrently --raw \"npm:akebi\" \"vite preview\"",
         "lint": "eslint . --fix --ignore-path .gitignore",
-        "logo": "node logoGenerator.js"
+        "logo": "node logoGenerator.js",
+        "typecheck": "vue-tsc --noEmit"
     },
     "engines": {
     },
