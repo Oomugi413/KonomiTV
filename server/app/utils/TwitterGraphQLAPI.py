@@ -893,7 +893,6 @@ class TwitterGraphQLAPI:
     async def homeLatestTimeline(
         self,
         cursor_id: str | None = None,
-        count: int = 20,
     ) -> schemas.TimelineTweetsResult | schemas.TwitterAPIResult:
         """
         タイムラインの最新ツイートを取得する
@@ -901,7 +900,6 @@ class TwitterGraphQLAPI:
 
         Args:
             cursor_id (str | None, optional): 次のページを取得するためのカーソル ID (デフォルトは None)
-            count (int, optional): 取得するツイート数 (デフォルトは 20)
 
         Returns:
             schemas.TimelineTweets | schemas.TwitterAPIResult: 検索結果
@@ -909,15 +907,28 @@ class TwitterGraphQLAPI:
 
         # variables の挿入順序を Twitter Web App に厳密に合わせるためにこのような実装としている
         variables: dict[str, Any] = {}
-        variables['count'] = count
+        if cursor_id is None:
+            ## カーソル ID が指定されていないときは20件取得する (Twitter Web App の挙動に合わせる)
+            variables['count'] = 20
+        else:
+            ## カーソル ID が指定されているときは40件取得する (Twitter Web App の挙動に合わせる)
+            variables['count'] = 40
         if cursor_id is not None:
             variables['cursor'] = cursor_id
         variables['includePromotedContent'] = True
         variables['latestControlAvailable'] = True
         if cursor_id is None:
+            ## カーソル ID が指定されていないときは、ページの初回ロード時のリクエストに偽装する
             variables['requestContext'] = 'launch'
-        ## おそらく実際に表示されたツイートの ID を入れるキーだが、取得できないので空リストを入れておく
-        variables['seenTweetIds'] = []
+            ## Twitter Web App のリクエストでは seenTweetIds も指定されることが多いが、
+            ## ここでは「PWA のローカルキャッシュが全く残っていないが認証情報はある」際の初回ページロードに偽装する
+            ## seenTweetIds はどうも PWA 側の何らかのツイートキャッシュが1つ以上ある時に指定されるものらしい
+            ## seenTweetIds が1つ以上指定されているとき、本来は invokeGraphQLAPI() の additional_flags に
+            ## {"forcePost": True} を指定する必要があるが、今回は seenTweetIds を指定しないので不要
+        else:
+            ## カーソル ID が指定されているときは、「フォロー中」ボタンをクリックして手動更新をかけた場合に偽装する
+            ## この場合 seenTweetIds は指定されない
+            variables['requestContext'] = 'ptr'
 
         # Twitter GraphQL API にリクエスト
         response = await self.invokeGraphQLAPI(
@@ -966,7 +977,6 @@ class TwitterGraphQLAPI:
         search_type: Literal['Top', 'Latest'],
         query: str,
         cursor_id: str | None = None,
-        count: int = 20,
     ) -> schemas.TimelineTweetsResult | schemas.TwitterAPIResult:
         """
         ツイートを検索する
@@ -975,7 +985,6 @@ class TwitterGraphQLAPI:
             search_type (Literal['Top', 'Latest']): 検索タイプ (Top: トップツイート, Latest: 最新ツイート)
             query (str): 検索クエリ
             cursor_id (str | None, optional): 次のページを取得するためのカーソル ID (デフォルトは None)
-            count (int, optional): 取得するツイート数 (デフォルトは 20)
 
         Returns:
             schemas.TimelineTweets | schemas.TwitterAPIResult: 検索結果
@@ -984,7 +993,15 @@ class TwitterGraphQLAPI:
         # variables の挿入順序を Twitter Web App に厳密に合わせるためにこのような実装としている
         variables: dict[str, Any] = {}
         variables['rawQuery'] = query.strip() + ' exclude:replies lang:ja'
-        variables['count'] = count
+        if cursor_id is None:
+            ## カーソル ID が指定されていないときは20件取得する (Twitter Web App の挙動に合わせる)
+            variables['count'] = 20
+        else:
+            ## カーソル ID が指定されているときは40件取得する (Twitter Web App の挙動に合わせる)
+            ## 厳密にはより新しいツイートを取得するためのカーソル ID が指定されているときは40件、
+            ## より古い過去のツイートを取得するためのカーソル ID が指定されているときは20件取得される仕様のようだが、
+            ## 両者を判別する方法がないので一律40件取得する
+            variables['count'] = 40
         if cursor_id is not None:
             variables['cursor'] = cursor_id
         ## Twitter Web App で検索すると typed_query になることが多いのでそれに合わせる
