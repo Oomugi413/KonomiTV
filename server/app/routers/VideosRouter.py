@@ -802,9 +802,13 @@ async def VideoAvailableChannelsAPI(
 async def VideoReanalyzeAPI(
     recorded_program: Annotated[RecordedProgram, Depends(GetRecordedProgram)],
     selected_service_id: int | None = None,
+    files_only: bool = False,
 ):
     """
     指定された録画番組のメタデータ（動画情報・番組情報・サムネイル画像・キーフレーム情報・CM 区間情報など）をすべて再解析・再生成する。
+
+    Args:
+        files_only (bool): True の場合、ファイル情報のみを再解析し、CM 区間検出・サムネイル生成・キーフレーム解析をスキップする（デフォルト: False）
     """
 
     try:
@@ -820,6 +824,8 @@ async def VideoReanalyzeAPI(
             selected_service_id = selected_service_id,
             # API レスポンスの返却をもってメタデータ再解析が完全に完了したことをユーザーに伝えるため、バックグラウンド解析タスクが完了するまで待つ
             wait_background_analysis = True,
+            # ファイル情報のみを再解析するかどうか
+            files_only = files_only,
         )
 
     except Exception as ex:

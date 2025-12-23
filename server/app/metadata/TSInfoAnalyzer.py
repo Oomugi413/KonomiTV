@@ -59,11 +59,32 @@ class TSInfoAnalyzer:
 
         # 録画ファイルが MPEG-TS 形式の場合
         if self.recorded_video.container_format == 'MPEG-TS':
+            # ファイルパスを解決（シンボリックリンクの場合は実体パスに変換）
+            file_path = Path(self.recorded_video.file_path)
+            try:
+                # シンボリックリンクを解決して実体のパスを取得
+                resolved_path = file_path.resolve()
+                # 解決後のパスが存在するか確認
+                if not resolved_path.exists():
+                    # 解決後のパスが存在しない場合は元のパスを試す
+                    if file_path.exists():
+                        resolved_path = file_path
+                    else:
+                        raise FileNotFoundError(f'File not found: {self.recorded_video.file_path} (resolved: {resolved_path})')
+                file_path_to_open = str(resolved_path)
+            except FileNotFoundError:
+                # FileNotFoundError はそのまま再送出
+                raise
+            except Exception as ex:
+                # その他の例外（OSError, RuntimeError, など）はシンボリックリンクの解決失敗として扱う
+                logging.warning(f'{self.recorded_video.file_path}: Failed to resolve symlink, using original path:', exc_info=ex)
+                file_path_to_open = self.recorded_video.file_path
+
             # TS ファイルを開く
             ## 188 * 10000 バイト (≒ 1.88MB) ごとに分割して読み込む
             ## 現状 ariblib は先頭が sync_byte でない or 途中で同期が壊れる (破損した TS パケットが存在する) TS ファイルを想定していないため、
             ## ariblib に入力する録画ファイルは必ず正常な TS ファイルである必要がある
-            self.ts = ariblib.tsopen(self.recorded_video.file_path, chunk=10000)
+            self.ts = ariblib.tsopen(file_path_to_open, chunk=10000)
 
         # それ以外の場合、存在すれば PSI/SI 書庫 (.psc) を読み込んで仮想 TS ファイルを作成する
         else:

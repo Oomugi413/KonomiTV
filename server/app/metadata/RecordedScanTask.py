@@ -59,6 +59,7 @@ class RecordedVideoSummary:
     file_modified_at: datetime
     file_size: int
     file_hash: str
+    duration: float
 
 
 class RecordedScanTask:
@@ -93,6 +94,10 @@ class RecordedScanTask:
 
     # 継続更新を強制的に完了とする時間 (秒)
     CONTINUOUS_UPDATE_MAX_SECONDS: ClassVar[int] = 86400  # 24時間
+
+    # 転码検出時の時長許容差異 (秒)
+    # 転码時にエンコーダーの処理により時長が微小に変化する可能性を考慮
+    TRANSCODE_DURATION_TOLERANCE: ClassVar[float] = 3.0
 
     # 既知のハッシュ衝突が発生しうる file_hash の集合
     KNOWN_COLLISION_FILE_HASHES: ClassVar[set[str]] = {
@@ -139,10 +144,6 @@ class RecordedScanTask:
 
         # バックグラウンドタスクの状態管理
         self._background_tasks: dict[anyio.Path, asyncio.Task[None]] = {}
-
-        # シンボリックリンクの元パスと実体パスのマッピング
-        self._symlink_path_map: dict[str, str] = {}
-        self._symlink_path_map_lock = asyncio.Lock()
 
         # ファイルパスごとのロックを管理する辞書
         self._file_locks: dict[anyio.Path, asyncio.Lock] = {}
@@ -248,6 +249,7 @@ class RecordedScanTask:
             'file_modified_at',
             'file_size',
             'file_hash',
+            'duration',
         )
         videos_by_path: dict[str, list[RecordedVideoSummary]] = {}
         videos_to_keep: list[RecordedVideoSummary] = []  # 保持するレコードのリスト
@@ -262,6 +264,7 @@ class RecordedScanTask:
                 file_modified_at = row['file_modified_at'],
                 file_size = row['file_size'],
                 file_hash = row['file_hash'],
+                duration = row['duration'],
             )
             if recorded_video_summary.file_path not in videos_by_path:
                 videos_by_path[recorded_video_summary.file_path] = []
@@ -316,43 +319,38 @@ class RecordedScanTask:
         ## 重複削除処理で保持すると判断されたレコードのみを使う
         existing_db_recorded_videos = {}
         for video in videos_to_keep:
-            # 既存レコードのファイルパスもシンボリックリンクを解決して正規化する
-            canonical_path = await self.resolveRecordedPath(anyio.Path(video.file_path))
-            video.file_path = str(canonical_path)
+            # データベース中のパスをそのまま使用（シンボリックリンクを解決しない）
             existing_db_recorded_videos[anyio.Path(video.file_path)] = video
 
         # 各録画フォルダをスキャン
         logging.info('Scanning recorded folders...')
-        processed_canonical_paths: set[str] = set()
+        processed_paths: set[str] = set()
         for folder in self.recorded_folders:
             async for file_path in folder.rglob('*'):
                 try:
                     # Mac の metadata ファイルをスキップ
                     if file_path.name.startswith('._'):
                         continue
-                    # シンボリックリンクを含むパスは実体に解決して処理する
-                    canonical_path = await self.resolveRecordedPath(file_path)
-                    original_path_str = str(file_path)
-                    canonical_path_str = str(canonical_path)
-                    # シンボリックリンクのマッピングを更新する
-                    await self.__updateSymlinkMapping(original_path_str, canonical_path_str)
-                    if await canonical_path.is_dir():
+                    # ディレクトリをスキップ
+                    if await file_path.is_dir():
                         continue
                     # 対象拡張子のファイル以外をスキップ
-                    if canonical_path.suffix.lower() not in self.SCAN_TARGET_EXTENSIONS:
+                    if file_path.suffix.lower() not in self.SCAN_TARGET_EXTENSIONS:
                         continue
                     # 録画ファイルが確実に存在することを確認する
                     ## 環境次第では、稀に glob で取得したファイルが既に存在しなくなっているケースがある
-                    if not await self.isFileExists(canonical_path):
+                    if not await self.isFileExists(file_path):
                         continue
-                    if canonical_path_str in processed_canonical_paths:
+                    # スキャン時に検出したパスをそのまま使用（シンボリックリンクを解決しない）
+                    file_path_str = str(file_path)
+                    if file_path_str in processed_paths:
                         continue
-                    processed_canonical_paths.add(canonical_path_str)
+                    processed_paths.add(file_path_str)
 
                     # 見つかったファイルを処理
                     await self.processRecordedFile(
-                        file_path = canonical_path,
-                        original_path = file_path,
+                        file_path = file_path,
+                        original_path = None,  # シンボリックリンクを解決しないため original_path は不要
                         existing_db_recorded_videos = existing_db_recorded_videos,
                     )
                 except Exception as ex:
@@ -497,6 +495,7 @@ class RecordedScanTask:
         force_update: bool = False,
         selected_service_id: int | None = None,
         wait_background_analysis: bool = False,
+        files_only: bool = False,
     ) -> None:
         """
         指定された録画ファイルのメタデータを解析し、DB に永続化する
@@ -510,12 +509,12 @@ class RecordedScanTask:
             force_update (bool): 既に DB に登録されている録画ファイルのメタデータを強制的に再解析するかどうか (デフォルト: False)
             selected_service_id (int | None): 指定するサービスID (複数チャンネル選択用) (デフォルト: None)
             wait_background_analysis (bool): バックグラウンド解析が完了するまで待つかどうか (デフォルト: False)
+            files_only (bool): ファイル情報のみを再解析し、CM 区間検出・サムネイル生成・キーフレーム解析をスキップするかどうか (デフォルト: False)
         """
 
         # ファイルパスに対応するロックを取得または作成
-        file_path = await self.resolveRecordedPath(file_path)
+        # シンボリックリンクを解決せず、スキャン時に検出したパスをそのまま使用
         file_path_str = str(file_path)
-        original_path_str = str(original_path) if original_path is not None else None
         async with self._file_locks_dict_lock:
             if file_path not in self._file_locks:
                 self._file_locks[file_path] = asyncio.Lock()
@@ -546,15 +545,9 @@ class RecordedScanTask:
                     logging.warning(f'{file_path}: File size is 0. ignored.')
                     return
 
-                # シンボリックリンク経由で検出した場合は元パスと実体パスのマッピングを保持する
-                if original_path_str is not None:
-                    await self.__updateSymlinkMapping(original_path_str, file_path_str)
-
                 # 同じファイルパスの既存レコードのサマリーがあれば取り出す
                 if existing_db_recorded_videos is not None:
                     existing_recorded_video_summary = existing_db_recorded_videos.pop(file_path, None)
-                    if existing_recorded_video_summary is None and original_path_str is not None:
-                        existing_recorded_video_summary = existing_db_recorded_videos.pop(anyio.Path(original_path_str), None)
                 else:
                     existing_recorded_video_summary = None
 
@@ -562,11 +555,8 @@ class RecordedScanTask:
                 ## ファイル変更イベントから呼ばれた場合は existing_db_recorded_videos は None となるが、
                 ## DB には同一ファイルパスのレコードが存在する可能性がある
                 if existing_recorded_video_summary is None:
-                    query_paths = [file_path_str]
-                    if original_path_str is not None and original_path_str not in query_paths:
-                        query_paths.append(original_path_str)
                     summary_rows = await RecordedVideo.filter(
-                        file_path__in=query_paths
+                        file_path=file_path_str
                     ).values(
                         'id',
                         'file_path',
@@ -577,12 +567,13 @@ class RecordedScanTask:
                         'file_modified_at',
                         'file_size',
                         'file_hash',
+                        'duration',
                     )
                     if len(summary_rows) > 0:
                         row = summary_rows[0]
                         existing_recorded_video_summary = RecordedVideoSummary(
                             id = row['id'],
-                            file_path = row['file_path'],
+                            file_path = row['file_path'],  # データベース中の元のパスを保持
                             created_at = row['created_at'],
                             recorded_program_id = row['recorded_program_id'],
                             status = row['status'],
@@ -590,8 +581,8 @@ class RecordedScanTask:
                             file_modified_at = row['file_modified_at'],
                             file_size = row['file_size'],
                             file_hash = row['file_hash'],
+                            duration = row['duration'],
                         )
-                        existing_recorded_video_summary.file_path = file_path_str
 
                 # 同じファイルパスの既存レコードがあり、ファイルの基本情報（作成日時、更新日時、サイズ）が前回と一致した場合、
                 # ファイル内容は変更されておらず、レコード内容は更新不要と判断してスキップ
@@ -674,10 +665,6 @@ class RecordedScanTask:
                 existing_db_recorded_video_after_analyze = await RecordedVideo.get_or_none(
                     file_path=file_path_str
                 ).select_related('recorded_program', 'recorded_program__channel')
-                if existing_db_recorded_video_after_analyze is None and original_path_str is not None:
-                    existing_db_recorded_video_after_analyze = await RecordedVideo.get_or_none(
-                        file_path=original_path_str
-                    ).select_related('recorded_program', 'recorded_program__channel')
 
                 # 同じファイルパスの既存レコードがあり、先ほど計算した最新のハッシュと変わっていない場合は、レコード内容は更新不要と判断してスキップ
                 ## 万が一前回実行時からファイルサイズや最終更新日時の変更を伴わずに録画が完了した場合に状態を適切に反映できるよう、録画中はスキップしない
@@ -686,6 +673,67 @@ class RecordedScanTask:
                     existing_db_recorded_video_after_analyze.status == 'Recorded' and
                     existing_db_recorded_video_after_analyze.file_hash == recorded_program.recorded_video.file_hash):
                     return
+
+                # 同一ファイルパスで既存レコードがあり、ハッシュが変化している場合、
+                # 時長差異をチェックして転码された同一動画かどうかを判定する
+                is_transcoded_same_video = False
+                if existing_db_recorded_video_after_analyze is not None:
+                    # ファイルパスは同じ（これは既に前提条件として満たされている）
+                    # ハッシュが変化している（上の if 文でスキップされていない = ハッシュ変化）
+                    old_file_hash = existing_db_recorded_video_after_analyze.file_hash
+                    new_file_hash = recorded_program.recorded_video.file_hash
+                    hash_changed = (old_file_hash != new_file_hash)
+
+                    # files_only モードでハッシュが変化した場合、既存のサムネイルファイルを新しいハッシュ名にリネーム
+                    # さもなければサムネイルが見つからなくなる（orphaned として削除される可能性もある）
+                    if files_only and hash_changed:
+                        old_thumbnail_path = anyio.Path(str(THUMBNAILS_DIR)) / f'{old_file_hash}.webp'
+                        new_thumbnail_path = anyio.Path(str(THUMBNAILS_DIR)) / f'{new_file_hash}.webp'
+                        old_thumbnail_tile_path = anyio.Path(str(THUMBNAILS_DIR)) / f'{old_file_hash}_tile.webp'
+                        new_thumbnail_tile_path = anyio.Path(str(THUMBNAILS_DIR)) / f'{new_file_hash}_tile.webp'
+                        old_thumbnail_jpeg_path = anyio.Path(str(THUMBNAILS_DIR)) / f'{old_file_hash}.jpg'
+                        new_thumbnail_jpeg_path = anyio.Path(str(THUMBNAILS_DIR)) / f'{new_file_hash}.jpg'
+                        old_thumbnail_tile_jpeg_path = anyio.Path(str(THUMBNAILS_DIR)) / f'{old_file_hash}_tile.jpg'
+                        new_thumbnail_tile_jpeg_path = anyio.Path(str(THUMBNAILS_DIR)) / f'{new_file_hash}_tile.jpg'
+
+                        # 既存のサムネイルファイルをリネーム
+                        thumbnail_pairs = [
+                            (old_thumbnail_path, new_thumbnail_path),
+                            (old_thumbnail_tile_path, new_thumbnail_tile_path),
+                            (old_thumbnail_jpeg_path, new_thumbnail_jpeg_path),
+                            (old_thumbnail_tile_jpeg_path, new_thumbnail_tile_jpeg_path),
+                        ]
+                        for old_thumb, new_thumb in thumbnail_pairs:
+                            try:
+                                if await old_thumb.is_file():
+                                    await old_thumb.rename(new_thumb)
+                                    logging.info(f'{old_thumb.name} → {new_thumb.name}: Renamed thumbnail to match new hash (files_only mode).')
+                            except Exception as ex:
+                                logging.error(f'{old_thumb}: Error renaming thumbnail:', exc_info=ex)
+
+                    # 時長差異をチェック
+                    old_duration = existing_db_recorded_video_after_analyze.duration
+                    new_duration = recorded_program.recorded_video.duration
+                    duration_diff = abs(old_duration - new_duration)
+
+                    # 時長差異が許容範囲内（3秒以内）であれば、転码された同一動画と判定
+                    # 3秒という閾値は、転码時の微小な時間差を許容しつつ、全く別の動画との誤判定を防ぐバランス
+                    if duration_diff <= self.TRANSCODE_DURATION_TOLERANCE:
+                        is_transcoded_same_video = True
+                        logging.info(
+                            f'{file_path}: Detected transcoded video '
+                            f'(duration diff: {duration_diff:.2f}s, '
+                            f'old: {old_duration:.1f}s → new: {new_duration:.1f}s). '
+                            f'Preserving program metadata.'
+                        )
+                    else:
+                        # 時長差異が大きい場合は転码ではなく、別の動画と判断
+                        logging.info(
+                            f'{file_path}: Duration changed significantly '
+                            f'(diff: {duration_diff:.2f}s, '
+                            f'old: {old_duration:.1f}s → new: {new_duration:.1f}s). '
+                            f'Treating as different video.'
+                        )
 
                 # 録画中のファイルとして処理
                 ## 他ドライブからファイルコピー中のファイルも、実際の録画処理より高速に書き込まれるだけで随時書き込まれることに変わりはないので、
@@ -710,7 +758,8 @@ class RecordedScanTask:
                     if force_update:
                         self._recording_files.pop(file_path, None)
                     # 録画完了後のバックグラウンド解析タスクを開始
-                    if file_path not in self._background_tasks:
+                    # files_only が True の場合は、CM 区間検出・サムネイル生成・キーフレーム解析をスキップ
+                    if not files_only and file_path not in self._background_tasks:
                         # 通知が必要かどうかを判定（新規ファイルまたはRecording→Recordedの状態変化）
                         should_notify = (
                             len(self.config.notifications.services) > 0 and  # 通知サービスが設定されている
@@ -724,12 +773,15 @@ class RecordedScanTask:
 
                 # DB に永続化
                 # メタデータ解析後の最新のデータベース情報を使う
-                await self.__saveRecordedMetadataToDB(recorded_program, existing_db_recorded_video_after_analyze)
+                # ファイルパスはスキャン時に検出したパスをそのまま使用（シンボリックリンクを解決しない）
+                # recorded_program.recorded_video.file_path は既に正しい値が設定されている
+                await self.__saveRecordedMetadataToDB(recorded_program, existing_db_recorded_video_after_analyze, is_transcoded_same_video)
                 logging.info(f'{file_path}: {"Updated" if existing_db_recorded_video_after_analyze else "Saved"} metadata to DB. (status: {recorded_program.recorded_video.status})')
 
-                # wait_background_analysis が True の場合のみ、バックグラウンド解析タスクが完了するまで待つ
+                # wait_background_analysis が True かつ files_only が False の場合のみ、バックグラウンド解析タスクが完了するまで待つ
                 # 録画番組メタデータ再解析 API では、API レスポンスの返却をもってメタデータ再解析が完全に完了したことをユーザーに伝える必要があるため
-                if wait_background_analysis is True and file_path in self._background_tasks:
+                # files_only が True の場合は、バックグラウンド解析タスクが作成されないため、待つ必要もない
+                if wait_background_analysis is True and not files_only and file_path in self._background_tasks:
                     await self._background_tasks[file_path]
 
             except Exception as ex:
@@ -783,27 +835,11 @@ class RecordedScanTask:
             return file_path
 
 
-    async def __updateSymlinkMapping(self, original_path_str: str | None, canonical_path_str: str) -> None:
-        """
-        シンボリックリンクの元パスと実体パスのマッピングを管理する。
-
-        Args:
-            original_path_str (str | None): シンボリックリンクの元パス
-            canonical_path_str (str): シンボリックリンクの実体パス
-        """
-        if original_path_str is None:
-            return
-        async with self._symlink_path_map_lock:
-            if original_path_str == canonical_path_str:
-                self._symlink_path_map.pop(original_path_str, None)
-            else:
-                self._symlink_path_map[original_path_str] = canonical_path_str
-
-
     @staticmethod
     async def __saveRecordedMetadataToDB(
         recorded_program: schemas.RecordedProgram,
         existing_db_recorded_video: RecordedVideo | None,
+        is_transcoded_update: bool = False,
     ) -> None:
         """
         録画ファイルのメタデータ解析結果を DB に保存する
@@ -812,6 +848,7 @@ class RecordedScanTask:
         Args:
             recorded_program (schemas.RecordedProgram): 保存する録画番組情報
             existing_db_recorded_video (RecordedVideo | None): 既に DB に永続化されている録画ファイルの RecordedVideo レコード
+            is_transcoded_update (bool): 転码更新モードかどうか（デフォルト: False）
         """
 
         # トランザクション配下に入れることでパフォーマンスが向上する
@@ -845,30 +882,51 @@ class RecordedScanTask:
                 db_recorded_program = RecordedProgram()
 
             # RecordedProgram の属性を設定 (id, created_at, updated_at は自動生成のため指定しない)
-            db_recorded_program.recording_start_margin = recorded_program.recording_start_margin
-            db_recorded_program.recording_end_margin = recorded_program.recording_end_margin
-            db_recorded_program.is_partially_recorded = recorded_program.is_partially_recorded
-            db_recorded_program.channel = db_channel  # type: ignore
-            db_recorded_program.network_id = recorded_program.network_id
-            db_recorded_program.service_id = recorded_program.service_id
-            db_recorded_program.event_id = recorded_program.event_id
-            db_recorded_program.series_id = recorded_program.series_id
-            db_recorded_program.series_broadcast_period_id = recorded_program.series_broadcast_period_id
-            db_recorded_program.title = recorded_program.title
-            db_recorded_program.series_title = recorded_program.series_title
-            db_recorded_program.episode_number = recorded_program.episode_number
-            db_recorded_program.subtitle = recorded_program.subtitle
-            db_recorded_program.description = recorded_program.description
-            db_recorded_program.detail = recorded_program.detail
-            db_recorded_program.start_time = recorded_program.start_time
-            db_recorded_program.end_time = recorded_program.end_time
-            db_recorded_program.duration = recorded_program.duration
-            db_recorded_program.is_free = recorded_program.is_free
-            db_recorded_program.genres = recorded_program.genres
-            db_recorded_program.primary_audio_type = recorded_program.primary_audio_type
-            db_recorded_program.primary_audio_language = recorded_program.primary_audio_language
-            db_recorded_program.secondary_audio_type = recorded_program.secondary_audio_type
-            db_recorded_program.secondary_audio_language = recorded_program.secondary_audio_language
+            if is_transcoded_update:
+                # 転码更新モード：番組情報を保持し、技術的なフィールドのみ更新
+                # 転码時に変化する可能性のあるフィールドのみ更新
+                db_recorded_program.recording_start_margin = recorded_program.recording_start_margin
+                db_recorded_program.recording_end_margin = recorded_program.recording_end_margin
+                db_recorded_program.is_partially_recorded = recorded_program.is_partially_recorded
+                db_recorded_program.duration = recorded_program.duration  # 時長は微小に変化する可能性
+
+                # 以下のフィールドは保持（更新しない）：
+                # - channel, network_id, service_id, event_id
+                # - series_id, series_broadcast_period_id
+                # - title, series_title, episode_number, subtitle
+                # - description, detail
+                # - start_time, end_time
+                # - is_free, genres
+                # - primary_audio_type, primary_audio_language
+                # - secondary_audio_type, secondary_audio_language
+
+                logging.debug(f'{recorded_program.recorded_video.file_path}: Transcoded update mode - preserving program metadata.')
+            else:
+                # 通常更新モード：すべてのフィールドを更新（既存の動作）
+                db_recorded_program.recording_start_margin = recorded_program.recording_start_margin
+                db_recorded_program.recording_end_margin = recorded_program.recording_end_margin
+                db_recorded_program.is_partially_recorded = recorded_program.is_partially_recorded
+                db_recorded_program.channel = db_channel  # type: ignore
+                db_recorded_program.network_id = recorded_program.network_id
+                db_recorded_program.service_id = recorded_program.service_id
+                db_recorded_program.event_id = recorded_program.event_id
+                db_recorded_program.series_id = recorded_program.series_id
+                db_recorded_program.series_broadcast_period_id = recorded_program.series_broadcast_period_id
+                db_recorded_program.title = recorded_program.title
+                db_recorded_program.series_title = recorded_program.series_title
+                db_recorded_program.episode_number = recorded_program.episode_number
+                db_recorded_program.subtitle = recorded_program.subtitle
+                db_recorded_program.description = recorded_program.description
+                db_recorded_program.detail = recorded_program.detail
+                db_recorded_program.start_time = recorded_program.start_time
+                db_recorded_program.end_time = recorded_program.end_time
+                db_recorded_program.duration = recorded_program.duration
+                db_recorded_program.is_free = recorded_program.is_free
+                db_recorded_program.genres = recorded_program.genres
+                db_recorded_program.primary_audio_type = recorded_program.primary_audio_type
+                db_recorded_program.primary_audio_language = recorded_program.primary_audio_language
+                db_recorded_program.secondary_audio_type = recorded_program.secondary_audio_type
+                db_recorded_program.secondary_audio_language = recorded_program.secondary_audio_language
             await db_recorded_program.save()
 
             # RecordedVideo の保存または更新
@@ -1016,21 +1074,20 @@ class RecordedScanTask:
                     # Mac の metadata ファイルをスキップ
                     if file_path.name.startswith('._'):
                         continue
-                    # シンボリックリンクを含むパスは実体に解決して処理する
-                    canonical_path = await self.resolveRecordedPath(file_path)
-                    if await canonical_path.is_dir():
+                    # ディレクトリをスキップ
+                    if await file_path.is_dir():
                         continue
                     # 対象拡張子のファイル以外は無視
-                    if canonical_path.suffix.lower() not in self.SCAN_TARGET_EXTENSIONS:
+                    if file_path.suffix.lower() not in self.SCAN_TARGET_EXTENSIONS:
                         continue
 
                     try:
                         # 追加 or 変更イベント
                         if change_type == Change.added or change_type == Change.modified:
-                            await self.__handleFileChange(canonical_path, original_file_path=file_path)
+                            await self.__handleFileChange(file_path)
                         # 削除イベント
                         elif change_type == Change.deleted:
-                            await self.__handleFileDeletion(canonical_path, original_file_path=file_path)
+                            await self.__handleFileDeletion(file_path)
                     except Exception as ex:
                         logging.error(f'{file_path}: Error handling file change:', exc_info=ex)
 
@@ -1047,7 +1104,7 @@ class RecordedScanTask:
             logging.info('File system watch of recording folders has been stopped.')
 
 
-    async def __handleFileChange(self, file_path: anyio.Path, original_file_path: anyio.Path | None = None) -> None:
+    async def __handleFileChange(self, file_path: anyio.Path) -> None:
         """
         ファイル追加・変更イベントを受け取り、適切な頻度で __processFile() を呼び出す
         - 録画中ファイルの状態管理
@@ -1055,8 +1112,7 @@ class RecordedScanTask:
         - 最終更新日時の継続更新検出による録画中判定
 
         Args:
-            file_path (anyio.Path): 解決後のファイルパス
-            original_file_path (anyio.Path | None): 監視で検知した元のファイルパス
+            file_path (anyio.Path): ファイルパス（シンボリックリンクを解決しない）
         """
 
         try:
@@ -1103,7 +1159,7 @@ class RecordedScanTask:
                 recording_info.mtime_continuous_start_at = mtime_continuous_start_at
 
                 # メタデータ解析を実行
-                await self.processRecordedFile(file_path, original_file_path)
+                await self.processRecordedFile(file_path)
 
             # まだ録画中とマークされていないファイルの処理
             else:
@@ -1119,7 +1175,7 @@ class RecordedScanTask:
                     logging.info(f'{file_path}: New recording or copying file detected.')
 
                 # メタデータ解析を実行
-                await self.processRecordedFile(file_path, original_file_path)
+                await self.processRecordedFile(file_path)
 
         except FileNotFoundError:
             # ファイルが既に削除されている場合
@@ -1128,13 +1184,12 @@ class RecordedScanTask:
             logging.error(f'{file_path}: Error handling file change:', exc_info=ex)
 
 
-    async def __handleFileDeletion(self, file_path: anyio.Path, original_file_path: anyio.Path | None = None) -> None:
+    async def __handleFileDeletion(self, file_path: anyio.Path) -> None:
         """
         ファイル削除イベントを受け取り、DB からレコードを削除する
 
         Args:
-            file_path (anyio.Path): 解決後の削除対象ファイルパス
-            original_file_path (anyio.Path | None): 監視で検知した元のファイルパス
+            file_path (anyio.Path): 削除対象ファイルパス（シンボリックリンクを解決しない）
         """
 
         # ファイルパスに対応するロックを取得または作成
@@ -1146,22 +1201,11 @@ class RecordedScanTask:
         # 同一ファイルパスへの DB レコード操作を排他制御する
         async with file_lock:
             try:
-                mapped_canonical_path: str | None = None
-                async with self._symlink_path_map_lock:
-                    if original_file_path is not None:
-                        mapped_canonical_path = self._symlink_path_map.pop(str(original_file_path), None)
-                    if mapped_canonical_path is None:
-                        mapped_canonical_path = self._symlink_path_map.pop(str(file_path), None)
-                if mapped_canonical_path is not None:
-                    file_path = anyio.Path(mapped_canonical_path)
-
                 # 録画中とマークされていたファイルの場合は記録から削除
                 self._recording_files.pop(file_path, None)
 
                 # DB からレコードを削除
                 db_recorded_video = await RecordedVideo.get_or_none(file_path=str(file_path))
-                if db_recorded_video is None and original_file_path is not None:
-                    db_recorded_video = await RecordedVideo.get_or_none(file_path=str(original_file_path))
                 if db_recorded_video is not None:
                     # RecordedVideo の親テーブルである RecordedProgram を削除すると、
                     # CASCADE 制約により RecordedVideo も同時に削除される (Channel は親テーブルにあたるため削除されない)
