@@ -20,6 +20,7 @@ from ariblib.sections import (
     ActualStreamPresentFollowingEventInformationSection,
     ActualStreamServiceDescriptionSection,
     ProgramAssociationSection,
+    ProgramMapSection,
     TimeOffsetSection,
 )
 from biim.mpeg2ts import ts
@@ -541,33 +542,114 @@ class TSInfoAnalyzer:
     def __analyzeSDTInformation(self) -> schemas.Channel | None:
         """
         TS 内の SDT (Service Description Table) からサービス（チャンネル）情報を解析する
-        複数のチャンネルが存在する場合は、ファイル名情報を使って最適なチャンネルを選択する
+        複数のサービスが存在する場合は、PID の出現頻度から正しいサービス ID を推定する
 
         Returns:
             schemas.Channel: サービス（チャンネル）情報を表すモデル (サービス情報が取得できなかった場合は None)
         """
 
-        # 利用可能な全チャンネル情報を収集
-        all_channels = self.__collectAllChannels()
+        # 誤動作防止のため必ず最初にシークを戻す
+        self.ts.seek(0)
 
-        if not all_channels:
-            logging.warning(f'{self.recorded_video.file_path}: No channels found.')
+        # 必要な情報を一旦変数として保持
+        transport_stream_id: int | None = None
+        service_id: int | None = None
+        network_id: int | None = None
+        channel_type: Literal['GR', 'BS', 'CS', 'CATV', 'SKY', 'BS4K'] | None = None
+        channel_name: str | None = None
+        remocon_id: int | None = None
+
+        # PAT (Program Association Table) からサービス ID が取得できるまで繰り返し処理
+        service_id_order: list[int] = []
+        service_pmt_pid_map: dict[int, int] = {}
+        for pat in self.ts.sections(ProgramAssociationSection):
+            # トランスポートストリーム ID (TSID) を取得
+            transport_stream_id = int(pat.transport_stream_id)
+
+            # サービス ID と PMT PID を取得
+            ## program_number は service_id と等しい
+            for pat_pid in pat.pids:
+                if pat_pid.program_number:
+                    service_id = int(pat_pid.program_number)
+                    service_id_order.append(service_id)
+                    service_pmt_pid_map[service_id] = int(pat_pid.program_map_PID)
+
+            # 最初に見つかった PAT を使う
+            if len(service_id_order) > 0:
+                break
+
+        if len(service_id_order) == 0:
+            logging.warning(f'{self.recorded_video.file_path}: service_id not found.')
             return None
 
-        # 最適なチャンネルを選択
-        selected_channel = self.__selectBestChannel(all_channels)
+        # 複数サービスが存在する場合は、映像・音声 PID の出現頻度から正しい service_id を推定する
+        if len(service_id_order) > 1:
+            selected_service_id = self.__selectServiceIdByPidFrequency(
+                service_id_order = service_id_order,
+                service_pmt_pid_map = service_pmt_pid_map,
+            )
+            if selected_service_id is not None:
+                service_id = selected_service_id
+            else:
+                # 推定できなかった場合は、PAT に最初に出現した service_id を採用する
+                service_id = service_id_order[0]
+        else:
+            service_id = service_id_order[0]
 
-        if not selected_channel:
-            logging.warning(f'{self.recorded_video.file_path}: Failed to select channel.')
+        # TS から SDT (Service Description Table) を抽出
+        for sdt in self.ts.sections(ActualStreamServiceDescriptionSection):
+            # ネットワーク ID とサービス種別 (=チャンネルタイプ) を取得
+            network_id = int(sdt.original_network_id)
+            network_type = TSInformation.getNetworkType(network_id)
+            if network_type == 'OTHER':
+                logging.warning(f'{self.recorded_video.file_path}: Unknown network_id: {network_id}')
+                return None
+            channel_type = network_type  # ここで型が Literal['GR', 'BS', 'CS', 'CATV', 'SKY', 'BS4K'] に絞り込まれる
+            # SDT に含まれるサービスごとの情報を取得
+            for service in sdt.services:
+                # service_id が PAT から抽出したものと一致した場合のみ
+                # CS の場合同じ TS の中に複数のチャンネルが含まれている事があり、録画する場合は基本的に他のチャンネルは削除される
+                # そうすると ffprobe で確認できるがサービス情報や番組情報だけ残ってしまい、別のチャンネルの番組情報になるケースがある
+                # PAT にはそうした削除済みのチャンネルは含まれていないので、正しいチャンネルの service_id を抽出できる
+                if service.service_id == service_id:
+                    # SDT から得られる ServiceDescriptor 内の情報からチャンネル名を取得
+                    for sd in service.descriptors[ServiceDescriptor]:
+                        channel_name = TSInformation.formatString(sd.service_name)
+                        break
+                    else:
+                        continue
+                    break
+            else:
+                continue
+            break
+        if network_id is None:
+            logging.warning(f'{self.recorded_video.file_path}: network_id not found.')
+            return None
+        if channel_type is None:
+            logging.warning(f'{self.recorded_video.file_path}: channel_type not found.')
+            return None
+        if channel_name is None:
+            logging.warning(f'{self.recorded_video.file_path}: channel_name not found.')
             return None
 
-        # 選択されたチャンネル情報を取得
-        service_id = selected_channel['service_id']
-        channel_name = selected_channel['channel_name']
-        network_id = selected_channel['network_id']
-        transport_stream_id = selected_channel['transport_stream_id']
-        channel_type = selected_channel['channel_type']
-        remocon_id = selected_channel['remocon_id']
+        # リモコン番号を取得（地デジの場合は NIT から、それ以外は計算）
+        if channel_type == 'GR':
+            # NIT (Network Information Table) からリモコン番号を取得
+            self.ts.seek(0)
+            for nit in self.ts.sections(ActualNetworkNetworkInformationSection):
+                for transport_stream in nit.transport_streams:
+                    for ts_information in transport_stream.descriptors.get(TSInformationDescriptor, []):
+                        remocon_id = int(ts_information.remote_control_key_id)
+                        break
+                    else:
+                        continue
+                    break
+                else:
+                    continue
+                break
+        else:
+            # BS/CS などはサービス ID から計算
+            remocon_id = TSInformation.calculateRemoconID(channel_type, service_id)
 
         # チャンネル番号を算出
         channel_number = asyncio.run(TSInformation.calculateChannelNumber(
@@ -665,6 +747,12 @@ class TSInfoAnalyzer:
             # section_number と service_id が一致したときだけ
             # サービス ID が必要な理由は、CS などで同じトランスポートストリームに含まれる別チャンネルの番組情報になることを防ぐため
             if eit.section_number == eit_section_number and eit.service_id == channel.service_id:
+                # TSID / ONID も一致する場合のみ採用する
+                ## EIT は service_id だけでなく TSID / ONID も持つため、誤検出を避けるため一致条件に含める
+                if channel.transport_stream_id is not None and eit.transport_stream_id != channel.transport_stream_id:
+                    continue
+                if channel.network_id is not None and eit.original_network_id != channel.network_id:
+                    continue
 
                 # EIT から得られる各種 Descriptor 内の情報を取得
                 # ariblib.event が各種 Descriptor のラッパーになっていたのでそれを利用
@@ -894,6 +982,125 @@ class TSInfoAnalyzer:
             recorded_program.secondary_audio_language = secondary_audio_language
 
         return recorded_program
+
+
+    def __selectServiceIdByPidFrequency(
+        self,
+        service_id_order: list[int],
+        service_pmt_pid_map: dict[int, int],
+    ) -> int | None:
+        """
+        PAT と PMT から得られる PID 情報と TS 内の PID 出現頻度を突き合わせて、
+        映像・音声 PID が実在する service_id を推定する
+
+        Args:
+            service_id_order (list[int]): PAT に登場した順序で並んだ service_id のリスト
+            service_pmt_pid_map (dict[int, int]): service_id と PMT PID の対応表
+
+        Returns:
+            int | None: 推定された service_id（推定できない場合は None）
+        """
+
+        # MPEG-TS 以外では実データを確認できないため推定しない
+        if self.recorded_video.container_format != 'MPEG-TS':
+            return None
+
+        # PMT から映像・音声 PID を取得
+        service_pid_map: dict[int, dict[str, set[int]]] = {}
+        original_pmt_pids = ProgramMapSection._pids  # type: ignore[attr-defined]
+        ProgramMapSection._pids = list(service_pmt_pid_map.values())  # type: ignore[attr-defined]
+        try:
+            for pmt in self.ts.sections(ProgramMapSection):
+                service_id = int(pmt.program_number)
+                if service_id not in service_pmt_pid_map:
+                    continue
+                video_pids = {int(pid) for pid in pmt.video_pids()}
+                audio_pids = {int(pid) for pid in pmt.audio_pids()}
+                if len(video_pids) == 0 and len(audio_pids) == 0:
+                    continue
+                service_pid_map[service_id] = {
+                    'video_pids': video_pids,
+                    'audio_pids': audio_pids,
+                }
+                if len(service_pid_map) == len(service_pmt_pid_map):
+                    break
+        finally:
+            ProgramMapSection._pids = original_pmt_pids  # type: ignore[attr-defined]
+
+        if len(service_pid_map) == 0:
+            return None
+
+        # TS 内の PID 出現頻度を取得
+        try:
+            file_path = Path(self.recorded_video.file_path)
+            effective_size = min(self.end_ts_offset, self.recorded_video.file_size)
+            if effective_size < ts.PACKET_SIZE * 100:
+                return None
+            sample_offset = ClosestMultiple(int(effective_size * 0.2), ts.PACKET_SIZE)
+            if sample_offset > effective_size - ts.PACKET_SIZE:
+                sample_offset = max(effective_size - ts.PACKET_SIZE, 0)
+            sample_size = ClosestMultiple(6 * 1024 * 1024, ts.PACKET_SIZE)
+            sample_size = min(sample_size, effective_size - sample_offset)
+            if sample_size < ts.PACKET_SIZE * 100:
+                return None
+            with file_path.open('rb') as f:
+                f.seek(sample_offset)
+                sample_data = f.read(sample_size)
+        except Exception as ex:
+            logging.warning(f'{self.recorded_video.file_path}: Failed to read TS sample for PID analysis:', exc_info=ex)
+            return None
+
+        pid_counts: dict[int, int] = {}
+        offset = 0
+        while offset + ts.PACKET_SIZE <= len(sample_data):
+            if sample_data[offset] != ts.SYNC_BYTE[0]:
+                offset += 1
+                continue
+            packet = sample_data[offset:offset + ts.PACKET_SIZE]
+            packet_pid = pid(packet)
+            pid_counts[packet_pid] = pid_counts.get(packet_pid, 0) + 1
+            offset += ts.PACKET_SIZE
+
+        if len(pid_counts) == 0:
+            return None
+
+        # 映像 PID と音声 PID の出現回数を評価して service_id を選定
+        best_service_id: int | None = None
+        best_score = -1
+        best_video_count = -1
+        best_audio_count = -1
+        for service_id in service_id_order:
+            if service_id not in service_pid_map:
+                continue
+            video_pids = service_pid_map[service_id]['video_pids']
+            audio_pids = service_pid_map[service_id]['audio_pids']
+            video_count = sum(pid_counts.get(pid, 0) for pid in video_pids)
+            audio_count = sum(pid_counts.get(pid, 0) for pid in audio_pids)
+            # 映像を優先してスコア化する
+            score = video_count * 2 + audio_count
+            if score > best_score:
+                best_score = score
+                best_video_count = video_count
+                best_audio_count = audio_count
+                best_service_id = service_id
+            elif score == best_score and best_service_id is not None:
+                # スコアが同じ場合は映像 PID が多い方を優先する
+                if video_count > best_video_count:
+                    best_video_count = video_count
+                    best_audio_count = audio_count
+                    best_service_id = service_id
+                elif video_count == best_video_count and audio_count > best_audio_count:
+                    best_audio_count = audio_count
+                    best_service_id = service_id
+
+        if best_service_id is not None and best_score > 0:
+            logging.debug(
+                f'{self.recorded_video.file_path}: Selected service_id {best_service_id} by PID frequency '
+                f'(score: {best_score}, video: {best_video_count}, audio: {best_audio_count}).'
+            )
+            return best_service_id
+
+        return None
 
 
     @classmethod
