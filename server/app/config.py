@@ -50,13 +50,35 @@ class ClientSettings(BaseModel):
     # lshaped_screen_crop_y_position: 同期無効
     # lshaped_screen_crop_zoom_origin: 同期無効
     pinned_channel_ids: list[str] = []
-    panel_display_state: Literal['RestorePreviousState', 'AlwaysDisplay', 'AlwaysFold'] = 'RestorePreviousState'
-    tv_panel_active_tab: Literal['Program', 'Channel', 'Comment', 'Twitter'] = 'Program'
-    video_panel_active_tab: Literal['RecordedProgram', 'Series', 'Comment', 'Twitter'] = 'RecordedProgram'
+    timetable_channel_width: Literal['Wide', 'Normal', 'Narrow'] = 'Normal'
+    timetable_hour_height: Literal['Wide', 'Normal', 'Narrow'] = 'Normal'
+    timetable_hover_expand: bool = False
+    timetable_dim_shopping_programs: bool = True
+    # 番組表のジャンル別のハイライト色
+    # キーはジャンル名 (大分類)、値はハイライトカラー
+    # クライアント側の ILocalClientSettingsDefault.timetable_genre_colors と一致させる必要がある
+    timetable_genre_colors: dict[str, Literal['White', 'Pink', 'Red', 'Orange', 'Yellow', 'Lime', 'Teal', 'Cyan', 'Blue', 'Ochre', 'Brown']] = {
+        'ニュース・報道': 'White',
+        '情報・ワイドショー': 'White',
+        'ドキュメンタリー・教養': 'Blue',
+        'スポーツ': 'Cyan',
+        'ドラマ': 'Pink',
+        'アニメ・特撮': 'Yellow',
+        'バラエティ': 'Lime',
+        '音楽': 'Orange',
+        '映画': 'Brown',
+        '劇場・公演': 'Ochre',
+        '趣味・教育': 'Teal',
+        '福祉': 'White',
+        'その他': 'White',
+    }
     show_player_background_image: bool = True
     use_pure_black_player_background: bool = False
     tv_channel_selection_requires_alt_key: bool = False
     use_28hour_clock: bool = False
+    panel_display_state: Literal['RestorePreviousState', 'AlwaysDisplay', 'AlwaysFold'] = 'RestorePreviousState'
+    tv_panel_active_tab: Literal['Program', 'Channel', 'Comment', 'Twitter'] = 'Program'
+    video_panel_active_tab: Literal['RecordedProgram', 'Series', 'Comment', 'Twitter'] = 'RecordedProgram'
     # tv_streaming_quality: 同期無効
     # tv_streaming_quality_cellular: 同期無効
     # tv_data_saver_mode: 同期無効
@@ -162,17 +184,25 @@ class _ServerSettingsGeneral(BaseModel):
             # 試しにリクエストを送り、200 (OK) が返ってきたときだけ有効な URL とみなす
             try:
                 response = httpx.get(
-                    # Mirakurun API は http://127.0.0.1:40772//api/version のような二重スラッシュを許容しないので、
+                    # Mirakurun API は http://127.0.0.1:40772//api/tuners のような二重スラッシュを許容しないので、
                     # mirakurun_url の末尾のスラッシュを削除してから endpoint を追加する必要がある
-                    url = str(mirakurun_url).rstrip('/') + '/api/version',
+                    ## 従来は /api/version にアクセスしていたが、Mirakurun 4.0.0-beta.5 以下のバージョンには
+                    ## API 実行時に録画中のストリームがドロップする重大なバグがあるため、他のエンドポイントを使うようにした
+                    ## ref: https://github.com/Chinachu/Mirakurun/commit/27fccf9cd9dd08e56614dabf2ceb1b27a6096f0e
+                    url = str(mirakurun_url).rstrip('/') + '/api/tuners',
                     headers = API_REQUEST_HEADERS,
                     timeout = 20,  # 久々のアクセスだとなぜか時間がかかることがあるため、ここだけタイムアウトを長めに設定
                 )
-                # レスポンスヘッダーの server が mirakc であれば mirakc と判定できる
-                if ('server' in response.headers) and ('mirakc' in response.headers['server']):
+                # レスポンスヘッダーの Server から Mirakurun か mirakc かを判定
+                server_header = response.headers.get('server', '').lower()
+                if 'mirakc' in server_header:
                     mirakurun_or_mirakc = 'mirakc'
+                    # Server ヘッダーからバージョン情報を抽出 (例: mirakc/3.4.4)
+                    version_info = server_header.split('/')[-1] if '/' in server_header else 'unknown'
                 else:
                     mirakurun_or_mirakc = 'Mirakurun'
+                    # Server ヘッダーからバージョン情報を抽出 (例: Mirakurun/3.9.0-rc.4)
+                    version_info = server_header.split('/')[-1] if '/' in server_header else 'unknown'
             except (httpx.NetworkError, httpx.TimeoutException):
                 raise ValueError(
                     f'Mirakurun / mirakc ({mirakurun_url}) にアクセスできませんでした。\n'
@@ -180,7 +210,7 @@ class _ServerSettingsGeneral(BaseModel):
                 )
             try:
                 response_json = response.json()
-                if response.status_code != 200 or response_json.get('current') is None:
+                if response.status_code != 200 or not isinstance(response_json, list) or version_info == 'unknown':
                     raise ValueError()
             except Exception:
                 raise ValueError(
@@ -188,7 +218,7 @@ class _ServerSettingsGeneral(BaseModel):
                     f'{mirakurun_or_mirakc} の URL を間違えている可能性があります。'
                 )
             from app import logging
-            logging.info(f'Backend: {mirakurun_or_mirakc} {response_json.get("current")} ({mirakurun_url})')
+            logging.info(f'Backend: {mirakurun_or_mirakc} {version_info} ({mirakurun_url})')
             if info.data.get('always_receive_tv_from_mirakurun') is True:
                 logging.info(f'Always receive TV from {mirakurun_or_mirakc}.')
         return mirakurun_url
@@ -384,7 +414,7 @@ def LoadConfig(bypass_validation: bool = False) -> ServerSettings:
     if bypass_validation is False:
         try:
             _CONFIG = ServerSettings.model_validate(config_dict, context={'bypass_validation': False})
-            logging.debug_simple('Server settings loaded.')
+            logging.debug('Server settings loaded.')
         except ValidationError as error:
 
             # エラーのうちどれか一つでもカスタムバリデーターからのエラーだった場合、エラーメッセージを表示して終了する
@@ -405,7 +435,7 @@ def LoadConfig(bypass_validation: bool = False) -> ServerSettings:
             sys.exit(1)
     else:
         _CONFIG = ServerSettings.model_validate(config_dict, context={'bypass_validation': True})
-        # logging.debug_simple('Server settings loaded (bypassed validation).')
+        # logging.debug('Server settings loaded (bypassed validation).')
 
     return _CONFIG
 
