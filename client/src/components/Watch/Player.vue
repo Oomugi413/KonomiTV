@@ -18,9 +18,11 @@
             :class="{'watch-player__buffering--display': playerStore.is_video_buffering}">
         </v-progress-circular>
         <div class="watch-player__dplayer"></div>
+        <!--
         <div class="watch-player__dplayer-setting-cover"
             :class="{'watch-player__dplayer-setting-cover--display': playerStore.is_player_setting_panel_open}"
             @click="handleSettingCoverClick"></div>
+        -->
         <div class="watch-player__button"
                 @mousemove="playerStore.event_emitter.emit('SetControlDisplayTimer', {event: $event})"
                 @touchmove="playerStore.event_emitter.emit('SetControlDisplayTimer', {event: $event})"
@@ -77,9 +79,6 @@ const handleSettingCoverClick = () => {
 
 // DPlayer のデフォルトスタイルを上書き
 .watch-player__dplayer {
-    @include smartphone-vertical {
-        overflow: visible !important;
-    }
     svg circle, svg path {
         fill: rgb(var(--v-theme-text)) !important;
     }
@@ -334,6 +333,9 @@ const handleSettingCoverClick = () => {
         @include tablet-vertical {
             height: calc(100% - 60px) !important;
         }
+        @include smartphone-vertical {
+            height: calc(100% - 60px) !important;
+        }
         .dplayer-setting-origin-panel {
             .dplayer-setting-item.dplayer-setting-lshaped-screen-crop,
             .dplayer-setting-item.dplayer-setting-keyboard-shortcut {
@@ -504,28 +506,28 @@ _::-webkit-full-page-media, _:future, :root .dplayer-icon:hover .dplayer-icon-co
         }
     }
 
-    .watch-player__dplayer-setting-cover {
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        background-color: rgba(0, 0, 0, 0.5);
-        opacity: 0;
-        visibility: hidden;
-        transition: opacity 0.3s, visibility 0.3s;
-        z-index: 50;
-
-        &--display {
-            // タッチデバイスかつスマホ縦画面のみ、設定パネルを開いた時にカバーを表示する
-            @media (hover: none) {
-                @include smartphone-vertical {
-                    opacity: 1;
-                    visibility: visible;
-                }
-            }
-        }
-    }
+//     .watch-player__dplayer-setting-cover {
+//         position: fixed;
+//         top: 0;
+//         left: 0;
+//         width: 100%;
+//         height: 100%;
+//         background-color: rgba(0, 0, 0, 0.5);
+//         opacity: 0;
+//         visibility: hidden;
+//         transition: opacity 0.3s, visibility 0.3s;
+//         z-index: 50;
+// 
+//         &--display {
+//             // タッチデバイスかつスマホ縦画面のみ、設定パネルを開いた時にカバーを表示する
+//             @media (hover: none) {
+//                 @include smartphone-vertical {
+//                     opacity: 1;
+//                     visibility: visible;
+//                 }
+//             }
+//         }
+//     }
 
     .watch-player__background-wrapper {
         position: absolute;
