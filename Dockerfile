@@ -21,7 +21,7 @@ WORKDIR /
 # RUN aria2c -x10 https://github.com/Oomugi413/KonomiTV/releases/download/v0.12.4/thirdparty-linux.tar.xz
 # RUN tar xvf thirdparty-linux.tar.xz
 ## 開発版 (0.x.x-dev) 用
-RUN aria2c -x10 https://nightly.link/Oomugi413/KonomiTV/actions/runs/16622138414/thirdparty-linux.tar.xz.zip
+RUN aria2c -x10 https://nightly.link/Oomugi413/KonomiTV/workflows/build_thirdparty.yaml/master/thirdparty-linux.tar.xz.zip
 RUN unzip thirdparty-linux.tar.xz.zip && tar xvf thirdparty-linux.tar.xz
 
 # --------------------------------------------------------------------------------------------------------------
