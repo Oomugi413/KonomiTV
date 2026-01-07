@@ -345,6 +345,17 @@ export class ProgramUtils {
         return [pattern1, pattern2];
     }
 
+
+    /**
+     * 番組がショッピング・通販枠かどうかを判定する
+     * @param program 番組情報
+     * @returns ショッピング・通販枠なら true
+     */
+    static isShoppingProgram(program: IProgram): boolean {
+        return program.genres?.some((genre) => genre.middle === 'ショッピング・通販') ?? false;
+    }
+
+
     /**
      * 番組情報中の[字]や[解]などの記号をいい感じに装飾する
      * @param program 番組情報のオブジェクト
@@ -622,6 +633,7 @@ export class ProgramUtils {
         return merged_table;
     }
 
+
     /**
      * ISO639 形式の言語コードが示す言語の名称を取得する
      * server/app/utils/TSInformation.py の TSInformation.getISO639LanguageCodeName() と同等の処理を行う
@@ -651,6 +663,7 @@ export class ProgramUtils {
             return 'その他の言語';
         }
     }
+
 
     /**
      * 番組の長さを「1:30:00」のような形式でフォーマットする

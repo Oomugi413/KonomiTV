@@ -11,6 +11,7 @@ import time
 from typing import ClassVar, Literal, cast
 
 import anyio
+import av
 import cv2
 import numpy as np
 import typer
@@ -23,25 +24,27 @@ from app.constants import LIBRARY_PATH, STATIC_DIR, THUMBNAILS_DIR
 
 class ThumbnailGenerator:
     """
-    プレイヤーのシークバー用タイル画像と、候補区間内で最も良い1枚の代表サムネイルを生成するクラス (with o1 pro / Claude 3.5 Sonnet)
+    プレイヤーのシークバー用タイル画像と、候補区間内で最も良い1枚の代表サムネイルを生成するクラス
+    (with o1 pro / Claude 3.5 Sonnet -> Claude Opus 4.5)
     """
 
     # サムネイルのタイル化の設定
+    ## 将来的に TILE_SCALE のみ (240, 135) などに変更してファイルサイズを削減可能
     BASE_DURATION_MIN: ClassVar[int] = 30  # 基準となる動画の長さ (30分)
     BASE_INTERVAL_SEC: ClassVar[float] = 5.0  # 基準となる間隔 (5秒)
-    MIN_INTERVAL_SEC: ClassVar[float] = 5.0  # 最小間隔 (5秒)
     MAX_INTERVAL_SEC: ClassVar[float] = 30.0  # 最大間隔 (30秒)
+    SCORING_SCALE: ClassVar[tuple[int, int]] = (480, 270)  # スコアリング・代表サムネイル選定時の解像度 (顔検出精度のため維持)
     TILE_SCALE: ClassVar[tuple[int, int]] = (480, 270)  # タイル化時の1フレーム解像度 (width, height)
     TILE_COLS: ClassVar[int] = 34   # WebP の最大サイズ制限 (16383px) を考慮し、1行あたりの最大フレーム数を設定
 
     # WebP 出力の設定
-    WEBP_QUALITY: ClassVar[int] = 68  # WebP 品質 (0-100)
+    WEBP_QUALITY_REPRESENTATIVE: ClassVar[int] = 80  # 代表サムネイルの WebP 品質 (0-100)
+    WEBP_QUALITY_TILE: ClassVar[int] = 68  # シークバーサムネイルタイルの WebP 品質 (0-100)
     WEBP_COMPRESSION: ClassVar[int] = 6  # WebP 圧縮レベル (0-6)
     WEBP_MAX_SIZE: ClassVar[int] = 16383  # WebP の最大サイズ制限 (px)
 
     # JPEG フォールバック時の設定
     JPEG_QUALITY: ClassVar[int] = 90  # JPEG 品質 (0-100)
-    JPEG_OPTIMIZE: ClassVar[bool] = True  # JPEG 最適化
 
     # 顔検出用カスケード分類器のパス
     HUMAN_FACE_CASCADE_PATH: ClassVar[pathlib.Path] = pathlib.Path(cv2.__file__).parent / 'data' / 'haarcascade_frontalface_default.xml'
@@ -273,54 +276,59 @@ class ThumbnailGenerator:
         )
 
 
-    async def generateAndSave(self, skip_tile_if_exists: bool = False) -> None:
+    async def generateAndSave(self) -> None:
         """
         プレイヤーのシークバー用サムネイルタイル画像を生成し、
         さらに候補区間内のフレームから最も良い1枚を選び、代表サムネイルとして出力する
 
-        Args:
-            skip_tile_if_exists (bool): True の場合、既に存在する場合はサムネイルタイルの生成をスキップするかどうか (デフォルト: False)
+        処理フロー:
+        1. サブプロセス内で PyAV でフレーム抽出 + スコアリング
+        2. サブプロセス内で代表サムネイルを保存
+        3. サブプロセス内でタイル画像を生成・保存
         """
 
         start_time = time.time()
         logging.info(f'{self.file_path}: Generating thumbnail... / Face detection mode: {self.face_detection_mode}')
+
         try:
-            # 1. プレイヤーのシークバー用サムネイルタイル画像を生成
-            tile_exists = await self.seekbar_thumbnails_tile_path.is_file()
-            tile_exists_jpg = False
-            if not tile_exists:
-                ## WebP が存在しない場合は JPEG も確認
-                jpg_path = self.seekbar_thumbnails_tile_path.with_suffix('.jpg')
-                tile_exists_jpg = await jpg_path.is_file()
-                if tile_exists_jpg:
-                    self.seekbar_thumbnails_tile_path = jpg_path
-                    tile_exists = True
-            tile_is_not_empty = tile_exists and (await self.seekbar_thumbnails_tile_path.stat()).st_size > 0
-            if tile_is_not_empty and skip_tile_if_exists:
-                ## ファイルが存在し、かつ0バイトでないなら生成済みとみなしてスキップ
-                logging.info(f'{self.file_path}: Seekbar thumbnail tile already exists. Skipping generation.')
-            else:
-                ## まだシークバー用サムネイルタイルが生成されていなければ生成
-                if not await self.__generateThumbnailTile():
-                    logging.error(f'{self.file_path}: Failed to generate seekbar thumbnail tile.')
-                    return
-                logging.info(f'{self.file_path}: Seekbar thumbnail generation completed. ({time.time() - start_time:.2f} sec)')
+            # 万が一出力先ディレクトリが無い場合は作成 (通常存在するはず)
+            thumbnails_dir = anyio.Path(str(THUMBNAILS_DIR))
+            if not await thumbnails_dir.is_dir():
+                await thumbnails_dir.mkdir(parents=True, exist_ok=True)
 
-            # 2. プレイヤーのシークバー用サムネイルタイル画像を読み込み、各タイル(フレーム)を切り出し、
-            #    そのタイムスタンプが candidate_intervals に含まれる場合だけ
-            #    画質評価 + (必要なら) 顔検出してスコアを計算 → 最良を代表サムネイルとして取得
-            start_time_best_frame = time.time()
-            best_thumbnail = await self.__extractBestFrameFromThumbnailTile()
-            if best_thumbnail is None:
-                logging.error(f'{self.file_path}: Failed to extract best frame from seekbar thumbnail tile.')
+            # 1. 候補オフセットを計算
+            candidate_offsets = self.__calculateCandidateOffsets()
+            num_candidates = len(candidate_offsets)
+
+            # タイルの行数を計算（列数は self.TILE_COLS 固定）
+            tile_rows = math.ceil(num_candidates / self.TILE_COLS)
+            tile_width, tile_height = self.TILE_SCALE
+            total_width = tile_width * self.TILE_COLS
+            total_height = tile_height * tile_rows
+
+            # WebP の最大サイズ制限をチェック（制限内なら WebP、越える場合は JPEG にフォールバック）
+            use_webp = total_width <= self.WEBP_MAX_SIZE and total_height <= self.WEBP_MAX_SIZE
+            if not use_webp:
+                self.seekbar_thumbnails_tile_path = self.seekbar_thumbnails_tile_path.with_suffix('.jpg')
+                logging.warning(f'{self.file_path}: Image size ({total_width}x{total_height}) exceeds WebP limits. Falling back to JPEG.')
+
+            # 2. フレーム抽出 + タイル画像生成 + 代表サムネイル保存をサブプロセス内で完結させる
+            ## 親プロセスへのフレーム配列転送を避け、メモリ使用量とコピーコストを抑制する
+            loop = asyncio.get_running_loop()
+            with concurrent.futures.ProcessPoolExecutor(max_workers=1) as executor:
+                success = await loop.run_in_executor(
+                    executor,
+                    self._generateAndSaveThumbnails,
+                    candidate_offsets,
+                    tile_rows,
+                    use_webp,
+                )
+
+            if not success:
+                logging.error(f'{self.file_path}: Failed to generate thumbnails in subprocess.')
                 return
 
-            # 3. 代表サムネイル画像をファイルに書き出し
-            if not await self.__saveRepresentativeThumbnail(best_thumbnail):
-                logging.error(f'{self.file_path}: Failed to save representative thumbnail.')
-                return
-
-            logging.info(f'{self.file_path}: Thumbnail generation completed. ({time.time() - start_time_best_frame:.2f} sec / Total: {time.time() - start_time:.2f} sec)')
+            logging.info(f'{self.file_path}: Thumbnail generation completed. (Total: {time.time() - start_time:.2f} sec)')
             logging.debug(f'Thumbnail tile -> {self.seekbar_thumbnails_tile_path.name}')
             logging.debug(f'Representative -> {self.representative_thumbnail_path.name}')
 
@@ -371,312 +379,319 @@ class ThumbnailGenerator:
         return interval
 
 
-    def __formatTime(self, seconds: float) -> str:
+    def __calculateCandidateOffsets(self) -> list[float]:
         """
-        秒数を HH:MM:SS または HH:MM:SS.xx 形式の文字列に変換するヘルパー関数。
-        秒数が整数に近い場合は HH:MM:SS、そうでなければ小数第2位まで出力する。
-
-        Args:
-            seconds (float): 秒数
+        動画の長さと tile_interval_sec から、各候補フレームの抽出開始位置（秒）のリストを算出する
 
         Returns:
-            str: フォーマットされた時間文字列
+            list[float]: 各候補フレームの抽出開始位置（秒）のリスト
         """
-        hrs = int(seconds // 3600)
-        mins = int((seconds % 3600) // 60)
-        secs = seconds % 60
-        # 整数に近い場合は小数部を省略
-        if abs(secs - round(secs)) < 0.001:
-            return f'{hrs:02}:{mins:02}:{int(secs):02}'
+
+        # 動画の長さと tile_interval_sec から候補フレーム数を算出
+        # ceil() を使うことで、端数でも切り捨てずに確実にすべての区間をカバー
+        num_candidates = math.ceil(self.duration_sec / self.tile_interval_sec)
+        if num_candidates < 1:
+            num_candidates = 1
+
+        # 各候補フレーム抽出の開始位置（秒）を算出（動画末尾の場合は調整する）
+        candidate_offsets: list[float] = []
+        for i in range(num_candidates):
+            offset = i * self.tile_interval_sec
+            # もし候補フレームの開始位置 + 0.01秒が動画長を超える場合、抽出可能な位置に調整する
+            if offset + 0.01 > self.duration_sec:
+                offset = max(0, self.duration_sec - 0.02)
+            candidate_offsets.append(offset)
+
+        return candidate_offsets
+
+
+    def _generateAndSaveThumbnails(
+        self,
+        candidate_offsets: list[float],
+        tile_rows: int,
+        use_webp: bool,
+    ) -> bool:
+        """
+        サブプロセス内でフレーム抽出・スコアリング・タイル生成・代表サムネイル保存まで行う
+        PyAV (FFmpeg) によるデコードや OpenCV での画像処理が CPU-bound のため、ProcessPoolExecutor 上で実行する
+        ProcessPoolExecutor で実行されるエントリーポイントのため、あえて prefix のアンダースコアは1つとしている
+
+        Args:
+            candidate_offsets (list[float]): 抽出するフレームのタイムスタンプ (秒) のリスト
+            tile_rows (int): タイルの行数
+            use_webp (bool): WebP として保存するかどうか (False の場合は JPEG)
+
+        Returns:
+            bool: 成功時は True、失敗時は False
+        """
+
+        # もし Config() の実行時に AssertionError が発生した場合は、LoadConfig() を実行してサーバー設定データをロードする
+        ## ProcessPoolExecutor で実行した場合、自動リロードモード時にグローバル変数が引き継がれないことがあるため
+        try:
+            Config()
+        except AssertionError:
+            LoadConfig(bypass_validation=True)
+
+        # 1. PyAV でフレーム抽出を実行し、候補区間内のフレームをスコアリングして最良フレームを特定する
+        result = self.__extractAndScoreFrames(candidate_offsets)
+        if result is None:
+            logging.error(f'{self.file_path}: Failed to extract and score frames.')
+            return False
+
+        all_frames, best_frame_index = result
+        if len(all_frames) == 0:
+            logging.error(f'{self.file_path}: No frames extracted at all.')
+            return False
+
+        # 2. 代表サムネイルを先に保存（ユーザー体験を優先）
+        start_time_representative = time.time()
+        if best_frame_index is not None:
+            best_frame = all_frames[best_frame_index]
         else:
-            return f'{hrs:02}:{mins:02}:{secs:05.2f}'
+            # 候補区間内にフレームがない場合はランダムに選択
+            logging.warning(f'{self.file_path}: No frames found in candidate intervals. Selecting a random frame.')
+            best_frame = random.choice(all_frames)
+
+        if not self.__saveRepresentativeThumbnail(best_frame):
+            logging.error(f'{self.file_path}: Failed to save representative thumbnail.')
+            return False
+
+        logging.info(f'{self.file_path}: Representative thumbnail saved. ({time.time() - start_time_representative:.2f} sec)')
+
+        # 3. タイル画像を生成・保存
+        start_time_tile = time.time()
+        if not self.__generateAndSaveTileImage(all_frames, tile_rows, use_webp):
+            logging.error(f'{self.file_path}: Failed to generate and save tile image.')
+            return False
+
+        logging.info(f'{self.file_path}: Tile image generation completed. ({time.time() - start_time_tile:.2f} sec)')
+        return True
 
 
-    async def __generateThumbnailTile(self) -> bool:
+    def __extractAndScoreFrames(
+        self,
+        candidate_offsets: list[float],
+    ) -> tuple[list[NDArray[np.uint8]], int | None] | None:
         """
-        FFmpeg を使い、録画ファイルから各候補フレームを直列に抽出し、メモリ上で OpenCV によるタイル化を行う実装
-        ・各候補フレームは、指定オフセットから1フレームのみ抽出することで全編のデコードと I/O 負荷の増大を回避
-        ・抽出時は個別コマンドで出力をパイプで受け取り、中間ファイルを作らずメモリ上で画像変換を実施
-        ・全候補画像は OpenCV の hconcat/vconcat を用いてタイル状に連結し、最終的なサムネイルタイル画像としてディスク出力する
+        PyAV でフレーム抽出し、候補区間内のフレームをスコアリングして最良フレームを特定する
+
+        Args:
+            candidate_offsets (list[float]): 抽出するフレームのタイムスタンプ (秒) のリスト
+
+        Returns:
+            tuple[list[NDArray[np.uint8]], int | None] | None:
+                - 全フレームの BGR 配列リスト (SCORING_SCALE)
+                - 最良フレームのインデックス (候補区間内にフレームがない場合は None)
+                - エラー時は None
+        """
+
+        try:
+            start_time_frame_extraction = time.time()
+
+            # 結果を格納するリスト
+            scoring_width, scoring_height = self.SCORING_SCALE
+            bgr_frames: list[NDArray[np.uint8]] = []
+
+            # MPEG-TS の場合は format を明示的に指定
+            format_name = 'mpegts' if self.container_format == 'MPEG-TS' else None
+
+            # シーケンシャルにフレームを抽出（HDD への負荷を考慮）
+            container = av.open(str(self.file_path), format=format_name)
+            video_stream = container.streams.video[0]
+            try:
+                # コンテナは 1 回だけ開き、各フレーム抽出で seek を繰り返す
+                ## MPEG-TS でも実測で問題なければ再オープンを避けられるため、まずは 1 回オープンで検証する
+                # I フレームのみデコードする設定（FFmpeg の -skip_frame nointra 相当）
+                video_stream.codec_context.skip_frame = 'NONINTRA'
+
+                for i, offset_sec in enumerate(candidate_offsets):
+                    try:
+                        # 指定位置にシーク
+                        # MPEG-TS では start_time が 0 から始まらないことがあるため、start_time を考慮する必要がある
+                        # start_time は pts 単位（90kHz クロックで表現された開始位置）なので、
+                        # offset_sec を pts 単位に変換してから start_time を加算する
+                        time_base = float(video_stream.time_base) if video_stream.time_base is not None else 1.0
+                        start_time = video_stream.start_time if video_stream.start_time else 0
+                        target_ts = int(start_time + offset_sec / time_base)
+                        container.seek(target_ts, backward=True, any_frame=False, stream=video_stream)
+
+                        # seek 後のデコーダ内部状態を初期化し、前回のデコード状態を引きずらないようにする
+                        video_stream.codec_context.flush_buffers()
+
+                        # シーク後、最初のフレームを取得
+                        frame: av.VideoFrame | None = None
+                        for packet in container.demux(video_stream):
+                            for decoded_frame in packet.decode():
+                                frame = cast(av.VideoFrame, decoded_frame)
+                                break
+                            if frame is not None:
+                                break
+
+                        if frame is None:
+                            # フレームが取得できなかった場合は黒画像を使用
+                            logging.warning(f'{self.file_path}: Failed to extract frame at {offset_sec:.2f}s. Using black image.')
+                            black_frame = np.zeros((scoring_height, scoring_width, 3), dtype=np.uint8)
+                            bgr_frames.append(black_frame)
+                            continue
+
+                        # フレームを numpy 配列に変換
+                        img_rgb = frame.to_ndarray(format='rgb24')
+
+                        # リサイズを実行
+                        img_resized = cv2.resize(img_rgb, (scoring_width, scoring_height), interpolation=cv2.INTER_LINEAR)
+
+                        # RGB から OpenCV 向けの BGR に変換して bgr_frames に追加する
+                        img_bgr = cast(NDArray[np.uint8], cv2.cvtColor(img_resized, cv2.COLOR_RGB2BGR))
+                        bgr_frames.append(img_bgr)
+
+                        # 進捗ログ（50フレームごと）
+                        if (i + 1) % 50 == 0:
+                            logging.debug(f'{self.file_path}: Extracted {i + 1}/{len(candidate_offsets)} frames')
+
+                    except Exception as ex:
+                        # 個別のフレーム抽出エラーは警告にとどめ、黒画像で代替
+                        logging.warning(
+                            f'{self.file_path}: Error extracting frame at {offset_sec:.2f}s.',
+                            exc_info=ex,
+                        )
+                        black_frame = np.zeros((scoring_height, scoring_width, 3), dtype=np.uint8)
+                        bgr_frames.append(black_frame)
+
+                        # 一時的なデマルチプレクサの不調を想定し、念のためコンテナを再オープンして継続
+                        try:
+                            container.close()
+                        except Exception as close_ex:
+                            logging.warning(
+                                f'{self.file_path}: Failed to close container after error.',
+                                exc_info=close_ex,
+                            )
+                        try:
+                            container = av.open(str(self.file_path), format=format_name)
+                            video_stream = container.streams.video[0]
+                            video_stream.codec_context.skip_frame = 'NONINTRA'
+                        except Exception as reopen_ex:
+                            logging.error(
+                                f'{self.file_path}: Failed to reopen container after error.',
+                                exc_info=reopen_ex,
+                            )
+                            return None
+            finally:
+                container.close()
+
+            logging.info(f'{self.file_path}: All {len(bgr_frames)} frames extraction completed. ({time.time() - start_time_frame_extraction:.2f} sec)')
+
+            # ========== スコアリング処理 ==========
+
+            start_time_scoring = time.time()
+
+            # 顔検出器のロード (必要な場合のみ)
+            face_cascade = None
+            auxiliary_face_cascade = None
+            if self.face_detection_mode == 'Human':
+                face_cascade = cv2.CascadeClassifier(str(self.HUMAN_FACE_CASCADE_PATH))
+            elif self.face_detection_mode == 'Anime':
+                face_cascade = cv2.CascadeClassifier(str(self.ANIME_FACE_CASCADE_PATH))
+                # アニメ顔検出時は精度向上のため、実写顔検出器を併用
+                auxiliary_face_cascade = cv2.CascadeClassifier(str(self.HUMAN_FACE_CASCADE_PATH))
+
+            # 候補区間内のフレームを収集してスコアリング
+            # (index, score, found_face) のリスト
+            scored_frames: list[tuple[int, float, bool]] = []
+            total_frames = len(bgr_frames)
+            cols = self.TILE_COLS
+            for idx in range(total_frames):
+                # このフレームの動画内時間(秒)
+                time_offset = idx * self.tile_interval_sec
+                # 候補区間に含まれているかどうか
+                if not self.__inCandidateIntervals(time_offset):
+                    continue
+
+                # タイル上の座標（ログ出力用）
+                row = idx // cols + 1
+                col = idx % cols + 1
+
+                # スコアを計算
+                frame_bgr = bgr_frames[idx]
+                score, found_face = self.__computeImageScore(frame_bgr, face_cascade, auxiliary_face_cascade, row, col)
+                scored_frames.append((idx, score, found_face))
+
+            # 最良フレームのインデックスを特定
+            best_frame_index: int | None = None
+            if scored_frames:
+                # 顔ありフレームだけ抜き出す
+                face_frames = [(idx, sc, True) for (idx, sc, f) in scored_frames if f]
+
+                if self.face_detection_mode is not None and face_frames:
+                    # 顔ありのみから最大スコアを選ぶ
+                    best_idx, _, _ = max(face_frames, key=lambda x: x[1])
+                    best_row = best_idx // cols + 1
+                    best_col = best_idx % cols + 1
+                    logging.debug(f'Best frame selected. (face found / row:{best_row}, col:{best_col})')
+                    best_frame_index = best_idx
+                else:
+                    # 顔検出無し or 一つも顔が見つからなかった場合
+                    best_idx, _, _ = max(scored_frames, key=lambda x: x[1])
+                    best_row = best_idx // cols + 1
+                    best_col = best_idx % cols + 1
+                    logging.debug(f'Best frame selected. (face not found / row:{best_row}, col:{best_col})')
+                    best_frame_index = best_idx
+            else:
+                # 候補区間内のフレームが1枚もない場合
+                logging.warning(f'{self.file_path}: No frames found in candidate intervals.')
+
+            logging.info(f'{self.file_path}: Frame scoring completed. ({time.time() - start_time_scoring:.2f} sec)')
+            return (bgr_frames, best_frame_index)
+
+        except Exception as ex:
+            logging.error(f'{self.file_path}: Error in PyAV frame extraction and scoring:', exc_info=ex)
+            return None
+
+
+    def __saveRepresentativeThumbnail(self, img_bgr: NDArray[np.uint8]) -> bool:
+        """
+        代表サムネイルを WebP ファイルに同期的に保存する
+
+        Args:
+            img_bgr (NDArray[np.uint8]): 保存する画像データ (BGR)
 
         Returns:
             bool: 成功時は True、失敗時は False
         """
 
         try:
-            # 動画の長さと tile_interval_sec から候補フレーム数を算出
-            # ※ ceil() を使うことで、端数でも切り捨てずに確実にすべての区間をカバー
-            num_candidates = math.ceil(self.duration_sec / self.tile_interval_sec)
-            if num_candidates < 1:
-                num_candidates = 1
-
-            # タイルの行数を計算（列数は self.TILE_COLS 固定）
-            tile_rows = math.ceil(num_candidates / self.TILE_COLS)
-            width, height = self.TILE_SCALE
-            total_width = width * self.TILE_COLS
-            total_height = height * tile_rows
-
-            # WebP の最大サイズ制限をチェック（制限内なら WebP、越える場合は JPEG にフォールバック）
-            use_webp = total_width <= self.WEBP_MAX_SIZE and total_height <= self.WEBP_MAX_SIZE
-            if not use_webp:
-                self.seekbar_thumbnails_tile_path = self.seekbar_thumbnails_tile_path.with_suffix('.jpg')
-                logging.warning(f'{self.file_path}: Image size ({total_width}x{total_height}) exceeds WebP limits. Falling back to JPEG.')
-
-            # 各候補フレーム抽出の開始位置（秒）を算出（動画末尾の場合は調整する）
-            candidate_offsets = []
-            for i in range(num_candidates):
-                offset = i * self.tile_interval_sec
-                # もし候補フレームの開始位置 + 0.01秒が動画長を超える場合、抽出可能な位置に調整する
-                if offset + 0.01 > self.duration_sec:
-                    offset = max(0, self.duration_sec - 0.02)
-                candidate_offsets.append(offset)
-
             # 万が一出力先ディレクトリが無い場合は作成 (通常存在するはず)
-            thumbnails_dir = anyio.Path(str(THUMBNAILS_DIR))
-            if not await thumbnails_dir.is_dir():
-                await thumbnails_dir.mkdir(parents=True, exist_ok=True)
+            thumbnails_dir = THUMBNAILS_DIR
+            if not thumbnails_dir.is_dir():
+                thumbnails_dir.mkdir(parents=True, exist_ok=True)
 
-            # 非同期キューの準備
-            frame_queue: asyncio.Queue[tuple[float, bytes]] = asyncio.Queue()
-
-            # エラー通知用のイベント
-            error_event = asyncio.Event()
-
-            async def ExtractSingleFrame(offset: float, worker_name: str) -> bytes | None:
-                """ FFmpeg を使い1フレームを抽出する共通処理 """
-
-                # オフセットを HH:MM:SS または HH:MM:SS.xx 形式に変換
-                formatted_offset = self.__formatTime(offset)
-
-                # 個別に1枚抽出するための FFmpeg コマンドを実行
-                ## 試行錯誤の結果、数フレーム読み取るだけのためにハードウェアアクセラレーションを使うと
-                ## HW デコーダーの初期化などでむしろ遅くなることが判明したため、-hwaccel はあえて指定していない
-                process = await asyncio.create_subprocess_exec(
-                    LIBRARY_PATH['FFmpeg'],
-                    *[
-                        # 上書きを許可
-                        '-y',
-                        # 非対話モードで実行し、不意のフリーズを回避する
-                        '-nostdin',
-                        # 入力フォーマットを指定
-                        '-f', 'mpegts' if self.container_format == 'MPEG-TS' else 'mp4',
-                        # I フレームのみをデコードする (nokey ではなく nointra でないと一部フレームが緑色になる…)
-                        '-skip_frame', 'nointra',
-                        # 抽出開始位置
-                        '-ss', formatted_offset,
-                        # 入力ファイル
-                        '-i', str(self.file_path),
-                        # 音声ストリームを無効化し若干の高速化を図る
-                        '-an',
-                        # 画像サイズを調整（タイル化時に各画像は self.TILE_SCALE になるように）
-                        '-vf', f'scale={width}:{height}',
-                        # 1フレーム分のみ抽出する
-                        '-frames:v', '1',
-                        # エンコード負荷低減のため、中間フォーマットには PNG を使う
-                        '-codec:v', 'png',
-                        # スレッド数を自動で設定する
-                        '-threads', 'auto',
-                        # 標準出力にパイプ出力する
-                        '-f', 'image2pipe',
-                        'pipe:1',
-                    ],
-                    # 明示的に標準入力を無効化しないと、親プロセスの標準入力が引き継がれてしまう
-                    stdin = asyncio.subprocess.DEVNULL,
-                    # 標準出力・標準エラー出力をパイプで受け取る
-                    stdout = asyncio.subprocess.PIPE,
-                    stderr = asyncio.subprocess.PIPE,
-                )
-
-                # プロセス終了を待ち、エラー出力を取得
-                stdout, stderr = await process.communicate()
-                if process.returncode != 0:
-                    error_message = stderr.decode('utf-8', errors='ignore')
-                    logging.error(f'{self.file_path}: [{worker_name}] FFmpeg candidate extraction failed at offset {formatted_offset} with error: {error_message}')
-                    return None
-
-                # PNG バイナリをそのまま返す
-                return stdout
-
-            async def ExtractFramesWorker(
-                offsets: list[float],
-                worker_name: str,
-                start_delay: float = 0.0
-            ) -> None:
-                """ フレーム抽出ワーカー """
-                try:
-                    # オフセットを WORKER_SYNC_COUNT 個ずつに分割
-                    for i in range(0, len(offsets), WORKER_SYNC_COUNT):
-                        # バッチの開始時にディレイを適用
-                        if start_delay > 0:
-                            await asyncio.sleep(start_delay)
-
-                        batch_offsets = offsets[i:i + WORKER_SYNC_COUNT]
-
-                        for offset in batch_offsets:
-                            # エラーチェック（他のワーカーでエラーが発生していたら終了）
-                            if error_event.is_set():
-                                return
-
-                            # FFmpegでフレーム抽出
-                            frame = await ExtractSingleFrame(offset, worker_name)
-                            if frame is None:
-                                error_event.set()
-                                return
-
-                            # キューに結果を格納
-                            await frame_queue.put((offset, frame))
-
-                            # 同期カウンターをインクリメント
-                            nonlocal sync_counter
-                            sync_counter += 1
-                            if sync_counter >= sync_target:
-                                # 同期イベントを発火
-                                sync_event.set()
-
-                        try:
-                            # 同期イベントが発火するまで待機（キャンセル可能）
-                            await asyncio.wait_for(sync_event.wait(), timeout=30.0)
-                        except (TimeoutError, asyncio.CancelledError):
-                            # キャンセルまたはタイムアウト時は即座に終了
-                            return
-                        finally:
-                            # 次のバッチに向けて同期イベントをクリア
-                            sync_event.clear()
-                            # 同期カウンターをリセット
-                            sync_counter = 0
-
-                except asyncio.CancelledError:
-                    # キャンセル時は即座に終了
-                    return
-                except Exception as ex:
-                    logging.error(f'{self.file_path}: [{worker_name}] Unexpected error:', exc_info=ex)
-                    error_event.set()
-
-            try:
-                # オフセットを WORKER_COUNT 個に分割 (0,5,10,...), (1,6,11,...), (2,7,12,...), (3,8,13,...), (4,9,14,...)
-                # 1プロセスの実行に約1秒弱かかるため、WORKER_DELAY 秒間隔で起動することで
-                # プロセス起動のタイミングを分散させつつ、なるべくシーケンシャルなアクセスになるよう調整
-                WORKER_COUNT = 5
-                WORKER_DELAY = 0.18
-                # 同期を取る間隔（各ワーカーがこの数だけフレームを取得したら同期を取る）
-                WORKER_SYNC_COUNT = 10
-
-                # オフセットをワーカー数で分割
-                worker_offsets = [
-                    candidate_offsets[i::WORKER_COUNT] for i in range(WORKER_COUNT)
-                ]
-
-                # 同期用のイベント
-                sync_event = asyncio.Event()
-                sync_counter = 0
-                sync_target = WORKER_COUNT * WORKER_SYNC_COUNT
-
-                # WORKER_COUNT 個のワーカーを WORKER_DELAY 秒間隔で起動
-                start_time = time.time()
-                workers = [
-                    ExtractFramesWorker(worker_offsets[i], f'Worker {i}', start_delay=i * WORKER_DELAY)
-                    for i in range(WORKER_COUNT)
-                ]
-
-                # 全フレームの収集を待機
-                frames_dict: dict[float, bytes] = {}
-                expected_frames = len(candidate_offsets)
-
-                # ワーカータスクを開始
-                worker_tasks = [asyncio.create_task(w) for w in workers]
-
-                try:
-                    # フレーム収集ループ
-                    while len(frames_dict) < expected_frames:
-                        if error_event.is_set():
-                            # エラーが発生した場合は中断
-                            raise RuntimeError('Error occurred in worker task')
-
-                        try:
-                            # タイムアウト付きでキューから結果を取得
-                            offset, frame = await asyncio.wait_for(frame_queue.get(), timeout=30.0)
-                            frames_dict[offset] = frame
-                            # 進捗をログ出力
-                            # logging.debug(
-                            #     f'{self.file_path}: Frame collected {len(frames_dict)}/{expected_frames} '
-                            #     f'(offset: {self.__formatTime(offset)})'
-                            # )
-
-                            # 全フレームの収集が完了したら、残りのワーカータスクをキャンセル
-                            if len(frames_dict) >= expected_frames:
-                                # 全ワーカーをキャンセル
-                                for task in worker_tasks:
-                                    task.cancel()
-                                # キャンセルされたタスクの完了を待機（エラーは無視）
-                                await asyncio.gather(*worker_tasks, return_exceptions=True)
-                                break
-
-                        except TimeoutError:
-                            # タイムアウト時はエラーとして扱う
-                            raise RuntimeError('Timeout while waiting for frame')
-
-                except Exception as ex:
-                    # エラー発生時は全ワーカーを確実にキャンセル
-                    error_event.set()
-                    for task in worker_tasks:
-                        task.cancel()
-                    # キャンセルされたタスクの完了を待機
-                    await asyncio.gather(*worker_tasks, return_exceptions=True)
-                    raise ex
-
-                # 時系列順にフレームを並べ直す
-                png_frames = [
-                    frames_dict[offset] for offset in candidate_offsets
-                ]
-                logging.debug(
-                    f'{self.file_path}: All frames collected and sorted in chronological order. ({time.time() - start_time:.2f} sec)'
-                )
-
-            except Exception as ex:
-                logging.error(f'{self.file_path}: Error in parallel thumbnail generation:', exc_info=ex)
+            # WebP ファイルを書き込む
+            if not cv2.imwrite(str(self.representative_thumbnail_path), img_bgr, [
+                cv2.IMWRITE_WEBP_QUALITY, self.WEBP_QUALITY_REPRESENTATIVE,
+            ]):
+                logging.error(f'{self.file_path}: Failed to write representative thumbnail.')
                 return False
-
-            # PNG 画像のフレームを繋ぎ合わせてタイル画像を生成し、FFmpeg で WebP または JPEG として保存
-            ## CPU バウンドな処理なので、イベントループをブロックしないよう ProcessPoolExecutor で実行する
-            loop = asyncio.get_running_loop()
-            with concurrent.futures.ProcessPoolExecutor(max_workers=1) as executor:
-                success = await loop.run_in_executor(
-                    executor,
-                    self._generateAndSaveTileImage,
-                    png_frames,
-                    tile_rows,
-                    height,
-                    width,
-                    use_webp,
-                )
-                if not success:
-                    logging.error(f'{self.file_path}: Failed to generate and save tile image.')
-                    return False
 
             return True
 
         except Exception as ex:
-            logging.error(f'{self.file_path}: Error in seekbar thumbnail tile generation:', exc_info=ex)
+            logging.error(f'{self.file_path}: Error in representative thumbnail saving:', exc_info=ex)
             return False
 
 
-    def _generateAndSaveTileImage(
+    def __generateAndSaveTileImage(
         self,
-        png_frames: list[bytes],
+        bgr_frames: list[NDArray[np.uint8]],
         tile_rows: int,
-        height: int,
-        width: int,
         use_webp: bool,
     ) -> bool:
         """
-        PNG フレームからタイル画像を生成し、WebP または JPEG として保存する
-        ProcessPoolExecutor で実行されるため、あえて prefix のアンダースコアは1つとしている
+        BGR フレームからタイル画像を生成し、WebP または JPEG として保存する
+        フレームは SCORING_SCALE で抽出されているため、TILE_SCALE にリサイズしてからタイル化する
+        (SCORING_SCALE == TILE_SCALE の場合はリサイズ不要)
 
         Args:
-            png_frames (list[bytes]): PNG フレームのバイナリデータのリスト
+            bgr_frames (list[NDArray[np.uint8]]): BGR フレームのリスト (SCORING_SCALE)
             tile_rows (int): タイルの行数
-            height (int): タイルの高さ
-            width (int): タイルの幅
             use_webp (bool): WebP として保存するかどうか (False の場合は JPEG)
 
         Returns:
@@ -684,40 +699,27 @@ class ThumbnailGenerator:
         """
 
         try:
-            # PNG フレームを OpenCV の画像データに変換
-            candidate_images = []
-            for i in range(len(png_frames)):
-                frame = None
-                if not png_frames[i]:
-                    # 動画末尾付近はその先に I フレームがないことが多くこのときその要素は空になる
-                    # この条件は頻繁なので、先頭要素でなく以降の要素がすべて空であるなら警告は出さない
-                    for j in range(i, len(png_frames)):
-                        if j == 0 or png_frames[j]:
-                            logging.warning(f'{self.file_path}: Failed to extract PNG frame. Using black image instead.')
-                            break
-                else:
-                    try:
-                        # PNG バイナリを numpy 配列に変換
-                        image_data = np.frombuffer(png_frames[i], dtype=np.uint8)
-                        # OpenCV で画像デコード
-                        frame = cv2.imdecode(image_data, cv2.IMREAD_COLOR)
-                        if frame is None:
-                            logging.warning(f'{self.file_path}: Failed to decode PNG frame. Using black image instead.')
-                    except Exception as ex:
-                        logging.warning(f'{self.file_path}: Exception occurred while decoding PNG frame. Using black image instead:', exc_info=ex)
-                if frame is None:
-                    # 黒画像を代わりに使用
-                    frame = np.zeros((height, width, 3), dtype=np.uint8)
-                candidate_images.append(frame)
+            tile_width, tile_height = self.TILE_SCALE
+            scoring_width, scoring_height = self.SCORING_SCALE
+
+            # SCORING_SCALE と TILE_SCALE が異なる場合はリサイズ
+            # 将来的に TILE_SCALE を小さくしてファイルサイズを削減する際に使用
+            if (tile_width, tile_height) != (scoring_width, scoring_height):
+                resized_frames = [
+                    cv2.resize(frame, (tile_width, tile_height), interpolation=cv2.INTER_LINEAR)
+                    for frame in bgr_frames
+                ]
+            else:
+                resized_frames = bgr_frames
 
             # OpenCV を用いてタイル化処理を行う
             rows = []
             num_cols = self.TILE_COLS
             for r in range(tile_rows):
-                row_images = candidate_images[r * num_cols: (r + 1) * num_cols]
+                row_images = list(resized_frames[r * num_cols: (r + 1) * num_cols])
                 # 最終行が列数に満たない場合、黒画像で埋める
                 if len(row_images) < num_cols:
-                    black_image = np.zeros((height, width, 3), dtype=np.uint8)
+                    black_image = np.zeros((tile_height, tile_width, 3), dtype=np.uint8)
                     while len(row_images) < num_cols:
                         row_images.append(black_image)
                 row_concat = cv2.hconcat(row_images)
@@ -731,45 +733,33 @@ class ThumbnailGenerator:
                 return False
 
             # FFmpeg でタイル画像を WebP または JPEG に圧縮保存
-            # これで最終的なタイル画像がディスクへ書き込まれる
             process = subprocess.Popen(
                 [
                     LIBRARY_PATH['FFmpeg'],
-                    # 上書きを許可
                     '-y',
-                    # 非対話モードで実行し、不意のフリーズを回避する
                     '-nostdin',
-                    # 入力フォーマットを指定
                     '-f', 'image2pipe',
-                    # 入力コーデックを指定
                     '-codec:v', 'png',
-                    # 標準入力からパイプ入力
                     '-i', 'pipe:0',
-                    # WebP または JPEG 出力設定
                     *([
                         '-codec:v', 'webp',
-                        '-quality', str(self.WEBP_QUALITY),  # 品質設定
-                        '-compression_level', str(self.WEBP_COMPRESSION),  # 圧縮レベル
-                        '-preset', 'picture',  # 写真向けプリセット
+                        '-quality', str(self.WEBP_QUALITY_TILE),
+                        '-compression_level', str(self.WEBP_COMPRESSION),
+                        '-preset', 'picture',
                     ] if use_webp else [
                         '-codec:v', 'mjpeg',
-                        '-qmin', '1',  # 最小品質
-                        '-qmax', '1',  # 最大品質
-                        '-qscale:v', str(int((100 - self.JPEG_QUALITY) / 4)),  # 品質設定 (JPEG の場合は 1-31 のスケール)
+                        '-qmin', '1',
+                        '-qmax', '1',
+                        '-qscale:v', str(int((100 - self.JPEG_QUALITY) / 4)),
                     ]),
-                    # スレッド数を自動で設定する
                     '-threads', 'auto',
-                    # 出力ファイル
                     str(self.seekbar_thumbnails_tile_path),
                 ],
-                # 明示的に標準入力を有効化
                 stdin = subprocess.PIPE,
-                # 標準出力・標準エラー出力をパイプで受け取る
                 stdout = subprocess.PIPE,
                 stderr = subprocess.PIPE,
             )
 
-            # 画像データを標準入力に書き込み、プロセス終了を待つ
             _, stderr_data = process.communicate(input=tile_png_data.tobytes())
             if process.returncode != 0:
                 error_message = stderr_data.decode('utf-8', errors='ignore')
@@ -780,135 +770,6 @@ class ThumbnailGenerator:
 
         except Exception as ex:
             logging.error(f'{self.file_path}: Error in tile image generation and saving:', exc_info=ex)
-            return False
-
-
-    async def __extractBestFrameFromThumbnailTile(self) -> NDArray[np.uint8] | None:
-        """
-        生成したシークバー用タイル画像から、候補区間内に相当するフレームだけを
-        スコアリングし、最良の1枚を返す (画像は OpenCV 形式の BGR NDArray)
-        顔検出オプションが指定されている場合は顔があるフレームのみ優先し、なければ全フレームから選ぶ
-        スコアリングで適切な候補が見つからない場合は、ランダムに1枚を選択する
-
-        Returns:
-            NDArray[np.uint8] | None: 最良フレーム (BGR) / 予期せぬエラーが発生した場合のみ None
-        """
-
-        try:
-            # タイル画像を読み込み (同期 I/O なので asyncio.to_thread() でラップ)
-            tile_bgr = await asyncio.to_thread(cv2.imread, str(self.seekbar_thumbnails_tile_path))
-            if tile_bgr is None:
-                logging.error(f'{self.file_path}: Failed to read seekbar thumbnail tile.')
-                return None
-
-            height, width, _ = tile_bgr.shape
-            tile_w, tile_h = self.TILE_SCALE
-
-            # 総フレーム数を計算 ( rows * cols )
-            # ※ rows = height / tile_h, cols = width / tile_w
-            #   (タイルの端数が出る場合もあるが、ここでは切り捨て等で対処)
-            cols = width // tile_w
-            rows = height // tile_h
-            total_frames = rows * cols
-
-            # 候補区間内のフレームを収集
-            frames_data: list[tuple[int, NDArray[np.uint8], int, int, NDArray[np.uint8]]] = []
-            # (index, frame_bgr, row, col, sub_img)
-
-            for idx in range(total_frames):
-                # このフレームの動画内時間(秒)
-                time_offset = idx * self.tile_interval_sec
-                # 候補区間に含まれているかどうか
-                if not self.__inCandidateIntervals(time_offset):
-                    continue
-
-                # タイル上の座標
-                row = idx // cols
-                col = idx % cols
-                y_start = row * tile_h
-                x_start = col * tile_w
-                sub_img = cast(NDArray[np.uint8], tile_bgr[y_start:y_start+tile_h, x_start:x_start+tile_w])
-
-                # 候補区間内のフレームを収集
-                frames_data.append((idx, sub_img, row + 1, col + 1, sub_img))
-
-            # 候補区間内のフレームが1枚もない場合は、全フレームから1枚をランダムに選択
-            if not frames_data:
-                logging.warning(f'{self.file_path}: No frames found in candidate intervals. Selecting a random frame.')
-                idx = random.randint(0, total_frames - 1)
-                row = idx // cols
-                col = idx % cols
-                y_start = row * tile_h
-                x_start = col * tile_w
-                logging.debug(f'Random frame selected. (row:{row + 1}, col:{col + 1})')
-                return cast(NDArray[np.uint8], tile_bgr[y_start:y_start+tile_h, x_start:x_start+tile_w])
-
-            # 外部プロセスでスコア計算を実行
-            loop = asyncio.get_running_loop()
-            with concurrent.futures.ProcessPoolExecutor(max_workers=1) as executor:
-                frames_info = await loop.run_in_executor(executor, self._computeImageScores, frames_data)
-
-            # スコアリングで適切な候補を選定
-            if frames_info:
-                # 顔ありフレームだけ抜き出す
-                face_frames = [(idx, sc, True, im) for (idx, sc, f, im) in frames_info if f]
-
-                if self.face_detection_mode is not None and face_frames:
-                    # 顔ありのみから最大スコアを選ぶ
-                    best_idx, _, _, best_img = max(face_frames, key=lambda x: x[1])
-                    best_row = best_idx // cols
-                    best_col = best_idx % cols
-                    logging.debug(f'Best frame selected. (face found / row:{best_row + 1}, col:{best_col + 1})')
-                    return best_img
-                else:
-                    # 顔検出無し or 一つも顔が見つからなかった場合
-                    best_idx, _, _, best_img = max(frames_info, key=lambda x: x[1])
-                    best_row = best_idx // cols
-                    best_col = best_idx % cols
-                    logging.debug(f'Best frame selected. (face not found / row:{best_row + 1}, col:{best_col + 1})')
-                    return best_img
-
-            # スコアリングで適切な候補が見つからなかった場合は、候補区間内からランダムに1枚を選択
-            logging.warning(f'{self.file_path}: No suitable frame found by scoring. Selecting a random frame from candidate intervals.')
-            _, _, _, _, best_img = random.choice(frames_data)  # タプルのアンパックを修正
-            return best_img
-
-        except Exception as ex:
-            logging.error(f'{self.file_path}: Error in best frame extraction:', exc_info=ex)
-            return None
-
-
-    async def __saveRepresentativeThumbnail(self, img_bgr: NDArray[np.uint8]) -> bool:
-        """
-        代表サムネイルを WebP ファイルに保存する
-
-        Args:
-            img_bgr (NDArray[np.uint8]): 保存する画像データ (BGR)
-
-        Returns:
-            bool: 成功時は True、失敗時は False
-        """
-
-        try:
-            # 万が一出力先ディレクトリが無い場合は作成 (通常存在するはず)
-            thumbnails_dir = anyio.Path(str(THUMBNAILS_DIR))
-            if not await thumbnails_dir.is_dir():
-                await thumbnails_dir.mkdir(parents=True, exist_ok=True)
-
-            # WebP 出力用のパラメータを設定
-            params = [
-                cv2.IMWRITE_WEBP_QUALITY, self.WEBP_QUALITY,
-            ]
-
-            # WebP ファイルを書き込む
-            if not await asyncio.to_thread(cv2.imwrite, str(self.representative_thumbnail_path), img_bgr, params):
-                logging.error(f'{self.file_path}: Failed to write representative thumbnail.')
-                return False
-
-            return True
-
-        except Exception as ex:
-            logging.error(f'{self.file_path}: Error in representative thumbnail saving:', exc_info=ex)
             return False
 
 
@@ -1236,49 +1097,6 @@ class ThumbnailGenerator:
         return score
 
 
-    def _computeImageScores(
-        self,
-        frames_data: list[tuple[int, NDArray[np.uint8], int, int, NDArray[np.uint8]]],
-    ) -> list[tuple[int, float, bool, NDArray[np.uint8]]]:
-        """
-        複数フレームのスコアを一括で計算する
-        ProcessPoolExecutor で実行されるため、あえて prefix のアンダースコアは1つとしている
-
-        Args:
-            frames_data (list[tuple[int, NDArray[np.uint8], int, int, NDArray[np.uint8]]]): (index, frame_bgr, row, col, sub_img) のリスト
-
-        Returns:
-            list[tuple[int, float, bool, NDArray[np.uint8]]]: (index, score, found_face, sub_img) のリスト
-        """
-
-        # もし Config() の実行時に AssertionError が発生した場合は、LoadConfig() を実行してサーバー設定データをロードする
-        ## 通常ならこの関数を ProcessPoolExecutor で実行した場合もサーバー設定データはロード状態になっているはずだが、
-        ## 自動リロードモード時のみなぜかグローバル変数がマルチプロセスに引き継がれないため、明示的にロードさせる必要がある
-        try:
-            Config()
-        except AssertionError:
-            # バリデーションは既にサーバー起動時に行われているためスキップする
-            LoadConfig(bypass_validation=True)
-
-        # 顔検出器のロード (必要な場合のみ)
-        face_cascade = None
-        auxiliary_face_cascade = None
-        if self.face_detection_mode == 'Human':
-            face_cascade = cv2.CascadeClassifier(str(self.HUMAN_FACE_CASCADE_PATH))
-        elif self.face_detection_mode == 'Anime':
-            face_cascade = cv2.CascadeClassifier(str(self.ANIME_FACE_CASCADE_PATH))
-            # アニメ顔検出時は精度向上のため、実写顔検出器を併用
-            auxiliary_face_cascade = cv2.CascadeClassifier(str(self.HUMAN_FACE_CASCADE_PATH))
-
-        # 各フレームのスコアを計算
-        results: list[tuple[int, float, bool, NDArray[np.uint8]]] = []
-        for idx, frame_bgr, row, col, sub_img in frames_data:
-            score, found_face = self.__computeImageScore(frame_bgr, face_cascade, auxiliary_face_cascade, row, col)
-            results.append((idx, score, found_face, sub_img))
-
-        return results
-
-
     def __computeImageScore(
         self,
         img_bgr: NDArray[np.uint8],
@@ -1520,11 +1338,6 @@ if __name__ == "__main__":
             "-f",
             help="顔検出モード (Human/Anime) / 指定しない場合はメタデータから自動取得",
         ),
-        skip_tile_if_exists: bool = typer.Option(
-            False,
-            "--skip-tile",
-            help="サムネイルタイルが既に存在する場合は再生成をスキップ",
-        ),
     ) -> None:
         """
         録画ファイルからサムネイルを生成する
@@ -1554,6 +1367,6 @@ if __name__ == "__main__":
             generator.face_detection_mode = face_detection_mode
 
         # サムネイルを生成
-        asyncio.run(generator.generateAndSave(skip_tile_if_exists=skip_tile_if_exists))
+        asyncio.run(generator.generateAndSave())
 
     typer.run(main)

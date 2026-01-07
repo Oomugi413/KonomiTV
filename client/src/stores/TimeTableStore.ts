@@ -50,17 +50,11 @@ const useTimeTableStore = defineStore('timetable', () => {
     // デフォルトは現在日時から算出した今日の 4:00
     const selected_date = ref<Dayjs>(getTodayStartTime());
 
-    // スクロール位置
-    const scroll_position = ref<{ x: number; y: number }>({ x: 0, y: 0 });
-
     // 番組表データ
     const channels_data = shallowRef<ITimeTableChannel[]>([]);
 
     // 番組表の日付範囲 (API から取得した earliest/latest)
     const date_range = ref<{ earliest: Dayjs; latest: Dayjs } | null>(null);
-
-    // 現在選択中 (クリック/ホバーで展開中) の番組 ID
-    const selected_program_id = ref<string | null>(null);
 
     // ローディング状態
     const is_loading = ref<boolean>(false);
@@ -68,11 +62,14 @@ const useTimeTableStore = defineStore('timetable', () => {
     // 初回の番組表データ取得が完了したかどうか
     const is_initial_load_completed = ref<boolean>(false);
 
-    // 現在時刻バーの自動追従が有効かどうか
-    const is_auto_scroll_enabled = ref<boolean>(true);
-
     // 36時間表示モードかどうか (現在時刻から翌日4時までが11時間未満の場合)
     const is_36hour_display = ref<boolean>(false);
+
+    // 日付表示のオフセット (36時間表示モード時のスクロール位置に応じて変化)
+    // 0: selected_date の日付を表示中, 1: selected_date + 1日 (翌日) を表示中
+    // 通常モード (非36時間表示) では常に 0
+    // 「次の日を見る」「前の日を見る」で移動する日付の計算に使用される
+    const date_display_offset = ref<number>(0);
 
     // スクロール上端の制限時刻 (選択日が今日の場合のみ有効、それ以外は null)
     // 「現在時刻 - 1時間の00分」を表す
@@ -152,6 +149,22 @@ const useTimeTableStore = defineStore('timetable', () => {
 
 
     /**
+     * 日時から「放送日」を計算する
+     * 番組表は04:00を境界として日付が切り替わるため、04:00より前の時刻は前日の放送日として扱う
+     * @param datetime 日時
+     * @returns 放送日の開始時刻 (その日の04:00)
+     */
+    function getBroadcastDate(datetime: Dayjs): Dayjs {
+        // 04:00ちょうどの場合を前日扱いにするため、1ミリ秒引いてから計算
+        // 例: 2026-01-14T04:00:00 → 2026-01-14T03:59:59.999 → 4時間引いて 2026-01-13T23:59:59.999 → 1/13
+        const adjusted = datetime.subtract(1, 'millisecond');
+        const shiftedBack = adjusted.subtract(4, 'hour');
+        // 放送日の開始時刻 (04:00) を返す
+        return shiftedBack.startOf('day').add(4, 'hour');
+    }
+
+
+    /**
      * 今日の番組表の開始時刻 (4:00) を取得する
      * 0:00〜3:59 の場合は前日の 4:00 を返す (28時間表記対応)
      * @returns 今日の開始時刻
@@ -199,50 +212,6 @@ const useTimeTableStore = defineStore('timetable', () => {
         }
         // 通常: selected_date (4:00)
         return selected_date.value;
-    });
-
-
-    /**
-     * 番組表の表示終了時刻 (computed)
-     * 36時間表示モードの場合は display_start_time + 36時間
-     * 通常モードの場合は selected_date (4:00) + 24時間 (= 翌日4:00)
-     * - 通常: 4:00 ~ 翌日4:00 (24時間)
-     * - 36時間表示: 16:00 ~ 翌々日4:00 (36時間)
-     */
-    const display_end_time = computed<Dayjs>(() => {
-        if (is_36hour_display.value) {
-            return display_start_time.value.add(36, 'hour');
-        }
-        return selected_date.value.add(24, 'hour');
-    });
-
-
-    /**
-     * 選択可能な日付のリストを取得する computed
-     * date_range から計算した日付リストを返す
-     */
-    const selectable_dates = computed<Dayjs[]>(() => {
-        if (date_range.value === null) {
-            return [];
-        }
-
-        const dates: Dayjs[] = [];
-        let current = date_range.value.earliest.hour(4).minute(0).second(0).millisecond(0);
-
-        // 0:00〜3:59 の場合は前日に調整
-        if (date_range.value.earliest.hour() < 4) {
-            current = current.subtract(1, 'day');
-        }
-
-        const latest = date_range.value.latest;
-
-        // earliest から latest まで1日ずつ追加
-        while (current.isSameOrBefore(latest)) {
-            dates.push(current);
-            current = current.add(1, 'day');
-        }
-
-        return dates;
     });
 
 
@@ -393,7 +362,6 @@ const useTimeTableStore = defineStore('timetable', () => {
     async function initialLoad(): Promise<void> {
         is_loading.value = true;
         is_initial_load_completed.value = false;
-        selected_program_id.value = null;
 
         try {
             // ChannelsStore の初期化が完了するまで待機
@@ -430,7 +398,6 @@ const useTimeTableStore = defineStore('timetable', () => {
      */
     async function changeDate(new_date: Dayjs): Promise<void> {
         is_loading.value = true;
-        selected_program_id.value = null;
 
         try {
             selected_date.value = new_date;
@@ -447,7 +414,6 @@ const useTimeTableStore = defineStore('timetable', () => {
      */
     async function changeChannelType(new_channel_type: ChannelTypePretty): Promise<void> {
         is_loading.value = true;
-        selected_program_id.value = null;
 
         try {
             selected_channel_type.value = new_channel_type;
@@ -459,17 +425,67 @@ const useTimeTableStore = defineStore('timetable', () => {
 
 
     /**
+     * 現在時刻が36時間表示の時間帯（17時以降）かどうかを判定する
+     * この判定は selected_date に依存しない純粋な時刻判定
+     * @returns 17時以降なら true
+     */
+    function is36HourTimeRange(): boolean {
+        const now = dayjs();
+        // 28時間表記対応: 0〜3時は前日の24〜27時として扱う
+        let current_hour = now.hour();
+        if (current_hour < 4) {
+            current_hour += 24;
+        }
+        return current_hour >= 17;
+    }
+
+
+    /**
      * 前の日の番組表データを取得する
+     *
+     * 36時間モードのページング設計:
+     * - 17時以降は「今日」と「今日+1」が36時間モードの1ページとして統合される
+     * - そのため、「今日+1」は単独ページとして存在しない
+     * - ページ構成: ... → 今日-1 (24h) → 今日 (36h) → 今日+2 (24h) → ...
+     *
+     * 例 (1/6 22:00 の場合):
+     * - 1/8 から「前の日」→ 1/6 (36時間モード) ※1/7をスキップ
+     * - 36時間モードから「前の日」→ 1/5
      */
     async function goToPreviousDay(): Promise<void> {
         if (date_range.value === null) {
             return;
         }
 
-        const previous_date = selected_date.value.subtract(1, 'day');
+        const today_start = getTodayStartTime();
+        const is_36hour_time = is36HourTimeRange();
 
-        // 日付範囲の最小値を超えないようにする (日単位で比較)
-        if (previous_date.isBefore(date_range.value.earliest, 'day')) {
+        let previous_date: Dayjs;
+
+        if (is_36hour_display.value) {
+            // 現在36時間モードを表示中の場合
+            // 36時間モードからの「前の日」は、36時間モードの開始日 (today) の前日に移動
+            // date_display_offset に関わらず、36時間モードページの「前」は常に today - 1
+            previous_date = selected_date.value.subtract(1, 'day');
+        } else if (is_36hour_time) {
+            // 36時間表示の時間帯 (17時以降) だが、現在36時間モードではない場合
+            // 移動先が「今日+1」になる場合は、代わりに「今日」(36時間モード) に移動
+            // これにより、1/8 → 1/7 ではなく 1/8 → 1/6 (36h) となる
+            const naive_previous = selected_date.value.subtract(1, 'day');
+            if (naive_previous.isSame(today_start.add(1, 'day'), 'day')) {
+                // 移動先が「今日+1」(例: 1/7) の場合、「今日」(例: 1/6) に移動
+                previous_date = today_start;
+            } else {
+                previous_date = naive_previous;
+            }
+        } else {
+            // 通常モード (17時より前): 単純に1日前
+            previous_date = selected_date.value.subtract(1, 'day');
+        }
+
+        // 日付範囲の最小値を超えないようにする (放送日ベースで比較)
+        const earliestBroadcastDate = getBroadcastDate(date_range.value.earliest);
+        if (previous_date.isBefore(earliestBroadcastDate, 'day')) {
             return;
         }
 
@@ -479,16 +495,37 @@ const useTimeTableStore = defineStore('timetable', () => {
 
     /**
      * 次の日の番組表データを取得する
+     *
+     * 36時間モードのページング設計:
+     * - 17時以降は「今日」と「今日+1」が36時間モードの1ページとして統合される
+     * - 36時間モードからの「次の日」は「今日+2」に移動する
+     * - ページ構成: ... → 今日-1 (24h) → 今日 (36h) → 今日+2 (24h) → ...
+     *
+     * 例 (1/6 22:00 の場合):
+     * - 36時間モードから「次の日」→ 1/8 ※1/7をスキップ
+     * - 1/8 から「次の日」→ 1/9
      */
     async function goToNextDay(): Promise<void> {
         if (date_range.value === null) {
             return;
         }
 
-        const next_date = selected_date.value.add(1, 'day');
+        let next_date: Dayjs;
 
-        // 日付範囲の最大値を超えないようにする (日単位で比較)
-        if (next_date.isAfter(date_range.value.latest, 'day')) {
+        if (is_36hour_display.value) {
+            // 現在36時間モードを表示中の場合
+            // 36時間モードは今日 (selected_date) から翌々日4時まで表示するため、
+            // 「次の日」は selected_date + 2 (翌々日) に移動
+            // これにより、1/6 (36h) → 1/8 となる
+            next_date = selected_date.value.add(2, 'day');
+        } else {
+            // 通常モード: 単純に1日後
+            next_date = selected_date.value.add(1, 'day');
+        }
+
+        // 日付範囲の最大値を超えないようにする (放送日ベースで比較)
+        const latestBroadcastDate = getBroadcastDate(date_range.value.latest);
+        if (next_date.isAfter(latestBroadcastDate, 'day')) {
             return;
         }
 
@@ -501,7 +538,6 @@ const useTimeTableStore = defineStore('timetable', () => {
      * 自動追従を再開し、現在時刻が含まれる日付の番組表を表示する
      */
     async function goToCurrentTime(): Promise<void> {
-        is_auto_scroll_enabled.value = true;
         const today_start = getTodayStartTime();
 
         // 現在の日付と異なる場合のみ再取得
@@ -513,40 +549,74 @@ const useTimeTableStore = defineStore('timetable', () => {
 
 
     /**
-     * 番組を選択する
-     * @param program_id 番組 ID (null で選択解除)
+     * 日付表示オフセットを設定する
+     * TimeTableGrid からスクロール位置に応じて呼び出される
+     * @param offset オフセット値 (0: 選択日, 1: 選択日 + 1日)
      */
-    function selectProgram(program_id: string | null): void {
-        selected_program_id.value = program_id;
+    function setDateDisplayOffset(offset: number): void {
+        date_display_offset.value = offset;
     }
 
 
     /**
-     * スクロール位置を更新する
-     * @param x X座標
-     * @param y Y座標
+     * 前の日に移動できるかどうか
+     * goToPreviousDay() と同じロジックで判定
      */
-    function updateScrollPosition(x: number, y: number): void {
-        scroll_position.value = { x, y };
-    }
+    const can_go_previous_day = computed<boolean>(() => {
+        if (date_range.value === null) {
+            return false;
+        }
+
+        const today_start = getTodayStartTime();
+        const is_36hour_time = is36HourTimeRange();
+
+        let previous_date: Dayjs;
+
+        if (is_36hour_display.value) {
+            // 36時間モードからの「前の日」: today - 1
+            previous_date = selected_date.value.subtract(1, 'day');
+        } else if (is_36hour_time) {
+            // 17時以降で、移動先が「今日+1」なら「今日」に移動
+            const naive_previous = selected_date.value.subtract(1, 'day');
+            if (naive_previous.isSame(today_start.add(1, 'day'), 'day')) {
+                previous_date = today_start;
+            } else {
+                previous_date = naive_previous;
+            }
+        } else {
+            previous_date = selected_date.value.subtract(1, 'day');
+        }
+
+        // date_range.earliest を放送日ベースに変換してから比較する
+        // earliest は番組の開始時刻なので、04:00境界を考慮して放送日を計算
+        const earliestBroadcastDate = getBroadcastDate(date_range.value.earliest);
+        return previous_date.isSameOrAfter(earliestBroadcastDate, 'day');
+    });
 
 
     /**
-     * 自動追従を無効化する
-     * ユーザーがスクロール操作を行った際に呼び出される
+     * 次の日に移動できるかどうか
+     * goToNextDay() と同じロジックで判定
      */
-    function disableAutoScroll(): void {
-        is_auto_scroll_enabled.value = false;
-    }
+    const can_go_next_day = computed<boolean>(() => {
+        if (date_range.value === null) {
+            return false;
+        }
 
+        let next_date: Dayjs;
 
-    /**
-     * 自動追従を有効化する
-     * 現在時刻バーがビューポート内に戻った際に呼び出される
-     */
-    function enableAutoScroll(): void {
-        is_auto_scroll_enabled.value = true;
-    }
+        if (is_36hour_display.value) {
+            // 36時間モードからの「次の日」: today + 2
+            next_date = selected_date.value.add(2, 'day');
+        } else {
+            next_date = selected_date.value.add(1, 'day');
+        }
+
+        // date_range.latest を放送日ベースに変換してから比較する
+        // 例: latest が 2026-01-14T04:00:00 の場合、04:00境界を考慮すると選択可能な最終放送日は 1/13
+        const latestBroadcastDate = getBroadcastDate(date_range.value.latest);
+        return next_date.isSameOrBefore(latestBroadcastDate, 'day');
+    });
 
 
     /**
@@ -556,13 +626,11 @@ const useTimeTableStore = defineStore('timetable', () => {
     function reset(): void {
         channels_data.value = [];
         date_range.value = null;
-        selected_program_id.value = null;
         is_loading.value = false;
         is_initial_load_completed.value = false;
-        is_auto_scroll_enabled.value = true;
         is_36hour_display.value = false;
+        date_display_offset.value = 0;
         scroll_top_limit_time.value = null;
-        scroll_position.value = { x: 0, y: 0 };
         // selected_channel_type は次回アクセス時に initialLoad() で再設定されるため、
         // あえて null にリセットして、次回は最新の available_channel_types に基づいて決定されるようにする
         selected_channel_type.value = null;
@@ -613,26 +681,26 @@ const useTimeTableStore = defineStore('timetable', () => {
         // State
         selected_channel_type,
         selected_date,
-        scroll_position,
         channels_data,
         date_range,
-        selected_program_id,
         is_loading,
         is_initial_load_completed,
-        is_auto_scroll_enabled,
         is_36hour_display,
+        date_display_offset,
         scroll_top_limit_time,
 
         // Getters
-        selectable_dates,
         available_channel_types,
         display_start_time,
-        display_end_time,
+        can_go_previous_day,
+        can_go_next_day,
 
         // Actions
+        getBroadcastDate,
         getTodayStartTime,
         getDayEndTime,
         getDisplayStartTime,
+        setDateDisplayOffset,
         fetchTimeTableData,
         initialLoad,
         changeDate,
@@ -640,10 +708,6 @@ const useTimeTableStore = defineStore('timetable', () => {
         goToPreviousDay,
         goToNextDay,
         goToCurrentTime,
-        selectProgram,
-        updateScrollPosition,
-        disableAutoScroll,
-        enableAutoScroll,
         reset,
     };
 });

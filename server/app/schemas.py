@@ -1,4 +1,3 @@
-# ruff: noqa: RUF012
 
 # Type Hints を指定できるように
 # ref: https://stackoverflow.com/a/33533514/17124142
@@ -11,6 +10,9 @@ from pydantic import BaseModel, Field, RootModel, computed_field
 from tortoise.contrib.pydantic import PydanticModel
 from typing_extensions import TypedDict
 
+
+# 以下の型定義は親モデル -> 子モデルの順に記述する
+# from __future__ import annotations をインポートしているので前方参照について気にする必要はない
 
 # モデルとモデルに関連する API レスポンスの構造を表す Pydantic モデル
 ## この Pydantic モデルに含まれていないカラムは、API レスポンス返却時に自動で除外される (パスワードなど)
@@ -103,11 +105,16 @@ class TimeTableChannel(BaseModel):
     channel: Channel
     # 番組リスト
     programs: list[TimeTableProgram]
-    # サブチャンネルの番組リスト (8時間ルールに該当しないサブチャンネルのみ)
-    ## キーはチャンネル ID (NID32736-SID1024 形式)、値はサブチャンネルの番組リスト
-    ## 8時間ルール: 同一 TS 内のサブチャンネルが1日あたり8時間以上放送されている場合、
-    ## そのサブチャンネルは独立したチャンネル列として表示される (この場合、このフィールドには含まれない)
-    subchannel_programs: dict[str, list[TimeTableProgram]] | None = None
+    # サブチャンネルのリスト (8時間ルールに該当しないサブチャンネルのみ)
+    ## 同一 TS 内のサブチャンネルが1日あたり8時間以上放送されている場合、
+    ## そのサブチャンネルは独立したチャンネル列として表示され、このフィールドには含まれない
+    subchannels: list[TimeTableSubchannel] | None = None
+
+class TimeTableSubchannel(BaseModel):
+    # サブチャンネルのチャンネル情報
+    channel: Channel
+    # サブチャンネルの番組リスト
+    programs: list[TimeTableProgram]
 
 class TimeTableProgram(Program):
     # 予約情報 (EDCB バックエンド時かつ予約がある場合のみ設定)
