@@ -474,13 +474,20 @@ class PlayerController {
                     } else {
                         default_quality = this.quality_profile.video_streaming_quality;
                     }
+                    const tile_info = player_store.recorded_program.recorded_video.thumbnail_info?.tile ?? null;
                     return {
                         quality: qualities,
                         defaultQuality: default_quality,
-                        thumbnails: {
+                        thumbnails: tile_info !== null ? {
+                            url: offline_thumbnail_url || `${Utils.api_base_url}/videos/${player_store.recorded_program.id}/thumbnail/tiled`,
+                            interval: tile_info.interval_sec,
+                            width: tile_info.tile_width,
+                            height: tile_info.tile_height,
+                            columnCount: tile_info.column_count,
+                        } : {
                             url: offline_thumbnail_url || `${Utils.api_base_url}/videos/${player_store.recorded_program.id}/thumbnail/tiled`,
                             interval: (() => {
-                                // 以下のロジックは server/app/metadata/ThumbnailGenerator.py のものと同一
+                                // 以下のロジックは server/app/metadata/ThumbnailGenerator.py の旧仕様と同一
                                 // 録画番組の長さ (分単位で切り捨て)
                                 const duration_min = Math.floor(player_store.recorded_program.recorded_video.duration / 60);
                                 // 基準となる動画の長さ (30分)
