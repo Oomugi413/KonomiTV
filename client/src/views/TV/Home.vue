@@ -830,12 +830,16 @@ export default defineComponent({
                             font-size: 14px;
                         }
                         @include smartphone-horizontal {
+                            display: block;
                             font-size: 14px;
-                            -webkit-line-clamp: 1;  // 1行までに制限
+                            white-space: nowrap;
+                            text-overflow: ellipsis;
                         }
                         @include smartphone-vertical {
+                            display: block;
                             font-size: 14px;
-                            -webkit-line-clamp: 1;  // 1行までに制限
+                            white-space: nowrap;
+                            text-overflow: ellipsis;
                         }
                     }
 
