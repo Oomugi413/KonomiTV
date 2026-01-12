@@ -378,10 +378,14 @@ sudo reboot
 
 ```bash
 # Mali GPU Driver のインストール (RK3588/RK3588S 向け)
+## --vpp-yadif などの OpenCL フィルタの利用に必要
+## Debian 11 Bullseye Core イメージにはデフォルトではインストールされていない
 ## 他の Rockchip SoC の Mali GPU Driver は https://github.com/tsukumijima/libmali-rockchip/releases から入手できる
 ## RK3588/RK3588S の場合、g610-g6p0 より g610-g13p0 の方が高速に動作する
-wget https://github.com/tsukumijima/libmali-rockchip/releases/download/v1.9-1-55611b0/libmali-valhall-g610-g13p0-wayland-gbm_1.9-1_arm64.deb
-sudo apt install -y ./libmali-valhall-g610-g13p0-wayland-gbm_1.9-1_arm64.deb
+## 2026年1月追記: v1.9-1-3238416 よりも後のバージョンは glibc 2.34 でビルドされているため、
+## glibc 2.31 を持つ Debian 11 Bullseye では v1.9-1-3238416 までしかインストールできない (!!!)
+wget https://github.com/tsukumijima/libmali-rockchip/releases/download/v1.9-1-3238416/libmali-valhall-g610-g13p0-wayland-gbm_1.9-1_arm64.deb
+sudo apt install -y --allow-downgrades ./libmali-valhall-g610-g13p0-wayland-gbm_1.9-1_arm64.deb
 rm libmali-valhall-g610-g13p0-wayland-gbm_1.9-1_arm64.deb
 
 # rockchip-multimedia-config のインストール
@@ -556,7 +560,7 @@ Docker Compose は V1 と V2 の両方に対応していますが、できれば
 <img width="100%" src="https://user-images.githubusercontent.com/39271166/201463450-96bb686e-c5bb-493d-b907-57b5f51ac986.png"><br>
 
 ```bash
-curl -LO https://github.com/tsukumijima/KonomiTV/releases/download/v0.12.4/KonomiTV-Installer.elf
+curl -LO https://github.com/Oomugi413/KonomiTV/releases/download/v0.13.0/KonomiTV-Installer.elf
 chmod a+x KonomiTV-Installer.elf
 ./KonomiTV-Installer.elf
 ```
