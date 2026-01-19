@@ -98,6 +98,10 @@ class PlayerController {
     // オフラインキャッシュが HEVC の場合、モバイル回線向け画質スイッチを ON 状態で表示する
     private is_offline_hevc = false;
 
+    // 録画ファイル自体が HEVC でエンコードされているかどうか
+    // HEVC 録画ファイルの場合、再エンコードなしで配信するため、モバイル回線向け画質スイッチを ON 状態で表示する
+    private is_source_hevc = false;
+
     // 破棄中かどうか
     // 破棄中は destroy() が呼ばれても何もしない
     private destroying = false;
@@ -257,18 +261,26 @@ class PlayerController {
             }
         }
 
-        // ブラウザが H.265 / HEVC の再生に対応していて、かつ通信節約モードが有効なとき、H.265 / HEVC で再生する
-        // オフラインキャッシュがある場合は、キャッシュの編码形式を優先し、通信節約モード設定を無視する
+        // ブラウザが H.265 / HEVC の再生に対応しているとき、以下の条件で H.265 / HEVC で再生する:
+        // 1. オフラインキャッシュがある場合は、キャッシュの編码形式を優先
+        // 2. 通信節約モードが有効な場合
+        // 3. 録画ファイル自体が HEVC でエンコードされている場合（再エンコードなしでの配信が可能なため）
         let is_hevc_playback = false;
+        // 録画ファイルが HEVC でエンコードされているかどうかを判定してインスタンス変数に保存
+        this.is_source_hevc = this.playback_mode === 'Video' &&
+            player_store.recorded_program.recorded_video.video_codec === 'H.265';
         if (this.is_offline_cached) {
             // オフラインキャッシュがある場合、キャッシュの編码形式に従う
             is_hevc_playback = this.is_offline_hevc;
             console.log(`[PlayerController] Using offline cache codec: ${is_hevc_playback ? 'HEVC' : 'H.264'}`);
         } else if (PlayerUtils.isHEVCVideoSupported() &&
             ((this.playback_mode === 'Live' && this.quality_profile.tv_data_saver_mode === true) ||
-             (this.playback_mode === 'Video' && this.quality_profile.video_data_saver_mode === true))) {
-            // オンライン再生の場合、通信節約モード設定に従う
+             (this.playback_mode === 'Video' && (this.quality_profile.video_data_saver_mode === true || this.is_source_hevc)))) {
+            // オンライン再生の場合、通信節約モード設定または録画ファイルの編码形式に従う
             is_hevc_playback = true;
+            if (this.is_source_hevc) {
+                console.log('[PlayerController] Source video is HEVC encoded, using HEVC playback');
+            }
         }
 
         // ブラウザが MSE in Worker での H.265 / HEVC 再生に対応しているかどうか
@@ -1678,6 +1690,13 @@ class PlayerController {
             // HEVC キャッシュの場合は ON、H.264 キャッシュの場合は OFF で表示
             toggle_mobile_profile_input.checked = this.is_offline_hevc;
             // ボタンとチェックボックスを無効化
+            toggle_mobile_profile_input.disabled = true;
+            toggle_mobile_profile_button.style.pointerEvents = 'none';
+            toggle_mobile_profile_button.style.opacity = '0.5';
+        } else if (this.is_source_hevc) {
+            // 録画ファイル自体が HEVC の場合、常に ON 状態で表示し、切り替えを無効化
+            // HEVC 録画ファイルを H.264 に変換して配信する意味がないため
+            toggle_mobile_profile_input.checked = true;
             toggle_mobile_profile_input.disabled = true;
             toggle_mobile_profile_button.style.pointerEvents = 'none';
             toggle_mobile_profile_button.style.opacity = '0.5';
