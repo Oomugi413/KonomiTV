@@ -448,6 +448,7 @@ jobs:
 
           # Python 本体のダウンロード
           curl -L -o python.tar.gz https://github.com/indygreg/python-build-standalone/releases/download/${{ env.PYTHON_TAG }}/cpython-${{ env.PYTHON_VERSION }}+${{ env.PYTHON_TAG }}-${{ matrix.python_arch_name }}-unknown-linux-gnu-install_only_stripped.tar.gz
+
           tar xvf python.tar.gz
           mv python/ thirdparty/Python/
 
