@@ -1,5 +1,5 @@
-
 import asyncio
+import struct
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from io import BufferedReader, BytesIO
@@ -350,92 +350,540 @@ class TSInfoAnalyzer:
                 'remocon_id': int
             }
         """
-        from pathlib import Path
 
-        # 誤動作防止のため必ず最初にシークを戻す
-        self.ts.seek(0)
+        # 破損した先頭領域を回避するため、複数のシーク位置で PAT/SDT/NIT を試す
+        seek_offsets = self.__getTSSectionSeekOffsets()
 
         all_channels = []
-        available_service_ids = []
-        transport_stream_id = None
+        transport_stream_id: int | None = None
 
         # PAT から全ての利用可能な service_id を収集（最初の60秒分のみ）
-        pat_count = 0
-        for pat in self.ts.sections(ProgramAssociationSection):
-            transport_stream_id = int(pat.transport_stream_id)
-            for pat_pid in pat.pids:
-                if pat_pid.program_number:
-                    available_service_ids.append(int(pat_pid.program_number))
+        available_service_ids: list[int] = []
+        # 先頭付近に破損がある場合に備え、複数オフセットから PAT を探索する
+        for seek_offset in seek_offsets:
+            available_service_ids = []
+            transport_stream_id = None
+            pat_count = 0
+            try:
+                for pat in self.__iterSectionsFromOffset(ProgramAssociationSection, seek_offset):
+                    transport_stream_id = int(pat.transport_stream_id)
+                    for pat_pid in pat.pids:
+                        if pat_pid.program_number:
+                            available_service_ids.append(int(pat_pid.program_number))
 
-            # PAT解析の制限（60秒相当のループ数で制限）
-            pat_count += 1
-            if pat_count > 100:  # EIT解析と同様の制限値
+                    # PAT解析の制限（60秒相当のループ数で制限）
+                    pat_count += 1
+                    if pat_count > 100:  # EIT解析と同様の制限値
+                        break
+            except (IndexError, ValueError, TypeError, AttributeError, struct.error) as ex:
+                logging.warning(
+                    f'{self.recorded_video.file_path}: Failed to parse PAT at offset {seek_offset}.',
+                    exc_info=ex,
+                )
+                continue
+
+            # service_id が取得できたら以降の解析に進む
+            if available_service_ids:
                 break
 
         if not available_service_ids:
             return all_channels
 
         # SDT から各サービスの詳細情報を取得（最初の60秒分のみ）
-        self.ts.seek(0)
-        seen_service_ids = set()  # 重複チェック用のセット
-        sdt_count = 0
-        for sdt in self.ts.sections(ActualStreamServiceDescriptionSection):
-            network_id = int(sdt.original_network_id)
-            network_type = TSInformation.getNetworkType(network_id)
-            if network_type == 'OTHER':
+        # 先頭付近に破損がある場合に備え、複数オフセットから SDT を探索する
+        for seek_offset in seek_offsets:
+            all_channels = []
+            seen_service_ids = set()  # 重複チェック用のセット
+            sdt_count = 0
+            try:
+                for sdt in self.__iterSectionsFromOffset(ActualStreamServiceDescriptionSection, seek_offset):
+                    network_id = int(sdt.original_network_id)
+                    network_type = TSInformation.getNetworkType(network_id)
+                    if network_type == 'OTHER':
+                        continue
+
+                    for service in sdt.services:
+                        if service.service_id in available_service_ids and service.service_id not in seen_service_ids:
+                            # チャンネル名を取得
+                            channel_name = None
+                            for sd in service.descriptors[ServiceDescriptor]:
+                                channel_name = TSInformation.formatString(sd.service_name)
+                                break
+
+                            if channel_name:
+                                # リモコン番号を計算
+                                if network_type == 'GR':
+                                    remocon_id = 0  # 地デジの場合は後で NIT から取得
+                                else:
+                                    remocon_id = TSInformation.calculateRemoconID(network_type, service.service_id)
+
+                                all_channels.append({
+                                    'service_id': service.service_id,
+                                    'channel_name': channel_name,
+                                    'network_id': network_id,
+                                    'transport_stream_id': transport_stream_id,
+                                    'channel_type': network_type,
+                                    'remocon_id': remocon_id
+                                })
+                                seen_service_ids.add(service.service_id)  # 重複防止のため追加
+
+                    # SDT解析の制限（60秒相当のループ数で制限）
+                    sdt_count += 1
+                    if sdt_count > 100:  # EIT解析と同様の制限値
+                        break
+            except (IndexError, ValueError, TypeError, AttributeError, struct.error) as ex:
+                logging.warning(
+                    f'{self.recorded_video.file_path}: Failed to parse SDT at offset {seek_offset}.',
+                    exc_info=ex,
+                )
                 continue
 
-            for service in sdt.services:
-                if service.service_id in available_service_ids and service.service_id not in seen_service_ids:
-                    # チャンネル名を取得
-                    channel_name = None
-                    for sd in service.descriptors[ServiceDescriptor]:
-                        channel_name = TSInformation.formatString(sd.service_name)
-                        break
-
-                    if channel_name:
-                        # リモコン番号を計算
-                        if network_type == 'GR':
-                            remocon_id = 0  # 地デジの場合は後で NIT から取得
-                        else:
-                            remocon_id = TSInformation.calculateRemoconID(network_type, service.service_id)
-
-                        all_channels.append({
-                            'service_id': service.service_id,
-                            'channel_name': channel_name,
-                            'network_id': network_id,
-                            'transport_stream_id': transport_stream_id,
-                            'channel_type': network_type,
-                            'remocon_id': remocon_id
-                        })
-                        seen_service_ids.add(service.service_id)  # 重複防止のため追加
-
-            # SDT解析の制限（60秒相当のループ数で制限）
-            sdt_count += 1
-            if sdt_count > 100:  # EIT解析と同様の制限値
+            # チャンネル情報を取得できたら以降の解析に進む
+            if all_channels:
                 break
 
         # 地デジの場合、NIT からリモコン番号を取得（最初の60秒分のみ）
         if all_channels and all_channels[0]['channel_type'] == 'GR':
-            self.ts.seek(0)
-            nit_count = 0
-            for nit in self.ts.sections(ActualNetworkNetworkInformationSection):
-                for transport_stream in nit.transport_streams:
-                    for ts_information in transport_stream.descriptors.get(TSInformationDescriptor, []):
-                        remocon_id = int(ts_information.remote_control_key_id)
-                        # 同一 TS の全チャンネルに同じリモコン番号を設定
-                        for channel in all_channels:
-                            if channel['channel_type'] == 'GR':
-                                channel['remocon_id'] = remocon_id
-                        break
-                    break
+            # 先頭付近に破損がある場合に備え、複数オフセットから NIT を探索する
+            for seek_offset in seek_offsets:
+                nit_count = 0
+                try:
+                    for nit in self.__iterSectionsFromOffset(ActualNetworkNetworkInformationSection, seek_offset):
+                        for transport_stream in nit.transport_streams:
+                            for ts_information in transport_stream.descriptors.get(TSInformationDescriptor, []):
+                                remocon_id = int(ts_information.remote_control_key_id)
+                                # 同一 TS の全チャンネルに同じリモコン番号を設定
+                                for channel in all_channels:
+                                    if channel['channel_type'] == 'GR':
+                                        channel['remocon_id'] = remocon_id
+                                break
+                            break
 
-                # NIT解析の制限（60秒相当のループ数で制限）
-                nit_count += 1
-                if nit_count > 100:  # EIT解析と同様の制限値
+                        # NIT解析の制限（60秒相当のループ数で制限）
+                        nit_count += 1
+                        if nit_count > 100:  # EIT解析と同様の制限値
+                            break
+
+                        # リモコン番号が確定したら終了
+                        if any(ch['remocon_id'] != 0 for ch in all_channels):
+                            break
+                except (IndexError, ValueError, TypeError, AttributeError, struct.error) as ex:
+                    logging.warning(
+                        f'{self.recorded_video.file_path}: Failed to parse NIT at offset {seek_offset}.',
+                        exc_info=ex,
+                    )
+                    continue
+
+                # リモコン番号が確定したら終了
+                if any(ch['remocon_id'] != 0 for ch in all_channels):
                     break
 
         return all_channels
+
+    def __getTSSectionSeekOffsets(self) -> list[int]:
+        """
+        PAT/SDT/NIT 解析用に試すシークオフセットを取得する
+
+        Returns:
+            list[int]: シークオフセット（バイト単位）
+        """
+
+        # MPEG-TS 以外は仮想 TS ファイルの先頭のみ
+        if self.recorded_video.container_format != 'MPEG-TS':
+            return [0]
+
+        # end_ts_offset 以降はゼロ埋めされている可能性があるため、有効範囲内で計算する
+        effective_size = min(self.end_ts_offset, self.recorded_video.file_size)
+        if effective_size <= 0:
+            return [0]
+
+        # 先頭に破損がある場合に備えて、0%・10%・20%・30%・50%・80% の位置を試す
+        candidate_ratios = [0.0, 0.1, 0.2, 0.3, 0.5, 0.8]
+        seek_offsets: list[int] = []
+        for ratio in candidate_ratios:
+            offset = ClosestMultiple(int(effective_size * ratio), ts.PACKET_SIZE)
+            if offset > effective_size - ts.PACKET_SIZE:
+                offset = max(effective_size - ts.PACKET_SIZE, 0)
+            if offset not in seek_offsets:
+                seek_offsets.append(offset)
+
+        return seek_offsets
+
+    def __findTSResyncOffset(self, base_offset: int) -> int | None:
+        """
+        指定オフセット付近で TS の同期位置を探索する
+
+        Args:
+            base_offset: 探索開始オフセット
+
+        Returns:
+            int | None: 同期位置が見つかった場合はそのオフセット、見つからない場合は None
+        """
+
+        # MPEG-TS 以外はリシンク不要
+        if self.recorded_video.container_format != 'MPEG-TS':
+            return base_offset
+
+        try:
+            file_path = Path(self.recorded_video.file_path)
+            effective_size = min(self.end_ts_offset, self.recorded_video.file_size)
+            if effective_size <= ts.PACKET_SIZE:
+                return None
+
+            # 同期探索は 5000 パケット分だけ行う
+            scan_size = ts.PACKET_SIZE * 5000
+            if base_offset < 0:
+                base_offset = 0
+            if base_offset > effective_size - ts.PACKET_SIZE:
+                base_offset = max(effective_size - ts.PACKET_SIZE, 0)
+
+            with file_path.open('rb') as f:
+                f.seek(base_offset)
+                data = f.read(scan_size)
+        except Exception as ex:
+            logging.warning(
+                f'{self.recorded_video.file_path}: Failed to read TS data for resync at offset {base_offset}.',
+                exc_info=ex,
+            )
+            return None
+
+        # 3 パケット連続で同期バイトが一致する位置を探索する
+        max_offset = len(data) - ts.PACKET_SIZE * 2
+        if max_offset <= 0:
+            return None
+        for offset in range(0, max_offset):
+            if data[offset] != ts.SYNC_BYTE[0]:
+                continue
+            if data[offset + ts.PACKET_SIZE] != ts.SYNC_BYTE[0]:
+                continue
+            if data[offset + ts.PACKET_SIZE * 2] != ts.SYNC_BYTE[0]:
+                continue
+            return base_offset + offset
+
+        return None
+
+    def __iterSectionsFromOffset(self, section_class: type, seek_offset: int, allow_sanitized_fallback: bool = False) -> Any:
+        """
+        指定オフセットからセクションを列挙する
+
+        Args:
+            section_class: 対象セクションのクラス
+            seek_offset: シークオフセット
+            allow_sanitized_fallback: 破損が疑われる場合にサニタイズした TS からの抽出を許可するかどうか
+
+        Returns:
+            Any: セクションのイテレータ
+        """
+
+        # MPEG-TS の場合は ariblib の内部キャッシュを避けるため、新しい TS ハンドルを開く
+        if self.recorded_video.container_format == 'MPEG-TS':
+            last_exception: Exception | None = None
+            # 破損やズレがある場合に備えて複数の位置から再試行する
+            retry_bases = [
+                seek_offset,
+                seek_offset + ts.PACKET_SIZE * 5000,   # 約 0.9MB 先
+                seek_offset + ts.PACKET_SIZE * 20000,  # 約 3.7MB 先
+            ]
+            effective_size = min(self.end_ts_offset, self.recorded_video.file_size)
+            retry_offsets: list[int] = []
+            for base_offset in retry_bases:
+                if base_offset < 0:
+                    continue
+                if base_offset > effective_size - ts.PACKET_SIZE:
+                    continue
+                resync_offset = self.__findTSResyncOffset(base_offset)
+                if resync_offset is not None and resync_offset not in retry_offsets:
+                    retry_offsets.append(resync_offset)
+            if not retry_offsets:
+                retry_offsets = [seek_offset]
+
+            for retry_offset in retry_offsets:
+                try:
+                    with ariblib.tsopen(self.recorded_video.file_path, chunk=10000) as section_ts:
+                        section_ts.seek(retry_offset)
+                        for section in section_ts.sections(section_class):
+                            yield section
+                    # セクションの列挙が正常に完了したら終了
+                    return
+                except (IndexError, ValueError, TypeError, AttributeError, struct.error) as ex:
+                    last_exception = ex
+                    continue
+
+            # 破損が疑われる場合は、サニタイズ済みの TS データから再試行する
+            if allow_sanitized_fallback is True:
+                for section in self.__iterSanitizedEITSections(section_class, seek_offset):
+                    yield section
+                for section in self.__iterRobustEITSections(section_class, seek_offset):
+                    yield section
+                return
+
+            # すべての再試行が失敗した場合は最後の例外を再送出する
+            if last_exception is not None:
+                raise last_exception
+        else:
+            # 仮想 TS ファイルはシーク位置を尊重できるため、既存ハンドルを使う
+            self.ts.seek(seek_offset)
+            for section in self.ts.sections(section_class):
+                yield section
+
+    def __iterSanitizedEITSections(self, section_class: type, seek_offset: int) -> Any:
+        """
+        破損パケットを除外して EIT セクションを抽出する
+
+        Args:
+            section_class: 対象セクションのクラス
+            seek_offset: シークオフセット
+
+        Returns:
+            Any: セクションのイテレータ
+        """
+
+        # MPEG-TS 以外では通常の抽出経路に任せる
+        if self.recorded_video.container_format != 'MPEG-TS':
+            return
+
+        # EIT の PID のみを収集する
+        target_pids = {0x12, 0x26, 0x27}
+        effective_size = min(self.end_ts_offset, self.recorded_video.file_size)
+        if effective_size <= 0:
+            return
+
+        # 取得範囲を安全な範囲に調整する
+        start_offset = max(seek_offset, 0)
+        if start_offset > effective_size - ts.PACKET_SIZE:
+            start_offset = max(effective_size - ts.PACKET_SIZE, 0)
+
+        # 破損の影響を避けるために、一定サイズだけ読み込んでサニタイズする
+        window_size = min(12 * 1024 * 1024, effective_size - start_offset)  # 最大 12MB
+        if window_size <= ts.PACKET_SIZE:
+            return
+
+        try:
+            with open(self.recorded_video.file_path, 'rb') as f:
+                f.seek(start_offset)
+                data = f.read(window_size)
+        except Exception as ex:
+            logging.warning(
+                f'{self.recorded_video.file_path}: Failed to read TS data for sanitized EIT parsing.',
+                exc_info=ex,
+            )
+            return
+
+        # 同期バイトを頼りに 188 バイト境界でパケットを再構成する
+        packets = bytearray()
+        offset = 0
+        while offset + ts.PACKET_SIZE <= len(data):
+            # 同期バイトが一致しない場合は 1 バイトずらして再試行する
+            if data[offset] != ts.SYNC_BYTE[0]:
+                offset += 1
+                continue
+            # 直後のパケットも同期している場合のみ採用する
+            if offset + ts.PACKET_SIZE < len(data) and data[offset + ts.PACKET_SIZE] != ts.SYNC_BYTE[0]:
+                offset += 1
+                continue
+
+            packet = data[offset:offset + ts.PACKET_SIZE]
+            # 破損パケットは除外する
+            if self.__isValidTSPacket(packet) is False:
+                offset += 1
+                continue
+            # EIT の PID のみを収集する
+            packet_pid = pid(packet)
+            if packet_pid in target_pids:
+                packets.extend(packet)
+            offset += ts.PACKET_SIZE
+
+        if len(packets) < ts.PACKET_SIZE:
+            return
+
+        # ariblib が受け取れる形式に包んでセクションを抽出する
+        class TransportStreamFileWorkaround(ariblib.TransportStreamFile):
+            def __init__(self, stream: Any):
+                BufferedReader.__init__(self, stream)
+                self.chunk_size = 1
+                self._callbacks = dict()
+
+        try:
+            sanitized_ts = TransportStreamFileWorkaround(BytesIO(packets))
+            for section in sanitized_ts.sections(section_class):
+                yield section
+        except (IndexError, ValueError, TypeError, AttributeError, struct.error) as ex:
+            logging.warning(
+                f'{self.recorded_video.file_path}: Failed to parse sanitized EIT sections.',
+                exc_info=ex,
+            )
+            return
+
+    def __isValidTSPacket(self, packet: bytes) -> bool:
+        """
+        TS パケットが最低限の構造を満たしているかを判定する
+
+        Args:
+            packet: TS パケット
+
+        Returns:
+            bool: 正常なパケットなら True
+        """
+
+        if len(packet) != ts.PACKET_SIZE:
+            return False
+        if packet[0] != ts.SYNC_BYTE[0]:
+            return False
+
+        adaptation_field_control = (packet[3] >> 4) & 0x03
+        if adaptation_field_control == 0:
+            return False
+
+        # アダプテーションフィールドがある場合、長さが範囲内か確認する
+        payload_start = 4
+        if adaptation_field_control in (2, 3):
+            adaptation_field_length = packet[4]
+            payload_start = 5 + adaptation_field_length
+            if payload_start > ts.PACKET_SIZE:
+                return False
+
+        # payload_unit_start_indicator が立っている場合、pointer_field が範囲内か確認する
+        if packet[1] & 0x40:
+            if payload_start >= ts.PACKET_SIZE:
+                return False
+            pointer_field = packet[payload_start]
+            if payload_start + 1 + pointer_field > ts.PACKET_SIZE:
+                return False
+
+        return True
+
+    def __iterRobustEITSections(self, section_class: type, seek_offset: int) -> Any:
+        """
+        ariblib の payload 解析に依存せず、TS パケットから直接 EIT セクションを組み立てる
+
+        Args:
+            section_class: 対象セクションのクラス
+            seek_offset: シークオフセット
+
+        Returns:
+            Any: セクションのイテレータ
+        """
+
+        # EIT 以外のセクションは対象外
+        if section_class is not ActualStreamPresentFollowingEventInformationSection:
+            return
+        if self.recorded_video.container_format != 'MPEG-TS':
+            return
+
+        # EIT の PID のみを解析対象にする
+        target_pids = {0x12, 0x26, 0x27}
+        effective_size = min(self.end_ts_offset, self.recorded_video.file_size)
+        if effective_size <= ts.PACKET_SIZE:
+            return
+
+        # 解析対象の範囲を決める
+        start_offset = max(seek_offset, 0)
+        if start_offset > effective_size - ts.PACKET_SIZE:
+            start_offset = max(effective_size - ts.PACKET_SIZE, 0)
+        window_size = min(48 * 1024 * 1024, effective_size - start_offset)  # 最大 48MB
+        if window_size <= ts.PACKET_SIZE:
+            return
+
+        try:
+            with open(self.recorded_video.file_path, 'rb') as f:
+                f.seek(start_offset)
+                data = f.read(window_size)
+        except Exception as ex:
+            logging.warning(
+                f'{self.recorded_video.file_path}: Failed to read TS data for robust EIT parsing.',
+                exc_info=ex,
+            )
+            return
+
+        # PID ごとにバッファを保持する
+        buffers: dict[int, bytearray] = {}
+        offset = 0
+        while offset + ts.PACKET_SIZE <= len(data):
+            # 同期バイトを探す
+            if data[offset] != ts.SYNC_BYTE[0]:
+                offset += 1
+                continue
+            packet = data[offset:offset + ts.PACKET_SIZE]
+            if self.__isValidTSPacket(packet) is False:
+                offset += 1
+                continue
+
+            # TS ヘッダーの最低限の情報を抽出
+            pid_value = ((packet[1] & 0x1F) << 8) | packet[2]
+            if pid_value not in target_pids:
+                offset += ts.PACKET_SIZE
+                continue
+
+            adaptation_field_control = (packet[3] >> 4) & 0x03
+            if adaptation_field_control in (0, 2):
+                # payload が無い場合はスキップする
+                offset += ts.PACKET_SIZE
+                continue
+
+            payload_start = 4
+            if adaptation_field_control == 3:
+                adaptation_field_length = packet[4]
+                payload_start = 5 + adaptation_field_length
+                if payload_start >= ts.PACKET_SIZE:
+                    offset += 1
+                    continue
+
+            payload = packet[payload_start:]
+            if len(payload) == 0:
+                offset += ts.PACKET_SIZE
+                continue
+
+            pusi = bool(packet[1] & 0x40)
+            buffer = buffers.setdefault(pid_value, bytearray())
+
+            if pusi is True:
+                pointer_field = payload[0]
+                if 1 + pointer_field > len(payload):
+                    offset += 1
+                    continue
+                if pointer_field > 0:
+                    # 直前のセクションの続きがあれば取り込む
+                    buffer.extend(payload[1:1 + pointer_field])
+                    yield from self.__emitEITSections(section_class, buffer)
+                    buffer.clear()
+                # 新しいセクションの開始
+                buffer.extend(payload[1 + pointer_field:])
+            else:
+                buffer.extend(payload)
+
+            yield from self.__emitEITSections(section_class, buffer)
+
+            offset += ts.PACKET_SIZE
+
+    def __emitEITSections(self, section_class: type, buffer: bytearray) -> Any:
+        """
+        バッファから EIT セクションを切り出して返す
+
+        Args:
+            section_class: 対象セクションのクラス
+            buffer: バッファ
+
+        Returns:
+            Any: セクションのイテレータ
+        """
+
+        while len(buffer) >= 3:
+            # section_length を取得
+            section_length = ((buffer[1] & 0x0F) << 8) | buffer[2]
+            total_length = 3 + section_length
+            # 異常に長い値は破損とみなしてバッファを破棄する
+            if total_length > 4096:
+                buffer.clear()
+                return
+            if len(buffer) < total_length:
+                return
+            section_data = bytes(buffer[:total_length])
+            del buffer[:total_length]
+            try:
+                section = section_class(section_data)
+            except (IndexError, ValueError, TypeError, AttributeError, struct.error):
+                continue
+            yield section
 
     def __selectBestChannel(self, all_channels: list[dict[str, Any]]) -> dict[str, Any] | None:
         """
@@ -560,8 +1008,8 @@ class TSInfoAnalyzer:
             schemas.Channel: サービス（チャンネル）情報を表すモデル (サービス情報が取得できなかった場合は None)
         """
 
-        # 誤動作防止のため必ず最初にシークを戻す
-        self.ts.seek(0)
+        # 破損した先頭領域を回避するため、複数のシーク位置で PAT/SDT/NIT を試す
+        seek_offsets = self.__getTSSectionSeekOffsets()
 
         # 必要な情報を一旦変数として保持
         transport_stream_id: int | None = None
@@ -574,19 +1022,34 @@ class TSInfoAnalyzer:
         # PAT (Program Association Table) からサービス ID が取得できるまで繰り返し処理
         service_id_order: list[int] = []
         service_pmt_pid_map: dict[int, int] = {}
-        for pat in self.ts.sections(ProgramAssociationSection):
-            # トランスポートストリーム ID (TSID) を取得
-            transport_stream_id = int(pat.transport_stream_id)
+        # 先頭付近に破損がある場合に備え、複数オフセットから PAT を探索する
+        for seek_offset in seek_offsets:
+            service_id_order = []
+            service_pmt_pid_map = {}
+            try:
+                for pat in self.__iterSectionsFromOffset(ProgramAssociationSection, seek_offset):
+                    # トランスポートストリーム ID (TSID) を取得
+                    transport_stream_id = int(pat.transport_stream_id)
 
-            # サービス ID と PMT PID を取得
-            ## program_number は service_id と等しい
-            for pat_pid in pat.pids:
-                if pat_pid.program_number:
-                    service_id = int(pat_pid.program_number)
-                    service_id_order.append(service_id)
-                    service_pmt_pid_map[service_id] = int(pat_pid.program_map_PID)
+                    # サービス ID と PMT PID を取得
+                    ## program_number は service_id と等しい
+                    for pat_pid in pat.pids:
+                        if pat_pid.program_number:
+                            service_id = int(pat_pid.program_number)
+                            service_id_order.append(service_id)
+                            service_pmt_pid_map[service_id] = int(pat_pid.program_map_PID)
 
-            # 最初に見つかった PAT を使う
+                    # 最初に見つかった PAT を使う
+                    if len(service_id_order) > 0:
+                        break
+            except (IndexError, ValueError, TypeError, AttributeError, struct.error) as ex:
+                logging.warning(
+                    f'{self.recorded_video.file_path}: Failed to parse PAT at offset {seek_offset}.',
+                    exc_info=ex,
+                )
+                continue
+
+            # service_id が取得できたら以降の解析に進む
             if len(service_id_order) > 0:
                 break
 
@@ -616,31 +1079,47 @@ class TSInfoAnalyzer:
             service_id = service_id_order[0]
 
         # TS から SDT (Service Description Table) を抽出
-        for sdt in self.ts.sections(ActualStreamServiceDescriptionSection):
-            # ネットワーク ID とサービス種別 (=チャンネルタイプ) を取得
-            network_id = int(sdt.original_network_id)
-            network_type = TSInformation.getNetworkType(network_id)
-            if network_type == 'OTHER':
-                logging.warning(f'{self.recorded_video.file_path}: Unknown network_id: {network_id}')
-                return None
-            channel_type = network_type  # ここで型が Literal['GR', 'BS', 'CS', 'CATV', 'SKY', 'BS4K'] に絞り込まれる
-            # SDT に含まれるサービスごとの情報を取得
-            for service in sdt.services:
-                # service_id が PAT から抽出したものと一致した場合のみ
-                # CS の場合同じ TS の中に複数のチャンネルが含まれている事があり、録画する場合は基本的に他のチャンネルは削除される
-                # そうすると ffprobe で確認できるがサービス情報や番組情報だけ残ってしまい、別のチャンネルの番組情報になるケースがある
-                # PAT にはそうした削除済みのチャンネルは含まれていないので、正しいチャンネルの service_id を抽出できる
-                if service.service_id == service_id:
-                    # SDT から得られる ServiceDescriptor 内の情報からチャンネル名を取得
-                    for sd in service.descriptors[ServiceDescriptor]:
-                        channel_name = TSInformation.formatString(sd.service_name)
-                        break
+        # 先頭付近に破損がある場合に備え、複数オフセットから SDT を探索する
+        for seek_offset in seek_offsets:
+            network_id = None
+            channel_type = None
+            channel_name = None
+            try:
+                for sdt in self.__iterSectionsFromOffset(ActualStreamServiceDescriptionSection, seek_offset):
+                    # ネットワーク ID とサービス種別 (=チャンネルタイプ) を取得
+                    network_id = int(sdt.original_network_id)
+                    network_type = TSInformation.getNetworkType(network_id)
+                    if network_type == 'OTHER':
+                        logging.warning(f'{self.recorded_video.file_path}: Unknown network_id: {network_id}')
+                        return None
+                    channel_type = network_type  # ここで型が Literal['GR', 'BS', 'CS', 'CATV', 'SKY', 'BS4K'] に絞り込まれる
+                    # SDT に含まれるサービスごとの情報を取得
+                    for service in sdt.services:
+                        # service_id が PAT から抽出したものと一致した場合のみ
+                        # CS の場合同じ TS の中に複数のチャンネルが含まれている事があり、録画する場合は基本的に他のチャンネルは削除される
+                        # そうすると ffprobe で確認できるがサービス情報や番組情報だけ残ってしまい、別のチャンネルの番組情報になるケースがある
+                        # PAT にはそうした削除済みのチャンネルは含まれていないので、正しいチャンネルの service_id を抽出できる
+                        if service.service_id == service_id:
+                            # SDT から得られる ServiceDescriptor 内の情報からチャンネル名を取得
+                            for sd in service.descriptors[ServiceDescriptor]:
+                                channel_name = TSInformation.formatString(sd.service_name)
+                                break
+                            else:
+                                continue
+                            break
                     else:
                         continue
                     break
-            else:
+            except (IndexError, ValueError, TypeError, AttributeError, struct.error) as ex:
+                logging.warning(
+                    f'{self.recorded_video.file_path}: Failed to parse SDT at offset {seek_offset}.',
+                    exc_info=ex,
+                )
                 continue
-            break
+
+            # チャンネル名を取得できたら以降の解析に進む
+            if channel_name is not None:
+                break
         if network_id is None:
             logging.warning(f'{self.recorded_video.file_path}: network_id not found.')
             return None
@@ -654,18 +1133,30 @@ class TSInfoAnalyzer:
         # リモコン番号を取得（地デジの場合は NIT から、それ以外は計算）
         if channel_type == 'GR':
             # NIT (Network Information Table) からリモコン番号を取得
-            self.ts.seek(0)
-            for nit in self.ts.sections(ActualNetworkNetworkInformationSection):
-                for transport_stream in nit.transport_streams:
-                    for ts_information in transport_stream.descriptors.get(TSInformationDescriptor, []):
-                        remocon_id = int(ts_information.remote_control_key_id)
+            # 先頭付近に破損がある場合に備え、複数オフセットから NIT を探索する
+            for seek_offset in seek_offsets:
+                try:
+                    for nit in self.__iterSectionsFromOffset(ActualNetworkNetworkInformationSection, seek_offset):
+                        for transport_stream in nit.transport_streams:
+                            for ts_information in transport_stream.descriptors.get(TSInformationDescriptor, []):
+                                remocon_id = int(ts_information.remote_control_key_id)
+                                break
+                            else:
+                                continue
+                            break
+                        else:
+                            continue
                         break
-                    else:
-                        continue
-                    break
-                else:
+                except (IndexError, ValueError, TypeError, AttributeError, struct.error) as ex:
+                    logging.warning(
+                        f'{self.recorded_video.file_path}: Failed to parse NIT at offset {seek_offset}.',
+                        exc_info=ex,
+                    )
                     continue
-                break
+
+                # リモコン番号が取得できたら終了
+                if remocon_id is not None:
+                    break
         else:
             # BS/CS などはサービス ID から計算
             remocon_id = TSInformation.calculateRemoconID(channel_type, service_id)
@@ -729,20 +1220,6 @@ class TSInfoAnalyzer:
         else:
             eit_section_number = 0
 
-        # 誤動作防止のため必ず最初にシークを戻す
-        if self.recorded_video.container_format == 'MPEG-TS':
-            # MPEG-TS 形式の場合、有効な TS データの終了位置から換算して 20% の位置にシークする
-            # (正確には TS パケットサイズに合わせて 188 の倍数になるように調整している)
-            # 先頭にシークすると録画開始マージン分のデータを含んでしまうため、大体録画開始マージン分を除いた位置から始める
-            # 極端に録画開始マージンが大きいか番組長が短い録画でない限り、録画対象の番組が放送されているタイミングにシークできるはず
-            # 例えば30分10秒の録画 (前後5秒が録画マージン) の場合、全体の 20% の位置にシークすると大体6分2秒の位置になる
-            # 生の録画データはビットレートが一定のため、シーンによって大きくデータサイズが変動することはない
-            # 録画中はファイルアロケーションの関係でファイル後半がゼロ埋めされている場合があるため、ファイルサイズではなく end_ts_offset を使う必要がある
-            self.ts.seek(ClosestMultiple(int(self.end_ts_offset * 0.2), ts.PACKET_SIZE))
-        else:
-            # MPEG-TS 形式ではない場合、PSI/SI 書庫から生成した仮想 TS ファイルの先頭にシークする
-            self.ts.seek(0)
-
         # 必要な情報を一旦変数として保持
         event_id: int | None = None
         title: str | None = None
@@ -761,181 +1238,222 @@ class TSInfoAnalyzer:
         # TS から EIT (Event Information Table) を抽出
         count: int = 0
         corrupted_events: int = 0  # 破損したイベント数をカウント
-        for eit in self.ts.sections(ActualStreamPresentFollowingEventInformationSection):
+        total_sections: int = 0
+        matched_sections: int = 0
+        # 破損した先頭領域を回避するため、複数のシーク位置で EIT を試す
+        if self.recorded_video.container_format == 'MPEG-TS':
+            seek_offsets = self.__getTSSectionSeekOffsets()
+        else:
+            seek_offsets = [0]
 
-            # section_number と service_id が一致したときだけ
-            # サービス ID が必要な理由は、CS などで同じトランスポートストリームに含まれる別チャンネルの番組情報になることを防ぐため
-            if eit.section_number == eit_section_number and eit.service_id == channel.service_id:
-                # TSID / ONID も一致する場合のみ採用する
-                ## EIT は service_id だけでなく TSID / ONID も持つため、誤検出を避けるため一致条件に含める
-                if channel.transport_stream_id is not None and eit.transport_stream_id != channel.transport_stream_id:
-                    continue
-                if channel.network_id is not None and eit.original_network_id != channel.network_id:
-                    continue
+        for seek_offset in seek_offsets:
+            try:
+                for eit in self.__iterSectionsFromOffset(
+                    ActualStreamPresentFollowingEventInformationSection,
+                    seek_offset,
+                    allow_sanitized_fallback = True,
+                ):
+                    total_sections += 1
 
-                # EIT から得られる各種 Descriptor 内の情報を取得
-                # ariblib.event が各種 Descriptor のラッパーになっていたのでそれを利用
-                for event_data in eit.events:
-                    try:
-                        # EIT 内のイベントを取得
-                        event: Any = ariblib.event.Event(eit, event_data)
-                    except (IndexError, ValueError, TypeError, AttributeError) as ex:
-                        # 破損したイベントをスキップ
-                        corrupted_events += 1
-                        if corrupted_events <= 20:  # 20個までは許容
-                            logging.debug(f'{self.recorded_video.file_path}: Skipped corrupted event #{corrupted_events}:', exc_info=ex)
+                    # section_number と service_id が一致したときだけ
+                    # サービス ID が必要な理由は、CS などで同じトランスポートストリームに含まれる別チャンネルの番組情報になることを防ぐため
+                    if eit.section_number == eit_section_number and eit.service_id == channel.service_id:
+                        matched_sections += 1
+                        # TSID / ONID も一致する場合のみ採用する
+                        ## EIT は service_id だけでなく TSID / ONID も持つため、誤検出を避けるため一致条件に含める
+                        if channel.transport_stream_id is not None and eit.transport_stream_id != channel.transport_stream_id:
                             continue
-                        else:
-                            # 破損イベントが多すぎる場合は諦める
-                            logging.warning(f'{self.recorded_video.file_path}: Too many corrupted events ({corrupted_events}), abandoning this position.')
-                            return None
+                        if channel.network_id is not None and eit.original_network_id != channel.network_id:
+                            continue
 
-                    # デフォルトで毎回設定されている情報
-                    ## イベント ID
-                    event_id = int(event.event_id)
-                    ## 番組開始時刻 (タイムゾーンを日本時間 (+9:00) に設定)
-                    ## 注意: present の duration が None (終了時間未定) の場合のみ、following の start_time が None になることがある
-                    if event.start_time is not None:
-                        start_time = cast(datetime, event.start_time).astimezone(ZoneInfo('Asia/Tokyo'))
-                    ## 番組長 (秒)
-                    ## 注意: 臨時ニュースなどで放送時間未定の場合は None になる
-                    if event.duration is not None:
-                        duration = cast(timedelta, event.duration).total_seconds()
-                    ## 番組終了時刻を start_time と duration から算出
-                    if start_time is not None and duration is not None:
-                        end_time = start_time + timedelta(seconds=duration)
-                    ## ARIB TR-B15 第三分冊 (https://vs1p.manualzilla.com/store/data/006629648.pdf)
-                    ## free_CA_mode が 1 のとき有料番組、0 のとき無料番組だそう
-                    ## bool に変換した後、真偽を反転させる
-                    is_free = not bool(event.free_CA_mode)
-
-                    # 番組名, 番組概要 (ShortEventDescriptor)
-                    if hasattr(event, 'title') and hasattr(event, 'desc'):
-                        ## 番組名
-                        title = TSInformation.formatString(event.title)
-                        ## 番組概要
-                        description = TSInformation.formatString(event.desc)
-
-                    # 番組詳細情報 (ExtendedEventDescriptor)
-                    if hasattr(event, 'detail'):
-                        detail = {}
-                        # 番組詳細テキストから取得した、見出しと本文の辞書ごとに
-                        for head, text in cast(dict[str, str], event.detail).items():
-                            # 見出しと本文
-                            ## 見出しのみ ariblib 側で意図的に重複防止のためのタブ文字付加が行われる場合があるため、
-                            ## strip() では明示的に半角スペースと改行のみを指定している
-                            head_hankaku = TSInformation.formatString(head).replace('◇', '').strip(' \r\n')  # ◇ を取り除く
-                            ## ないとは思うが、万が一この状態で見出しが衝突しうる場合は、見出しの後ろにタブ文字を付加する
-                            while head_hankaku in detail.keys():
-                                head_hankaku += '\t'
-                            ## 見出しが空の場合、固定で「番組内容」としておく
-                            if head_hankaku == '':
-                                head_hankaku = '番組内容'
-                            text_hankaku = TSInformation.formatString(text).strip()
-                            detail[head_hankaku] = text_hankaku
-                            # 番組概要が空の場合、番組詳細の最初の本文を概要として使う
-                            # 空でまったく情報がないよりかは良いはず
-                            if description is not None and description.strip() == '':
-                                description = text_hankaku
-
-                    ## ジャンル情報 (ContentDescriptor)
-                    if hasattr(event, 'genre') and hasattr(event, 'subgenre') and hasattr(event, 'user_genre'):
-                        genres = []
-                        for index, _ in enumerate(event.genre):  # ジャンルごとに
-                            # major … 大分類
-                            # middle … 中分類
-                            genre_dict: schemas.Genre = {
-                                'major': event.genre[index].replace('／', '・'),
-                                'middle': event.subgenre[index].replace('／', '・'),
-                            }
-                            # BS/地上デジタル放送用番組付属情報がジャンルに含まれている場合、user_genre から拡張情報を取得する
-                            # たとえば「中止の可能性あり」や「延長の可能性あり」といった情報が取れる
-                            if genre_dict['major'] == '拡張':
-                                if genre_dict['middle'] == 'BS/地上デジタル放送用番組付属情報':
-                                    genre_dict['middle'] = event.user_genre[index]
-                                # 「拡張」はあるがBS/地上デジタル放送用番組付属情報でない場合はなんの値なのかわからないのでパス
-                                else:
+                        # EIT から得られる各種 Descriptor 内の情報を取得
+                        # ariblib.event が各種 Descriptor のラッパーになっていたのでそれを利用
+                        for event_data in eit.events:
+                            try:
+                                # EIT 内のイベントを取得
+                                event: Any = ariblib.event.Event(eit, event_data)
+                            except (IndexError, ValueError, TypeError, AttributeError) as ex:
+                                # 破損したイベントをスキップ
+                                corrupted_events += 1
+                                if corrupted_events <= 20:  # 20個までは許容
+                                    logging.debug(f'{self.recorded_video.file_path}: Skipped corrupted event #{corrupted_events}:', exc_info=ex)
                                     continue
-                            # ジャンルを追加
-                            genres.append(genre_dict)
-
-                    # 音声情報 (AudioComponentDescriptor)
-                    ## 主音声情報
-                    if hasattr(event, 'audio'):
-                        ## 主音声の種別
-                        primary_audio_type = str(event.audio)
-                    ## 副音声情報
-                    if hasattr(event, 'second_audio'):
-                        ## 副音声の種別
-                        secondary_audio_type = str(event.second_audio)
-                    ## 主音声・副音声の言語
-                    ## event クラスには用意されていないので自前で取得する
-                    for acd in event_data.descriptors.get(AudioComponentDescriptor, []):
-                        if bool(acd.main_component_flag) is True:
-                            ## 主音声の言語
-                            primary_audio_language = TSInformation.getISO639LanguageCodeName(acd.ISO_639_language_code)
-                            ## デュアルモノのみ
-                            if primary_audio_type == '1/0+1/0モード(デュアルモノ)':
-                                if bool(acd.ES_multi_lingual_flag) is True:
-                                    primary_audio_language += '+' + \
-                                        TSInformation.getISO639LanguageCodeName(acd.ISO_639_language_code_2)
                                 else:
-                                    primary_audio_language += '+副音声'  # 副音声で固定
-                        else:
-                            ## 副音声の言語
-                            secondary_audio_language = TSInformation.getISO639LanguageCodeName(acd.ISO_639_language_code)
-                            ## デュアルモノのみ
-                            if secondary_audio_type == '1/0+1/0モード(デュアルモノ)':
-                                if bool(acd.ES_multi_lingual_flag) is True:
-                                    secondary_audio_language += '+' + \
-                                        TSInformation.getISO639LanguageCodeName(acd.ISO_639_language_code_2)
-                                else:
-                                    secondary_audio_language += '+副音声'  # 副音声で固定
+                                    # 破損イベントが多すぎる場合は諦める
+                                    logging.warning(f'{self.recorded_video.file_path}: Too many corrupted events ({corrupted_events}), abandoning this position.')
+                                    return None
 
-                    # EIT から取得できるすべての情報を取得できたら抜ける
-                    ## 一回の EIT ですべての情報 (Descriptor) が降ってくるとは限らない
-                    ## 副音声情報は副音声がない番組では当然取得できないので、除外している
-                    if all([
-                        event_id is not None,
-                        title is not None,
-                        description is not None,
-                        detail is not None,
-                        start_time is not None,
-                        end_time is not None,
-                        duration is not None,
-                        is_free is not None,
-                        genres is not None,
-                        primary_audio_type is not None,
-                        primary_audio_language is not None,
-                    ]):
+                            # デフォルトで毎回設定されている情報
+                            ## イベント ID
+                            event_id = int(event.event_id)
+                            ## 番組開始時刻 (タイムゾーンを日本時間 (+9:00) に設定)
+                            ## 注意: present の duration が None (終了時間未定) の場合のみ、following の start_time が None になることがある
+                            if event.start_time is not None:
+                                start_time = cast(datetime, event.start_time).astimezone(ZoneInfo('Asia/Tokyo'))
+                            ## 番組長 (秒)
+                            ## 注意: 臨時ニュースなどで放送時間未定の場合は None になる
+                            if event.duration is not None:
+                                duration = cast(timedelta, event.duration).total_seconds()
+                            ## 番組終了時刻を start_time と duration から算出
+                            if start_time is not None and duration is not None:
+                                end_time = start_time + timedelta(seconds=duration)
+                            ## ARIB TR-B15 第三分冊 (https://vs1p.manualzilla.com/store/data/006629648.pdf)
+                            ## free_CA_mode が 1 のとき有料番組、0 のとき無料番組だそう
+                            ## bool に変換した後、真偽を反転させる
+                            is_free = not bool(event.free_CA_mode)
+
+                            # 番組名, 番組概要 (ShortEventDescriptor)
+                            if hasattr(event, 'title') and hasattr(event, 'desc'):
+                                ## 番組名
+                                title = TSInformation.formatString(event.title)
+                                ## 番組概要
+                                description = TSInformation.formatString(event.desc)
+
+                            # 番組詳細情報 (ExtendedEventDescriptor)
+                            if hasattr(event, 'detail'):
+                                detail = {}
+                                # 番組詳細テキストから取得した、見出しと本文の辞書ごとに
+                                for head, text in cast(dict[str, str], event.detail).items():
+                                    # 見出しと本文
+                                    ## 見出しのみ ariblib 側で意図的に重複防止のためのタブ文字付加が行われる場合があるため、
+                                    ## strip() では明示的に半角スペースと改行のみを指定している
+                                    head_hankaku = TSInformation.formatString(head).replace('◇', '').strip(' \r\n')  # ◇ を取り除く
+                                    ## ないとは思うが、万が一この状態で見出しが衝突しうる場合は、見出しの後ろにタブ文字を付加する
+                                    while head_hankaku in detail.keys():
+                                        head_hankaku += '\t'
+                                    ## 見出しが空の場合、固定で「番組内容」としておく
+                                    if head_hankaku == '':
+                                        head_hankaku = '番組内容'
+                                    text_hankaku = TSInformation.formatString(text).strip()
+                                    detail[head_hankaku] = text_hankaku
+                                    # 番組概要が空の場合、番組詳細の最初の本文を概要として使う
+                                    # 空でまったく情報がないよりかは良いはず
+                                    if description is not None and description.strip() == '':
+                                        description = text_hankaku
+
+                            ## ジャンル情報 (ContentDescriptor)
+                            if hasattr(event, 'genre') and hasattr(event, 'subgenre') and hasattr(event, 'user_genre'):
+                                genres = []
+                                for index, _ in enumerate(event.genre):  # ジャンルごとに
+                                    # major … 大分類
+                                    # middle … 中分類
+                                    genre_dict: schemas.Genre = {
+                                        'major': event.genre[index].replace('／', '・'),
+                                        'middle': event.subgenre[index].replace('／', '・'),
+                                    }
+                                    # BS/地上デジタル放送用番組付属情報がジャンルに含まれている場合、user_genre から拡張情報を取得する
+                                    # たとえば「中止の可能性あり」や「延長の可能性あり」といった情報が取れる
+                                    if genre_dict['major'] == '拡張':
+                                        if genre_dict['middle'] == 'BS/地上デジタル放送用番組付属情報':
+                                            genre_dict['middle'] = event.user_genre[index]
+                                        # 「拡張」はあるがBS/地上デジタル放送用番組付属情報でない場合はなんの値なのかわからないのでパス
+                                        else:
+                                            continue
+                                    # ジャンルを追加
+                                    genres.append(genre_dict)
+
+                            # 音声情報 (AudioComponentDescriptor)
+                            ## 主音声情報
+                            if hasattr(event, 'audio'):
+                                ## 主音声の種別
+                                primary_audio_type = str(event.audio)
+                            ## 副音声情報
+                            if hasattr(event, 'second_audio'):
+                                ## 副音声の種別
+                                secondary_audio_type = str(event.second_audio)
+                            ## 主音声・副音声の言語
+                            ## event クラスには用意されていないので自前で取得する
+                            for acd in event_data.descriptors.get(AudioComponentDescriptor, []):
+                                if bool(acd.main_component_flag) is True:
+                                    ## 主音声の言語
+                                    primary_audio_language = TSInformation.getISO639LanguageCodeName(acd.ISO_639_language_code)
+                                    ## デュアルモノのみ
+                                    if primary_audio_type == '1/0+1/0モード(デュアルモノ)':
+                                        if bool(acd.ES_multi_lingual_flag) is True:
+                                            primary_audio_language += '+' + \
+                                                TSInformation.getISO639LanguageCodeName(acd.ISO_639_language_code_2)
+                                        else:
+                                            primary_audio_language += '+副音声'  # 副音声で固定
+                                else:
+                                    ## 副音声の言語
+                                    secondary_audio_language = TSInformation.getISO639LanguageCodeName(acd.ISO_639_language_code)
+                                    ## デュアルモノのみ
+                                    if secondary_audio_type == '1/0+1/0モード(デュアルモノ)':
+                                        if bool(acd.ES_multi_lingual_flag) is True:
+                                            secondary_audio_language += '+' + \
+                                                TSInformation.getISO639LanguageCodeName(acd.ISO_639_language_code_2)
+                                        else:
+                                            secondary_audio_language += '+副音声'  # 副音声で固定
+
+                            # EIT から取得できるすべての情報を取得できたら抜ける
+                            ## 一回の EIT ですべての情報 (Descriptor) が降ってくるとは限らない
+                            ## 副音声情報は副音声がない番組では当然取得できないので、除外している
+                            if all([
+                                event_id is not None,
+                                title is not None,
+                                description is not None,
+                                detail is not None,
+                                start_time is not None,
+                                end_time is not None,
+                                duration is not None,
+                                is_free is not None,
+                                genres is not None,
+                                primary_audio_type is not None,
+                                primary_audio_language is not None,
+                            ]):
+                                break
+
+                        else: # 多重ループを抜けるトリック
+                            continue
                         break
 
-                else: # 多重ループを抜けるトリック
-                    continue
-                break
+                    # カウントを追加
+                    count += 1
 
-            # カウントを追加
-            count += 1
+                    # ループが 100 回を超えたら、番組詳細とジャンルの初期値を設定する
+                    # 稀に番組詳細やジャンルが全く設定されていない番組があり、存在しない情報を探して延々とループするのを避けるため
+                    if count > 100:
+                        if detail is None:
+                            detail = {}
+                        if genres is None:
+                            genres = []
 
-            # ループが 100 回を超えたら、番組詳細とジャンルの初期値を設定する
-            # 稀に番組詳細やジャンルが全く設定されていない番組があり、存在しない情報を探して延々とループするのを避けるため
-            if count > 100:
-                if detail is None:
-                    detail = {}
-                if genres is None:
-                    genres = []
+                    # ループが 2000 回を超えたら (≒20回シークしても放送時間が確定しなかったら) 、タイムアウトでループを抜ける
+                    if count > 2000:
+                        p_or_f = 'following' if is_following is True else 'present'
+                        logging.warning(f'{self.recorded_video.file_path}: Analyzing EIT information ({p_or_f}) timed out.')
+                        break
 
-            # ループが 2000 回を超えたら (≒20回シークしても放送時間が確定しなかったら) 、タイムアウトでループを抜ける
-            if count > 2000:
+                # 取得できたら以降の解析は不要
+                if event_id is not None and title is not None and start_time is not None:
+                    break
+            except (IndexError, ValueError, TypeError, AttributeError, struct.error) as ex:
+                # TS ファイルの破損により EIT セクションのパース自体が失敗した場合
+                # この時点でループに入る前、または反復処理中に例外が発生しているため、個別のイベントエラーハンドリング（lines 782-791）は実行されない
+                # フォールバック処理（ファイル名ベースのメタデータ取得）に任せるため None を返す
                 p_or_f = 'following' if is_following is True else 'present'
-                logging.warning(f'{self.recorded_video.file_path}: Analyzing EIT information ({p_or_f}) timed out.')
+                logging.warning(
+                    f'{self.recorded_video.file_path}: Failed to parse EIT sections ({p_or_f}) due to corrupted TS data.',
+                    exc_info=ex
+                )
+                continue
+
+            # 取得できたら以降の解析は不要
+            if event_id is not None and title is not None and start_time is not None:
                 break
 
-            # MPEG-TS 形式の場合、ループが 100 で割り切れるたびに現在の位置から 188MB シークする
-            ## ループが 100 以上に到達しているときはおそらく放送時間が未定の番組なので、放送時間が確定するまでシークする
-            ## PSI/SI 書庫から生成した仮想 TS ファイルには映像/音声が含まれていないため、それ以外の形式の場合はシークしない
-            if self.recorded_video.container_format == 'MPEG-TS' and count % 100 == 0:
-                self.ts.seek(ts.PACKET_SIZE * 1000000, 1)  # 188MB (188 * 1000000 バイト) 進める
+        if event_id is None and title is None and start_time is None:
+            p_or_f = 'following' if is_following is True else 'present'
+            logging.warning(
+                f'{self.recorded_video.file_path}: Failed to parse EIT sections ({p_or_f}) due to corrupted TS data. '
+                f'Falling back to filename-based metadata.'
+            )
+            return None
+
+        logging.info(
+            f'{self.recorded_video.file_path}: EIT ({ "following" if is_following else "present" }) parsed '
+            f'(sections: {total_sections}, matched: {matched_sections}, event_id: {event_id}).'
+        )
 
         # この時点でタイトルを取得できていない場合（タイムアウト発生時）、フォールバックとして拡張子を除いたファイル名をフォーマットした上でタイトルとして使用する
         if title is None:

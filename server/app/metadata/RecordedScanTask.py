@@ -772,6 +772,11 @@ class RecordedScanTask:
                             f'Treating as different video.'
                         )
 
+                # 強制再解析時は番組情報の更新を優先する
+                if force_update is True and is_transcoded_same_video is True:
+                    logging.info(f'{file_path}: Force update enabled, overriding transcoded update mode.')
+                    is_transcoded_same_video = False
+
                 # 録画中のファイルとして処理
                 ## 他ドライブからファイルコピー中のファイルも、実際の録画処理より高速に書き込まれるだけで随時書き込まれることに変わりはないので、
                 ## 録画中として判断されることがある（その場合、ファイルコピーが完了した段階で「録画完了」扱いとなる）
@@ -812,7 +817,12 @@ class RecordedScanTask:
                 # メタデータ解析後の最新のデータベース情報を使う
                 # ファイルパスはスキャン時に検出したパスをそのまま使用（シンボリックリンクを解決しない）
                 # recorded_program.recorded_video.file_path は既に正しい値が設定されている
-                await self.__saveRecordedMetadataToDB(recorded_program, existing_db_recorded_video_after_analyze, is_transcoded_same_video)
+                await self.__saveRecordedMetadataToDB(
+                    recorded_program,
+                    existing_db_recorded_video_after_analyze,
+                    is_transcoded_same_video,
+                    preserve_program_metadata,
+                )
                 logging.info(f'{file_path}: {"Updated" if existing_db_recorded_video_after_analyze else "Saved"} metadata to DB. (status: {recorded_program.recorded_video.status})')
 
                 # wait_background_analysis が True かつ files_only が False の場合のみ、バックグラウンド解析タスクが完了するまで待つ
@@ -910,6 +920,7 @@ class RecordedScanTask:
         recorded_program: schemas.RecordedProgram,
         existing_db_recorded_video: RecordedVideo | None,
         is_transcoded_update: bool = False,
+        preserve_program_metadata: bool = False,
     ) -> None:
         """
         録画ファイルのメタデータ解析結果を DB に保存する
@@ -919,6 +930,7 @@ class RecordedScanTask:
             recorded_program (schemas.RecordedProgram): 保存する録画番組情報
             existing_db_recorded_video (RecordedVideo | None): 既に DB に永続化されている録画ファイルの RecordedVideo レコード
             is_transcoded_update (bool): 転码更新モードかどうか（デフォルト: False）
+            preserve_program_metadata (bool): 番組情報を既存レコードから保持するかどうか（デフォルト: False）
         """
 
         # トランザクション配下に入れることでパフォーマンスが向上する
@@ -952,7 +964,10 @@ class RecordedScanTask:
                 db_recorded_program = RecordedProgram()
 
             # RecordedProgram の属性を設定 (id, created_at, updated_at は自動生成のため指定しない)
-            if is_transcoded_update:
+            if preserve_program_metadata is True and existing_db_recorded_video is not None:
+                # 解析結果が不完全な場合は既存の番組情報を保持する
+                logging.debug(f'{recorded_program.recorded_video.file_path}: Preserving existing program metadata.')
+            elif is_transcoded_update:
                 # 転码更新モード：番組情報を保持し、技術的なフィールドのみ更新
                 # 転码時に変化する可能性のあるフィールドのみ更新
                 db_recorded_program.recording_start_margin = recorded_program.recording_start_margin
