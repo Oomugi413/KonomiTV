@@ -158,6 +158,12 @@ server/static/interlaced_*
 # thirdparty
 server/thirdparty/*
 
+# encoder coredup
+server/core.*
+
+# subproject
+/EDCB/
+
 # ignore .gitkeep
 !.gitkeep
 client/public/assets/images/channel-logo-sprite.webp
