@@ -824,11 +824,12 @@ class RecordedScanTask:
                 # メタデータ解析後の最新のデータベース情報を使う
                 # ファイルパスはスキャン時に検出したパスをそのまま使用（シンボリックリンクを解決しない）
                 # recorded_program.recorded_video.file_path は既に正しい値が設定されている
+                # files_only モードではファイル情報のみ更新し、番組情報は既存レコードから保持する
                 await self.__saveRecordedMetadataToDB(
                     recorded_program,
                     existing_db_recorded_video_after_analyze,
                     is_transcoded_same_video,
-                    preserve_program_metadata,
+                    files_only,
                 )
                 logging.info(f'{file_path}: {"Updated" if existing_db_recorded_video_after_analyze else "Saved"} metadata to DB. (status: {recorded_program.recorded_video.status})')
 
