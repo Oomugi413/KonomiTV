@@ -896,6 +896,7 @@ class TSInfoAnalyzer:
             選択されたチャンネル情報、または None
         """
         from pathlib import Path
+
         from app.config import Config
 
         if not all_channels:

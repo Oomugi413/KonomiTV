@@ -67,7 +67,6 @@ dev = "python KonomiTV.py --reload"
 lint = "ruff check --fix . ; pyright"
 typecheck = "pyright"
 update-thirdparty = "python -m misc.UpdateThirdparty latest"
-
 [tool.aerich]
 tortoise_orm = "app.constants.DATABASE_CONFIG"
 location = "./app/migrations/"

@@ -121,7 +121,11 @@ def LogStreamAPI(
         """イベントストリームを出力するジェネレーター"""
 
         # ファイルを開く
-        with open(log_path, encoding='utf-8') as f:
+        ## ログファイルは基本 UTF-8 だが、稀に外部プロセス由来の文字化けや別エンコーディングが混入し、
+        ## UTF-8 としてデコードできないバイト列が含まれることがある
+        ## その場合でもログストリームの配信を継続できるよう、errors='replace' でデコード不能なバイトは
+        ## 置換文字 (U+FFFD) に置き換えて読み取る
+        with open(log_path, encoding='utf-8', errors='replace') as f:
             # 初回接続時に全ての行を送信
             all_lines = [line.rstrip('\n') for line in f.readlines() if line.strip()]  # 空行は除外
             yield {
@@ -460,5 +464,5 @@ async def TestNotificationAPI():
     except Exception as ex:
         raise HTTPException(
             status_code = status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail = f'Failed to send test notification: {str(ex)}',
+            detail = f'Failed to send test notification: {ex!s}',
         )

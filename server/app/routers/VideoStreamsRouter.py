@@ -37,6 +37,7 @@ async def ValidateVideoID(video_id: Annotated[int, Path(description='録画番�
     # 被動検出: ファイルサイズの差異をチェックし、大きく変化している場合は自動的に再解析
     # (例: HEVC 転码で 50% 以上ファイルサイズが縮小された場合など)
     import anyio
+
     from app.metadata.RecordedScanTask import RecordedScanTask
 
     file_path = anyio.Path(recorded_program.recorded_video.file_path)
@@ -109,7 +110,7 @@ async def VideoHLSPlaylistAPI(
     video_stream = VideoStream(session_id, recorded_program, quality)
 
     # 仮想 HLS M3U8 プレイリストを取得
-    virtual_playlist = await video_stream.getVirtualPlaylist(cache_key)
+    virtual_playlist = video_stream.getVirtualPlaylist(cache_key)
     return Response(
         content = virtual_playlist,
         media_type = 'application/vnd.apple.mpegurl',
