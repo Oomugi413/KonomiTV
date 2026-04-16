@@ -8,12 +8,15 @@ import time
 from datetime import datetime
 from typing import Any, ClassVar, Literal
 
+from fastapi import UploadFile
+
 from app import logging, schemas
 from app.constants import JST
 from app.models.TwitterAccount import TwitterAccount
 from app.utils.TwitterScrapeBrowser import (
     BrowserBinaryNotFoundError,
     BrowserConnectionFailedError,
+    BrowserSetupTimeoutError,
     TwitterScrapeBrowser,
 )
 
@@ -55,6 +58,9 @@ class TwitterGraphQLAPI:
 
     # ツイートの最小送信間隔 (秒)
     MINIMUM_TWEET_INTERVAL = 20  # 必ずアカウントごとに 20 秒以上間隔を空けてツイートする
+    # ツイート送信時、最小送信間隔ちょうどで毎回送られて不自然にならないように加える追加待機時間 (秒)
+    MINIMUM_TWEET_INTERVAL_JITTER_MIN = 0.1
+    MINIMUM_TWEET_INTERVAL_JITTER_MAX = 4.0
 
     # ヘッドレスブラウザの自動シャットダウンまでの無操作時間 (秒)
     BROWSER_IDLE_TIMEOUT = 60
@@ -97,10 +103,15 @@ class TwitterGraphQLAPI:
             # GraphQL API の前回呼び出し時刻 (UNIX 時間)
             instance._last_graphql_api_call_time = 0.0
 
-            # ツイート送信時の排他制御用のロック
+            # ツイート送信時の排他制御用のロック (最小送信間隔の制御に使用)
             instance._tweet_lock = asyncio.Lock()
-            # 前回ツイートを送信した時刻 (UNIX 時間)
+            # 最小送信間隔の基準となる時刻
+            # ツイート送信モーダルで送信ボタンが押せた直前など、投稿が行われた可能性が高いタイミング (UNIX 時間)
             instance._last_tweet_time = 0.0
+
+            # ツイート送信モーダル操作の連続失敗回数
+            # 一定回数連続で失敗したらブラウザを再起動し、フレッシュな状態で再挑戦する
+            instance._consecutive_compose_failures = 0
 
             # 生成したインスタンスを登録する
             cls.__instances[twitter_account.id] = instance
@@ -134,6 +145,7 @@ class TwitterGraphQLAPI:
         self._last_graphql_api_call_time: float
         self._tweet_lock: asyncio.Lock
         self._last_tweet_time: float
+        self._consecutive_compose_failures: int
 
     @property
     def log_prefix(self) -> str:
@@ -261,37 +273,91 @@ class TwitterGraphQLAPI:
             dict[str, Any] | str: GraphQL API のレスポンス (失敗時は日本語のエラーメッセージを返す)
         """
 
+        # ブラウザプロセスが外部から kill されていないかを事前確認する
+        ## is_setup_complete が True のままブラウザプロセスが死んでいる場合は、
+        ## API 呼び出しが必ず ConnectionClosedError で失敗するため、先にブラウザの再起動準備を行う
+        if self._browser.is_setup_complete is True and not self._browser.isBrowserProcessAlive():
+            await self.__markBrowserForRestart(
+                'Browser process is no longer alive (may have been killed externally). Marking browser for re-setup...',
+            )
+
         # ヘッドレスブラウザがまだ起動していない場合、セットアップ処理を実行
         if self._browser.is_setup_complete is not True:
             try:
                 await self._browser.setup()
-            except (BrowserBinaryNotFoundError, BrowserConnectionFailedError) as ex:
-                # Chrome / Brave 未導入時やブラウザ起動失敗時は、日本語のエラーメッセージをそのまま返す
+            except (BrowserBinaryNotFoundError, BrowserConnectionFailedError, BrowserSetupTimeoutError) as ex:
+                # Chrome / Brave 未導入時やブラウザ起動失敗時、セットアップタイムアウト時は、
+                # 日本語のエラーメッセージをそのまま返す
                 return str(ex)
 
         # TwitterScrapeBrowser 経由で GraphQL API に HTTP リクエストを送信
-        browser = self._browser
         try:
             logging.info(f'{self.log_prefix} Requesting {endpoint_name} GraphQL API ...')
             logging.debug(f'{self.log_prefix} Request variables: {variables}')
             if additional_flags is not None:
                 logging.debug(f'{self.log_prefix} Additional flags: {additional_flags}')
-            raw_response = await browser.invokeGraphQLAPI(
+            raw_response = await self._browser.invokeGraphQLAPI(
                 endpoint_name=endpoint_name,
                 variables=variables,
                 additional_flags=additional_flags,
             )
         except Exception as ex:
             logging.error(f'{self.log_prefix} Failed to connect to Twitter GraphQL API:', exc_info=ex)
-            return error_message_prefix + 'Twitter API に接続できませんでした。'
+
+            # ブラウザとの接続断またはフック関数の消失を検出した場合、ブラウザを再起動して1回だけリトライする
+            is_connection_lost = self.__isConnectionLostError(ex)
+            is_hook_lost = '__invokeGraphQLAPI is not a function' in str(ex)
+            if is_hook_lost or is_connection_lost:
+                if is_hook_lost:
+                    # ページナビゲーション等で zendriver_setup.js のフック関数が消失した場合
+                    ## アカウントのロックやセッション失効により x.com が captcha 画面やログイン画面に
+                    ## リダイレクトされると、注入済みの window.__invokeGraphQLAPI 関数が消滅する
+                    await self.__markBrowserForRestart(
+                        'JS hook function lost (page may have navigated away from x.com). '
+                        'Restarting browser and retrying...',
+                    )
+                else:
+                    # ブラウザプロセスが外部から kill されたか、クラッシュして WebSocket 接続が切断された場合
+                    await self.__markBrowserForRestart(
+                        'Browser connection lost (browser process may have been killed or crashed). '
+                        'Restarting browser and retrying...',
+                    )
+                # 再セットアップ
+                try:
+                    await self._browser.setup()
+                except (BrowserBinaryNotFoundError, BrowserConnectionFailedError, BrowserSetupTimeoutError) as setup_ex:
+                    # 再セットアップも失敗した場合は、ロック等の可能性が高いのでそのエラーメッセージを返す
+                    return str(setup_ex)
+                except Exception as setup_ex:
+                    logging.error(f'{self.log_prefix} Browser re-setup failed:', exc_info=setup_ex)
+                    return error_message_prefix + f'ヘッドレスブラウザの再セットアップに失敗しました。({setup_ex})'
+                # 再セットアップ成功 → API 呼び出しをリトライ
+                try:
+                    logging.info(f'{self.log_prefix} Retrying {endpoint_name} GraphQL API after browser restart...')
+                    logging.debug(f'{self.log_prefix} Request variables: {variables}')
+                    raw_response = await self._browser.invokeGraphQLAPI(
+                        endpoint_name=endpoint_name,
+                        variables=variables,
+                        additional_flags=additional_flags,
+                    )
+                except Exception as retry_ex:
+                    logging.error(f'{self.log_prefix} Retry also failed:', exc_info=retry_ex)
+                    return error_message_prefix + 'ヘッドレスブラウザを再起動しましたが、Twitter API に接続できませんでした。'
+            else:
+                return error_message_prefix + 'Twitter API に接続できませんでした。'
         finally:
             # GraphQL API リクエスト完了後、更新された可能性があるヘッドレスブラウザの Cookie を DB 側に反映
             ## こうすることでヘッドレスブラウザと DB 間で Cookie の変更が同期されるはず
             ## この処理は API リクエストの成功・失敗に関わらず API リクエスト完了後に常に実行すべき
-            cookies_txt_content = await browser.saveTwitterCookiesToNetscapeFormat()
-            # Cookie を暗号化してから DB に反映する
-            self.twitter_account.access_token_secret = self.twitter_account.encryptAccessTokenSecret(cookies_txt_content)
-            await self.twitter_account.save()  # これで変更が DB に反映される
+            ## ただし、ブラウザが壊れた状態 (shutdown 後、re-setup 失敗後など) では Cookie 保存をスキップする
+            if self._browser.is_setup_complete is True:
+                try:
+                    cookies_txt_content = await self._browser.saveTwitterCookiesToNetscapeFormat()
+                    # Cookie を暗号化してから DB に反映する
+                    self.twitter_account.access_token_secret = self.twitter_account.encryptAccessTokenSecret(cookies_txt_content)
+                    await self.twitter_account.save()  # これで変更が DB に反映される
+                except Exception as ex:
+                    logging.warning(f'{self.log_prefix} Failed to save cookies after API call:', exc_info=ex)
 
             # GraphQL API の前回呼び出し時刻を更新
             self._last_graphql_api_call_time = time.time()
@@ -300,11 +366,11 @@ class TwitterGraphQLAPI:
             await self.__scheduleShutdownTask()
 
         # 生のレスポンスデータを取得
-        parsed_response = raw_response['parsedResponse']
-        status_code = raw_response['statusCode']
-        response_text = raw_response['responseText']
-        headers = raw_response['headers']
-        request_error = raw_response['requestError']
+        parsed_response = raw_response.parsed_response
+        status_code = raw_response.status_code
+        response_text = raw_response.response_text
+        headers = raw_response.headers
+        request_error = raw_response.request_error
 
         # リクエストエラーが発生した場合（接続エラー）
         if request_error:
@@ -313,7 +379,7 @@ class TwitterGraphQLAPI:
 
         # JSON でないレスポンスが返ってきた場合
         ## charset=utf-8 が付いている場合もあるので完全一致ではなく部分一致で判定
-        if headers and isinstance(headers, dict):
+        if headers is not None:
             content_type = headers.get('content-type', '')
             if content_type and 'application/json' not in content_type:
                 logging.error(f'{self.log_prefix} Response is not JSON. (Content-Type: {content_type})')
@@ -375,6 +441,62 @@ class TwitterGraphQLAPI:
         # ここまで来たら (中身のデータ構造はともかく) GraphQL API レスポンスの取得には成功しているはず
         logging.info(f'{self.log_prefix} {endpoint_name} GraphQL API request completed.')
         return response_json['data']
+
+    async def __markBrowserForRestart(self, reason: str) -> None:
+        """
+        ブラウザを「再起動が必要」な状態にマークする
+        idle-shutdown タイマーのキャンセル、is_setup_complete のリセット、ブラウザの shutdown を行う
+        この後、既存の setup チェックによりブラウザが自動的に再起動される
+
+        Args:
+            reason (str): ログに出力する再起動の理由
+        """
+
+        # idle-shutdown タイマーをキャンセル
+        ## このタイマーが残っていると、shutdown() / setup() の最中に OnShutdown タスクが発火し、
+        ## 新しく再作成されたブラウザが直後に shutdown されるレースコンディションが起きうる
+        logging.warning(f'{self.log_prefix} {reason}')
+        async with self._shutdown_task_lock:
+            if self._shutdown_task is not None:
+                if not self._shutdown_task.done():
+                    self._shutdown_task.cancel()
+                self._shutdown_task = None
+        # is_setup_complete のリセットは shutdown() 内の _setup_lock 配下で行われるため、
+        # ここで先にリセットしない (先にリセットすると、shutdown() がロックを取得する前に
+        # 別のコルーチンが is_setup_complete=False を検知して setup() を呼び、
+        # 新しいブラウザが作られた直後に shutdown() で破壊されるレースコンディションが発生する)
+        try:
+            await self._browser.shutdown()
+        except Exception as ex:
+            logging.warning(f'{self.log_prefix} Error during browser shutdown:', exc_info=ex)
+            # shutdown() が例外で中断した場合でも、次回 setup() が走るようにフラグをリセットする
+            self._browser.is_setup_complete = False
+
+    @staticmethod
+    def __isConnectionLostError(ex: Exception) -> bool:
+        """
+        例外がブラウザとの接続断を示すものかどうかを判定する
+        外部からの kill やブラウザクラッシュにより CDP WebSocket 接続が切断された場合に True を返す
+
+        Args:
+            ex (Exception): 判定する例外
+
+        Returns:
+            bool: 接続断を示す例外の場合は True
+        """
+
+        exception_type_name = type(ex).__name__
+        exception_message = str(ex)
+        # WebSocket 接続が切断された場合 (websockets ライブラリの例外)
+        if 'ConnectionClosed' in exception_type_name:
+            return True
+        # WebSocket 接続エラーのメッセージパターン
+        if 'no close frame' in exception_message:
+            return True
+        # OS レベルの接続エラー
+        if isinstance(ex, (ConnectionRefusedError, ConnectionResetError, BrokenPipeError)):
+            return True
+        return False
 
     async def keepAlive(self) -> None:
         """
@@ -490,99 +612,277 @@ class TwitterGraphQLAPI:
     async def createTweet(
         self,
         tweet: str,
-        media_ids: list[str] = [],
+        images: list[UploadFile],
     ) -> schemas.PostTweetResult | schemas.TwitterAPIResult:
         """
-        ツイートを送信する
+        Twitter Web App のツイート送信モーダルを通じてツイートを送信する
+        読み取り系 API (invokeGraphQLAPI) と異なり、Twitter Web App の正規 UI 経路を通すため、
+        user_flow.json の scribe イベント (new_tweet_button click, compose show, send_tweet 等) が自然に発火する
+        画像アップロードも Twitter Web App の UI の自動操作で行うため、フィンガープリントの不一致が発生しないようになっている
 
         Args:
             tweet (str): ツイート内容
-            media_ids (list[str], optional): 添付するメディアの ID のリスト (デフォルトは空リスト)
+            images (list[UploadFile]): 添付する画像（無いときは空リスト）
 
         Returns:
             schemas.PostTweetResult | schemas.TwitterAPIResult: ツイートの送信結果
         """
 
-        # ツイートの最小送信間隔を守るためにロックを取得
+        logging.info(f'{self.log_prefix} Posting tweet: {tweet} ({len(images)} images)')
+        for image in images:
+            logging.debug(
+                f'{self.log_prefix} Attached image file: {image.filename or "capture.jpg"} '
+                f'(content-type: {image.content_type or "image/jpeg"})',
+            )
+
+        # ツイートの最小送信間隔を守る、またステートフルなヘッドレスブラウザの状態整合性を保つため、ロックを取得
         async with self._tweet_lock:
-            # 最後のツイート時刻から最小送信間隔を経過していない場合は待機
+            logging.info(f'{self.log_prefix} Acquired tweet lock.')
+
+            # 最後のツイート時刻から最小送信間隔を経過していない場合のスロットル期限を計算する
             current_time = time.time()
-            wait_time = max(0, self.MINIMUM_TWEET_INTERVAL - (current_time - self._last_tweet_time))
-            if wait_time > 0:
-                await asyncio.sleep(wait_time)
-
-            # 画像の media_id をリストに格納 (画像がない場合は空のリストになる)
-            media_entities: list[dict[str, Any]] = []
-            for media_id in media_ids:
-                media_entities.append({'media_id': media_id, 'tagged_users': []})
-
-            # ツイート ID を取得できない場合 (スパム判定されたケースが多い) に備え、最大2回までリトライする
-            ## リトライ時は 3〜5 秒のランダムな間隔で待機してから再送信する (経験的にこの範囲で待つと成功しやすい)
-            MAX_RETRY_COUNT = 2
-            RETRY_WAIT_SECONDS_MIN = 3.0
-            RETRY_WAIT_SECONDS_MAX = 5.0
-            for retry_count in range(MAX_RETRY_COUNT + 1):
-
-                # Twitter GraphQL API にリクエスト
-                response = await self.invokeGraphQLAPI(
-                    endpoint_name='CreateTweet',
-                    variables={
-                        'tweet_text': tweet,
-                        'dark_request': False,
-                        'media': {
-                            'media_entities': media_entities,
-                            'possibly_sensitive': False,
-                        },
-                        'semantic_annotation_ids': [],
-                        'disallowed_reply_options': None,
-                    },
-                    error_message_prefix='ツイートの送信に失敗しました。',
+            minimum_tweet_interval_end = self._last_tweet_time + self.MINIMUM_TWEET_INTERVAL
+            throttle_deadline = current_time
+            if current_time < minimum_tweet_interval_end:
+                # 最小送信間隔ちょうどで毎回送信されると等間隔になって不自然なため、
+                # 0.001 秒単位で 0.1〜4.0 秒のランダムな追加待機時間を加えて送信タイミングをわずかに揺らす
+                additional_wait_time = round(random.uniform(
+                    self.MINIMUM_TWEET_INTERVAL_JITTER_MIN,
+                    self.MINIMUM_TWEET_INTERVAL_JITTER_MAX,
+                ), 3)
+                throttle_deadline = minimum_tweet_interval_end + additional_wait_time
+                logging.info(
+                    f'{self.log_prefix} Minimum tweet interval is active. '
+                    f'throttle deadline in: {max(0.0, throttle_deadline - current_time):.3f}s',
                 )
 
-                # 最後のツイート時刻を更新
-                self._last_tweet_time = time.time()
+            # ブラウザプロセスが外部から kill されていないかを事前確認する
+            if self._browser.is_setup_complete is True and not self._browser.isBrowserProcessAlive():
+                await self.__markBrowserForRestart(
+                    'Browser process is no longer alive (may have been killed externally). Marking browser for re-setup...',
+                )
+                self._consecutive_compose_failures = 0
 
-                # 戻り値が str の場合、ツイートの送信に失敗している (エラーメッセージが返ってくる)
-                # この場合は明示的な API エラーなのでリトライせずにそのまま返す
-                if isinstance(response, str):
-                    logging.error(f'{self.log_prefix} Failed to create tweet: {response}')
+            # ツイート送信モーダルの操作が連続で失敗している場合、ブラウザを再起動して状態をリセットする
+            ## Twitter の画像アップロード API やページ状態が壊れている場合に、フレッシュなブラウザで回復を試みるための処理
+            if self._consecutive_compose_failures >= 2 and self._browser.is_setup_complete is True:
+                await self.__markBrowserForRestart(
+                    f'{self._consecutive_compose_failures} consecutive tweet posting failures detected. '
+                    f'Restarting browser to reset state...',
+                )
+                self._consecutive_compose_failures = 0
+
+            # ヘッドレスブラウザがまだ起動していない場合、セットアップ処理を実行
+            if self._browser.is_setup_complete is not True:
+                try:
+                    await self._browser.setup()
+                except (BrowserBinaryNotFoundError, BrowserConnectionFailedError, BrowserSetupTimeoutError) as ex:
+                    logging.error(f'{self.log_prefix} Failed to setup browser:', exc_info=ex)
                     return schemas.TwitterAPIResult(
                         is_success=False,
-                        detail=response,  # エラーメッセージをそのまま返す
+                        detail=str(ex),
                     )
 
-                # おそらくツイートに成功しているはずなので、可能であれば送信したツイートの ID を取得
-                tweet_id: str
-                try:
-                    tweet_id = str(response['create_tweet']['tweet_results']['result']['rest_id'])
-                except Exception as ex:
-                    # API レスポンスが変わっているか、スパム判定でツイート ID を取得できなかった
-                    logging.error(f'{self.log_prefix} Failed to get tweet ID (attempt {retry_count + 1}/{MAX_RETRY_COUNT + 1}):', exc_info=ex)
-                    logging.error(f'{self.log_prefix} Response: {response}')
-                    # まだリトライ回数が残っている場合は待機してから再送信する
-                    if retry_count < MAX_RETRY_COUNT:
-                        retry_wait_seconds = random.uniform(RETRY_WAIT_SECONDS_MIN, RETRY_WAIT_SECONDS_MAX)
-                        logging.info(f'{self.log_prefix} Retrying tweet after {retry_wait_seconds:.1f} seconds...')
-                        await asyncio.sleep(retry_wait_seconds)
-                        continue
-                    # リトライ回数を使い切った場合はエラーを返す
-                    return schemas.PostTweetResult(
-                        is_success=False,
-                        detail='ツイートを送信しましたが、ツイート ID を取得できませんでした。開発者に修正を依頼してください。',
-                        tweet_url='https://x.com/i/status/__error__',
-                    )
+            # ツイート送信フロー開始前にアイドルシャットダウンタスクをキャンセルする
+            ## ツイート送信フローは画像アップロード待ち (最大60秒) + CreateTweet 待ち (最大30秒) で
+            ## BROWSER_IDLE_TIMEOUT (60秒) を超える場合があるため、
+            ## 再スケジュールせずキャンセルのみ行い、フロー完了後の finally で再スケジュールする
+            async with self._shutdown_task_lock:
+                if self._shutdown_task is not None:
+                    if not self._shutdown_task.done():
+                        self._shutdown_task.cancel()
+                    self._shutdown_task = None
 
-                return schemas.PostTweetResult(
-                    is_success=True,
-                    detail='ツイートを送信しました。',
-                    tweet_url=f'https://x.com/i/status/{tweet_id}',
+            # ツイート送信モーダルを通じてツイートを送信する
+            try:
+                throttle_remaining_seconds = max(0.0, throttle_deadline - time.time())
+                logging.info(f'{self.log_prefix} Posting tweet via tweet posting modal...')
+                compose_ui_result = await self._browser.postTweetViaComposeUI(
+                    tweet_text=tweet,
+                    images=images,
+                    throttle_remaining_seconds=throttle_remaining_seconds,
+                )
+            except Exception as ex:
+                logging.error(f'{self.log_prefix} Failed to post tweet via tweet posting modal:', exc_info=ex)
+                self._consecutive_compose_failures += 1
+                # ブラウザとの接続が切断されている場合は、ブラウザプロセスの孤児化を防ぐため
+                # shutdown を含む完全な再起動準備を行う
+                if self.__isConnectionLostError(ex):
+                    try:
+                        await self.__markBrowserForRestart(
+                            'Browser connection lost during tweet posting. '
+                            'Shutting down browser for re-setup on next call...',
+                        )
+                    except Exception as restart_ex:
+                        logging.warning(f'{self.log_prefix} Error during browser restart marking:', exc_info=restart_ex)
+                return schemas.TwitterAPIResult(
+                    is_success=False,
+                    detail='ツイートの送信に失敗しました。Twitter API に接続できませんでした。',
+                )
+            finally:
+                # ツイート送信完了後、更新された可能性があるヘッドレスブラウザの Cookie を DB 側に反映
+                ## ブラウザが壊れた状態 (shutdown 後、re-setup 失敗後など) では Cookie 保存をスキップする
+                if self._browser.is_setup_complete is True:
+                    try:
+                        cookies_txt_content = await self._browser.saveTwitterCookiesToNetscapeFormat()
+                        self.twitter_account.access_token_secret = self.twitter_account.encryptAccessTokenSecret(cookies_txt_content)
+                        await self.twitter_account.save()
+                    except Exception as ex:
+                        logging.warning(f'{self.log_prefix} Failed to save cookies after tweet posting:', exc_info=ex)
+
+                # GraphQL API の前回呼び出し時刻を更新
+                self._last_graphql_api_call_time = time.time()
+
+                # 一定時間後にヘッドレスブラウザをシャットダウンするタスクを再スケジュールする
+                await self.__scheduleShutdownTask()
+
+            # Ctrl+Enter で送信したが、なんらかの理由でレスポンスがタイムアウトした可能性も考えられる
+            # その場合でもすでに Twitter 側でツイート送信が完了している可能性があるため、
+            # ツイート送信モーダル操作時のツイート送信完了時刻を前回のツイート送信時刻として記録する
+            if compose_ui_result.compose_submitted_at is not None:
+                self._last_tweet_time = compose_ui_result.compose_submitted_at
+
+            # ツイート送信モーダルからのツイート送信に失敗した場合
+            if compose_ui_result.is_success is not True:
+                self._consecutive_compose_failures += 1
+                error_message = compose_ui_result.error_message or '不明なエラー'
+                logging.error(
+                    f'{self.log_prefix} Failed to create tweet via tweet posting modal: {error_message} '
+                    f'(consecutive failures: {self._consecutive_compose_failures})',
+                )
+                # postTweetViaComposeUI() は内部で例外をキャッチして結果を返すため、
+                # CDP 接続断でもここに到達する (createTweet() の except ブロックには入らない)
+                # ブラウザプロセスが死んでいたら、次回呼び出し時の再起動を待たずに即座にフラグをリセットする
+                if not self._browser.isBrowserProcessAlive():
+                    try:
+                        await self.__markBrowserForRestart(
+                            'Browser process died during tweet posting modal operation. '
+                            'Shutting down browser for re-setup on next call...',
+                        )
+                    except Exception as restart_ex:
+                        logging.warning(f'{self.log_prefix} Error during browser restart marking:', exc_info=restart_ex)
+                return schemas.TwitterAPIResult(
+                    is_success=False,
+                    detail=f'ツイートの送信に失敗しました。{error_message}',
                 )
 
-            # ここに到達することはないが、型チェッカーのために念のため返す
+            # CreateTweet のレスポンスを解析する
+            # 連続失敗カウンターのリセットはレスポンス検証が全て通った最終成功地点 (tweet_id 取得成功時) で行う
+            ## ここでリセットすると、後続の graphql_api_result is None / 非 2xx HTTP / 空 tweet_results などの
+            ## レスポンス検証失敗がカウンターに蓄積されず、壊れたブラウザが再起動されない問題が発生するため
+            graphql_api_result = compose_ui_result.graphql_api_result
+            if graphql_api_result is None:
+                self._consecutive_compose_failures += 1
+                logging.error(f'{self.log_prefix} Failed to get CreateTweet response: graphql_api_result is None')
+                return schemas.TwitterAPIResult(
+                    is_success=False,
+                    detail='ツイートの送信に失敗しました。CreateTweet のレスポンスが取得できませんでした。',
+                )
+
+            parsed_response = graphql_api_result.parsed_response
+            status_code = graphql_api_result.status_code
+
+            # HTTP ステータスコードが 200 系以外の場合
+            if status_code is not None and not (200 <= status_code < 300):
+                self._consecutive_compose_failures += 1
+                logging.error(f'{self.log_prefix} CreateTweet returned HTTP {status_code}.')
+                logging.error(f'{self.log_prefix} Response: {parsed_response}')
+
+                # エラーレスポンスから Twitter API エラーコードを抽出する
+                if isinstance(parsed_response, dict) and 'errors' in parsed_response:
+                    error_info = parsed_response['errors'][0]
+                    error_code = error_info.get('code', -1)
+                    error_message = self.ERROR_MESSAGES.get(
+                        error_code,
+                        f'Code: {error_code} / Message: {error_info.get("message", "Unknown error")}',
+                    )
+                    return schemas.TwitterAPIResult(
+                        is_success=False,
+                        detail=f'ツイートの送信に失敗しました。{error_message}',
+                    )
+
+                return schemas.TwitterAPIResult(
+                    is_success=False,
+                    detail=f'ツイートの送信に失敗しました。Twitter API から HTTP {status_code} エラーが返されました。',
+                )
+
+            # レスポンスから data を取り出す
+            if not isinstance(parsed_response, dict):
+                self._consecutive_compose_failures += 1
+                logging.error(f'{self.log_prefix} Failed to extract tweet ID from response: parsed_response is not a dict')
+                logging.error(f'{self.log_prefix} Response: {parsed_response}')
+                return schemas.TwitterAPIResult(
+                    is_success=False,
+                    detail='ツイートの送信に失敗しました。レスポンスの形式が不正です。',
+                )
+
+            # エラーが含まれていて data がない場合
+            if 'errors' in parsed_response and 'data' not in parsed_response:
+                self._consecutive_compose_failures += 1
+                error_info = parsed_response['errors'][0]
+                error_code = error_info.get('code', -1)
+                error_message = self.ERROR_MESSAGES.get(
+                    error_code,
+                    f'Code: {error_code} / Message: {error_info.get("message", "Unknown error")}',
+                )
+                logging.error(f'{self.log_prefix} CreateTweet API error: {error_message}')
+                return schemas.TwitterAPIResult(
+                    is_success=False,
+                    detail=f'ツイートの送信に失敗しました。{error_message}',
+                )
+
+            # data キーからツイート ID を抽出する
+            response_data = parsed_response.get('data', parsed_response)
+
+            try:
+                # tweet_results が空辞書の場合は、Twitter 側のレートリミットやスパム制限のシグナルの可能性がある
+                ## HTTP 200 でエラーも含まれないが、ツイートがサイレントに破棄されるケースに該当する
+                ## この状態になった後に画像アップロードが通らなくなる現象が確認されており、
+                ## 想定外のページ状態に陥っている可能性が高い
+                ## response_data (= parsed_response['data']) が想定外の構造の場合は後続の except で処理される
+                tweet_results = response_data.get('create_tweet', {}).get('tweet_results', None)
+                if isinstance(tweet_results, dict) and len(tweet_results) == 0:
+                    # ツイート送信モーダルの操作自体は成功したがレスポンスが空なので、連続失敗としてカウントする
+                    ## この状態のブラウザでは以降の画像アップロードが通らなくなる現象が確認されているため、
+                    ## カウンターを進めて閾値に達したら次回呼び出し時にブラウザを再起動させる
+                    self._consecutive_compose_failures += 1
+                    logging.warning(
+                        f'{self.log_prefix} CreateTweet returned empty tweet_results (HTTP 200 but no tweet data). '
+                        f'This may indicate Twitter rate limiting or spam detection. '
+                        f'Subsequent image uploads may fail. '
+                        f'(consecutive failures: {self._consecutive_compose_failures})',
+                    )
+                    logging.warning(f'{self.log_prefix} Response: {parsed_response}')
+                    # スクリーンショットを保存して、ブラウザ画面に何が表示されているかを確認可能にする
+                    await self._browser.captureDebugScreenshot('empty_tweet_results')
+                    return schemas.TwitterAPIResult(
+                        is_success=False,
+                        detail='ツイートの送信に失敗しました。Twitter からの応答が空でした。レートリミットまたはスパム制限の可能性があります。',
+                    )
+
+                tweet_id = str(response_data['create_tweet']['tweet_results']['result']['rest_id'])
+            except Exception as ex:
+                # この時点で HTTP 200 + errors なし + data キーありのため、ツイート自体は送信済みと判断する
+                ## parsed_response は dict 検証済みで、data キーの存在も確認済みだが、
+                ## response_data (= parsed_response['data']) の中身が想定外の構造
+                ## (create_tweet や tweet_results、rest_id が欠落) の場合にここで KeyError 等がキャッチされる
+                logging.error(f'{self.log_prefix} Failed to extract tweet ID from response:', exc_info=ex)
+                logging.error(f'{self.log_prefix} Response: {parsed_response}')
+                # ツイート送信自体は成功しているため、連続失敗カウンターをリセットする
+                self._consecutive_compose_failures = 0
+                return schemas.PostTweetResult(
+                    is_success=True,
+                    detail='ツイートを送信しましたが、ツイート ID を取得できませんでした。',
+                    tweet_url='https://x.com/i/status/__error__',
+                )
+
+            # ツイートの送信に成功し、tweet_id も取得できたので連続失敗カウンターをリセットする
+            self._consecutive_compose_failures = 0
+            logging.info(f'{self.log_prefix} Tweet posted successfully. tweet_id: {tweet_id}')
             return schemas.PostTweetResult(
-                is_success=False,
-                detail='ツイートを送信しましたが、ツイート ID を取得できませんでした。開発者に修正を依頼してください。',
-                tweet_url='https://x.com/i/status/__error__',
+                is_success=True,
+                detail='ツイートを送信しました。',
+                tweet_url=f'https://x.com/i/status/{tweet_id}',
             )
 
     async def createRetweet(self, tweet_id: str) -> schemas.TwitterAPIResult:
@@ -938,6 +1238,7 @@ class TwitterGraphQLAPI:
             variables['count'] = 40
         if cursor_id is not None:
             variables['cursor'] = cursor_id
+        variables['enableRanking'] = False   # 常に最新ツイートを取得する
         variables['includePromotedContent'] = True
         variables['latestControlAvailable'] = True
         if cursor_id is None:
@@ -1015,7 +1316,7 @@ class TwitterGraphQLAPI:
 
         # variables の挿入順序を Twitter Web App に厳密に合わせるためにこのような実装としている
         variables: dict[str, Any] = {}
-        variables['rawQuery'] = query.strip() + ' exclude:replies lang:ja'
+        variables['rawQuery'] = query.strip() + ' lang:ja -filter:replies'
         if cursor_id is None:
             ## カーソル ID が指定されていないときは20件取得する (Twitter Web App の挙動に合わせる)
             variables['count'] = 20

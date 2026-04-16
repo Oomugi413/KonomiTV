@@ -33,6 +33,11 @@ DATA_DIR = BASE_DIR / 'data'
 ACCOUNT_ICON_DIR = DATA_DIR / 'account-icons'
 ## サムネイル画像があるディレクトリ
 THUMBNAILS_DIR = DATA_DIR / 'thumbnails'
+## Twitter 関連のデバッグ用スクリーンショットの保存先ディレクトリ
+TWITTER_DEBUG_SCREENSHOTS_DIR = DATA_DIR / 'twitter-debug-screenshots'
+## デバッグ用スクリーンショットの保持期限 (日数)
+## 7 日を超えたスクリーンショットを自動削除する
+TWITTER_DEBUG_SCREENSHOTS_RETENTION_DAYS = 7
 ## サーバー終了時に再起動が必要なことを伝えるロックファイルのパス
 RESTART_REQUIRED_LOCK_PATH = DATA_DIR / 'restart_required.lock'
 
@@ -47,6 +52,12 @@ JIKKYO_CHANNELS_PATH = STATIC_DIR / 'jikkyo_channels.json'
 
 # ログディレクトリ
 LOGS_DIR = BASE_DIR / 'logs'
+## サーバーログのアーカイブ（日付別ログ）を格納するサブディレクトリ
+## ログディレクトリ直下にアーカイブが大量に並ぶとノイズになるため、サブディレクトリに分離する
+LOGS_ARCHIVES_DIR = LOGS_DIR / 'archives'
+## サーバーログのアーカイブの保持期限 (日数)
+## 30 日を超えたアーカイブログを自動削除する
+SERVER_LOG_ARCHIVE_RETENTION_DAYS: int | None = 30
 ## KonomiTV のサーバーログのパス
 KONOMITV_SERVER_LOG_PATH = LOGS_DIR / 'KonomiTV-Server.log'
 ## KonomiTV のアクセスログのパス
@@ -143,10 +154,10 @@ LOGGING_CONFIG: dict[str, Any] = {
         },
         'default_file': {
             'formatter': 'default_file',
-            'class': 'logging.FileHandler',
+            'class': 'app.utils.LogRotation.DailyRotatingFileHandler',
             'filename': KONOMITV_SERVER_LOG_PATH,
-            'mode': 'a',
             'encoding': 'utf-8',
+            'retention_days': SERVER_LOG_ARCHIVE_RETENTION_DAYS,
         },
         # サーバーログ (デバッグ) は標準エラー出力と server/logs/KonomiTV-Server.log の両方に出力する
         'debug': {
@@ -156,10 +167,10 @@ LOGGING_CONFIG: dict[str, Any] = {
         },
         'debug_file': {
             'formatter': 'debug_file',
-            'class': 'logging.FileHandler',
+            'class': 'app.utils.LogRotation.DailyRotatingFileHandler',
             'filename': KONOMITV_SERVER_LOG_PATH,
-            'mode': 'a',
             'encoding': 'utf-8',
+            'retention_days': SERVER_LOG_ARCHIVE_RETENTION_DAYS,
         },
         # アクセスログは標準出力と server/logs/KonomiTV-Access.log の両方に出力する
         'access': {
