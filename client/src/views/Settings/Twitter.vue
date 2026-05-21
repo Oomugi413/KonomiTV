@@ -58,7 +58,7 @@
                                 Cookie データが Twitter API 以外の外部サービスに送信されることは一切ありません。
                             </p>
                             <p class="mt-1">
-                                <strong>詳しい手順はこちら：<a class="link" href="https://github.com/tsukumijima/KonomiTV#twitter-実況機能について" target="_blank">KonomiTV への Twitter アカウント連携の手順</a></strong>
+                                <strong>詳しい手順はこちら：<a class="link" href="https://github.com/Oomugi413/KonomiTV#twitter-実況機能について" target="_blank">KonomiTV への Twitter アカウント連携の手順</a></strong>
                             </p>
                             <blockquote class="mt-3">
                                 ⚠️ 不審判定されないよう様々な技術的対策を施してはいますが、<strong>非公式な方法で無理やり実装しているため、今後の Twitter の仕様変更や不審判定基準の変更により、アカウントがロック・凍結される可能性も否定できません。</strong>自己の責任のもとでご利用ください。<br>
@@ -69,7 +69,7 @@
                                 </p>
                             </blockquote>
                             <blockquote class="mt-3">
-                                📢 v0.13.0 以降では、<strong><a class="link" href="https://github.com/tsukumijima/KonomiTV/blob/master/server/app/utils/TwitterScrapeBrowser.py" target="_blank">ヘッドレスブラウザ（ウインドウが表示されないブラウザ）を使って</a> 、<a class="link" href="https://github.com/tsukumijima/KonomiTV/blob/master/server/static/zendriver_setup.js" target="_blank">Web 版 Twitter からの API コールと全く同じ方法で API リクエストを送る</a> ように改良しました！</strong><br>
+                                📢 v0.13.0 以降では、<strong><a class="link" href="https://github.com/Oomugi413/KonomiTV/blob/master/server/app/utils/TwitterScrapeBrowser.py" target="_blank">ヘッドレスブラウザ（ウインドウが表示されないブラウザ）を使って</a> 、<a class="link" href="https://github.com/Oomugi413/KonomiTV/blob/master/server/static/zendriver_setup.js" target="_blank">Web 版 Twitter からの API コールと全く同じ方法で API リクエストを送る</a> ように改良しました！</strong><br>
                                 <p class="mt-1">
                                     これまで不審判定されないよう <a class="link" href="https://github.com/tsukumijima/tweepy-authlib" target="_blank">様々な技術的対策</a> を施してきましたが、2025年11月に KonomiTV と同様の方法で Twitter API にアクセスしていた <a class="link" href="https://arkxv.com/blog/x-suspended/" target="_blank">OldTweetDeck のユーザーが一時的に大量凍結される騒動</a> (<a class="link" href="https://github.com/dimdenGD/OldTweetDeck/issues/459#issuecomment-3499066798" target="_blank">詳細</a>) が起きたことを踏まえ、より堅牢で安全なアプローチに切り替えました。<br>
                                 </p>
