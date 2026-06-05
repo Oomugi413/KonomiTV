@@ -208,7 +208,7 @@ class LiveEncodingTask:
 
         # 出力
         options.append('-y -f mpegts')  # MPEG-TS 出力ということを明示
-        options.append('pipe:1')  # 標準入力へ出力
+        options.append('pipe:1')  # 標準出力へ出力
 
         # オプションをスペースで区切って配列にする
         result: list[str] = []
@@ -253,7 +253,7 @@ class LiveEncodingTask:
 
         # 出力
         options.append('-y -f mpegts')  # MPEG-TS 出力ということを明示
-        options.append('pipe:1')  # 標準入力へ出力
+        options.append('pipe:1')  # 標準出力へ出力
 
         # オプションをスペースで区切って配列にする
         result: list[str] = []
@@ -441,7 +441,7 @@ class LiveEncodingTask:
 
         # 出力
         options.append('--output-format mpegts')  # MPEG-TS 出力ということを明示
-        options.append('--output -')  # 標準入力へ出力
+        options.append('--output -')  # 標準出力へ出力
 
         # オプションをスペースで区切って配列にする
         result: list[str] = []
