@@ -45,7 +45,7 @@ class LiveEncodingTask:
     GOP_LENGTH_SECONDS_H264: ClassVar[float] = 0.5
 
     # H.265 再生時のエンコード後のストリームの GOP 長 (秒)
-    GOP_LENGTH_SECONDS_H265: ClassVar[float] = float(2)
+    GOP_LENGTH_SECONDS_H265: ClassVar[float] = float(0.5)
 
     # エンコードタスクの最大リトライ回数
     ## この数を超えた場合はエンコードタスクを再起動しない（無限ループを避ける）
@@ -162,7 +162,7 @@ class LiveEncodingTask:
         # 映像
         ## コーデック
         if QUALITY[quality].is_hevc is True:
-            options.append('-vcodec libx265')  # H.265/HEVC (通信節約モード)
+            options.append('-vcodec libx265 -tag:v hvc1')  # H.265/HEVC (通信節約モード)
         else:
             options.append('-vcodec libx264')  # H.264
 
@@ -313,7 +313,8 @@ class LiveEncodingTask:
         # ストリームのマッピング
         ## 音声切り替えのため、主音声・副音声両方をエンコード後の TS に含む
         ## 音声が 5.1ch かどうかに関わらず、ステレオにダウンミックスする
-        options.append('--audio-stream 1?:stereo --audio-stream 2?:stereo --data-copy timed_id3')
+        options.append('--audio-stream 1?:stereo --data-copy timed_id3')
+        # options.append('--audio-stream 1?:stereo --audio-stream 2?:stereo --data-copy timed_id3')
 
         # フラグ
         ## 主に HWEncC の起動を高速化するための設定
@@ -334,7 +335,7 @@ class LiveEncodingTask:
         # 映像
         ## コーデック
         if QUALITY[quality].is_hevc is True:
-            options.append('--codec hevc')  # H.265/HEVC (通信節約モード)
+            options.append('--codec hevc --video-tag hvc1')  # H.265/HEVC (通信節約モード)
         else:
             options.append('--codec h264')  # H.264
 
@@ -420,8 +421,10 @@ class LiveEncodingTask:
                     options.append('--vpp-deinterlace normal')
                 elif encoder_type == 'NVEncC' or encoder_type == 'VCEEncC':
                     options.append('--vpp-afs preset=default')
+                    pass
                 elif encoder_type == 'rkmppenc':
                     options.append('--vpp-deinterlace normal_i5')
+                ## options.append(f'--avsync vfr --gop-len 15')
                 options.append(f'--avsync vfr --gop-len {int(gop_length_second * 30)}')
 
         ## フル HD 放送が行われているチャンネルかつ、指定された品質の解像度が 1440×1080 (1080p) の場合のみ、
