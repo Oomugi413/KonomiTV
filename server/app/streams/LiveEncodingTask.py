@@ -421,7 +421,6 @@ class LiveEncodingTask:
                     options.append('--vpp-deinterlace normal')
                 elif encoder_type == 'NVEncC' or encoder_type == 'VCEEncC':
                     options.append('--vpp-afs preset=default')
-                    pass
                 elif encoder_type == 'rkmppenc':
                     options.append('--vpp-deinterlace normal_i5')
                 ## options.append(f'--avsync vfr --gop-len 15')
