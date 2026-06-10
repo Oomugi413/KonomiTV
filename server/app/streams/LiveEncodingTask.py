@@ -328,11 +328,7 @@ class LiveEncodingTask:
         ## リトライなしの場合は 500K (0.5秒) に設定し、リトライ回数に応じて 100K (0.1秒) ずつ増やす
         max_interleave_delta = round(500 + (self._retry_count * 100))
         options.append('-m avioflags:direct -m fflags:nobuffer+flush_packets -m flush_packets:1 -m max_delay:250000')
-        options.append(f'-m max_interleave_delta:{max_interleave_delta}K --output-thread 0')
-        ## NVEncC 9.15 以降では H.264 と --lowlatency の組み合わせで、破損した H.264 ストリームが出力されることがある
-        ## H.265/HEVC では同じ条件でも再生できる TS が出力されるため、問題が確認できている NVEncC + H.264 のみ無効化する
-        if encoder_type != 'NVEncC' or QUALITY[quality].is_hevc is True:
-            options.append('--lowlatency')
+        options.append(f'-m max_interleave_delta:{max_interleave_delta}K --output-thread 0 --lowlatency')
         ## QSVEncC と rkmppenc では OpenCL を使用しないので、無効化することで初期化フェーズを高速化する
         if (encoder_type == 'QSVEncC' or encoder_type == 'rkmppenc') and not self.live_stream.encoding_options.is_24fps_mode_enabled:
             options.append('--disable-opencl')
@@ -427,7 +423,7 @@ class LiveEncodingTask:
             ## NVIDIA GPU は当然ながら Intel の内蔵 GPU よりも性能が高いので、GPU フィルタを使ってもパフォーマンスに問題はないと判断
             ## VCEEncC では --vpp-deinterlace 自体が使えないので、代わりに --vpp-afs を使う
             else:
-                # 24fps モードでは HWEncC 系の AFS で 24fps 区間を検出し、24/30p 混合 VFR で出力する
+                # 24fps モードでは --vpp-afs で 24fps 区間を検出し、24/30p 混合 VFR で出力する
                 ## 1080p-60fps では上の bob 分岐を優先するため、この分岐には入らない
                 if self.live_stream.encoding_options.is_24fps_mode_enabled is True:
                     options.append('--vpp-afs preset=default,drop=on,smooth=on')
