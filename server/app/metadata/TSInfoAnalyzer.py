@@ -146,7 +146,7 @@ class TSInfoAnalyzer:
                         return True
 
                     # PAT, NIT, SDT, TOT, EIT を取り出す
-                    if not self.__readPSIData(f, [0x00, 0x10, 0x11, 0x14, 0x12, 0x26, 0x27], callback):
+                    if not TSInfoAnalyzer.readPSIData(f, [0x00, 0x10, 0x11, 0x14, 0x12, 0x26, 0x27], callback):
                         logging.warning(f'{psc_path}: File contents may be invalid.')
                     if last_tot_time_sec is not None:
                         self.last_tot_timedelta = timedelta(seconds = last_time_sec - last_tot_time_sec)
@@ -705,8 +705,7 @@ class TSInfoAnalyzer:
 
         try:
             sanitized_ts = TransportStreamFileWorkaround(BytesIO(packets))
-            for section in sanitized_ts.sections(section_class):
-                yield section
+            yield from sanitized_ts.sections(section_class)
         except (IndexError, ValueError, TypeError, AttributeError, struct.error) as ex:
             logging.warning(
                 f'{self.recorded_video.file_path}: Failed to parse sanitized EIT sections.',
@@ -976,7 +975,7 @@ class TSInfoAnalyzer:
         logging.info(f'{self.recorded_video.file_path}: Selected first available channel {selected["channel_name"]} (SID: {selected["service_id"]}) as fallback.')
         return selected
 
-    def __checkChannelProgramMatch(self, channel: dict[str, Any], target_start_time, target_title: str) -> bool:
+    def __checkChannelProgramMatch(self, channel: dict[str, Any], target_start_time: datetime, target_title: str) -> bool:
         """
         指定されたチャンネルで、指定時刻・タイトルの番組が存在するかチェック
 
@@ -1161,6 +1160,9 @@ class TSInfoAnalyzer:
         else:
             # BS/CS などはサービス ID から計算
             remocon_id = TSInformation.calculateRemoconID(channel_type, service_id)
+        if remocon_id is None:
+            logging.warning(f'{self.recorded_video.file_path}: remocon_id not found.')
+            return None
 
         # チャンネル番号を算出
         channel_number = asyncio.run(TSInformation.calculateChannelNumber(
@@ -1200,6 +1202,22 @@ class TSInfoAnalyzer:
         channel.is_watchable = False
 
         return channel
+
+
+    def collectAllChannels(self) -> list[dict[str, Any]]:
+        """
+        TS 内の全ての利用可能なチャンネル情報を収集する。
+
+        Args:
+            なし
+
+        Returns:
+            list[dict[str, Any]]: 録画 TS に含まれるチャンネル情報のリスト。
+        """
+
+        # ルーターなど外部モジュールから利用できる公開メソッドとして、
+        ## 実装詳細の private メソッド呼び出しをこのクラス内に閉じ込める
+        return self.__collectAllChannels()
 
 
     def __analyzeEITInformation(self, channel: schemas.Channel, is_following: bool = False) -> schemas.RecordedProgram | None:
@@ -1671,8 +1689,8 @@ class TSInfoAnalyzer:
         return None
 
 
-    @classmethod
-    def __readPSIData(cls, reader: BufferedReader, target_pids: list[int], callback: Callable[[float, int, bytes], bool]) -> bool:
+    @staticmethod
+    def readPSIData(reader: BufferedReader, target_pids: list[int], callback: Callable[[float, int, bytes], bool]) -> bool:
         """
         書庫から PSI/SI セクションを取り出す
 

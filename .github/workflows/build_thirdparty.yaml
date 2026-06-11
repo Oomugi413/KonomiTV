@@ -17,26 +17,26 @@ on:
 env:
   # Python のバージョン (Python Standalone Builds のリリースを指定する)
   ## ref: https://github.com/indygreg/python-build-standalone/releases
-  PYTHON_TAG: '20251031'
+  PYTHON_TAG: '20260414'
   PYTHON_MAJOR_VERSION: '3.11'
-  PYTHON_VERSION: '3.11.14'
+  PYTHON_VERSION: '3.11.15'
   # Poetry のバージョン
   POETRY_VERSION: '1.8.5'
   # FFmpeg のバージョン (FFmpeg-Builds のリリースを指定する)
   ## FFmpeg-Builds は毎月末のリリースが長期間保持されるため、基本毎月末のリリースを指定する
   ## Linux 版の最新 HWEncC バイナリは libav* を静的リンクするようになり、FFmpeg 共有ライブラリの別途同梱は不要になった
   ## ref: https://github.com/BtbN/FFmpeg-Builds/releases
-  FFMPEG_TAG: 'autobuild-2025-12-31-14-28'
+  FFMPEG_TAG: 'autobuild-2026-04-30-13-44'
   FFMPEG_MAJOR_VERSION: '7.1'
-  FFMPEG_VERSION: '7.1.3-22-g40b336e650'
+  FFMPEG_VERSION: '7.1.3-46-g957b06a788'
   # QSVEncC・NVEncC・VCEEncC・rkmppenc のバージョン
   ## ref: https://github.com/rigaya/QSVEnc/releases
   ## ref: https://github.com/rigaya/NVEnc/releases
   ## ref: https://github.com/rigaya/VCEEnc/releases
   ## ref: https://github.com/rigaya/rkmppenc/releases
-  QSVENCC_VERSION: '8.08'
-  NVENCC_VERSION: '9.14'
-  VCEENCC_VERSION: '9.05'
+  QSVENCC_VERSION: '8.15'
+  NVENCC_VERSION: '9.17'
+  VCEENCC_VERSION: '9.06'
   RKMPPENC_VERSION: '0.18'
   # QSVEncC 向け Intel Media Stack の固定バージョン
   ## 旧世代 iGPU との後方互換性を鑑み、各ライブラリのバージョンを動作検証済みの組み合わせへ固定する
@@ -46,17 +46,13 @@ env:
   INTEL_LIBVA_TAG: '2.22.0'
   INTEL_MEDIA_DRIVER_TAG: 'intel-media-25.2.4'
   INTEL_MEDIASDK_TAG: 'intel-mediasdk-23.2.2'
-  INTEL_ONEVPL_GPU_TAG: 'intel-onevpl-25.2.4'
-  # libmediainfo のバージョン
-  ## Windows 版の pymediainfo (ビルド済みの MediaInfo.dll が同梱されている) とバージョンを合わせる
-  ## ref: https://github.com/sbraz/pymediainfo/blob/v6.0.1/appveyor.yml#L6
-  LIBMEDIAINFO_VERSION: '22.09'
+  INTEL_ONEVPL_GPU_TAG: 'intel-onevpl-25.4.6'
   # Akebi HTTPS Server ビルド用の Golang のバージョン
   GOLANG_VERSION: '1.23.8'
   # ビルド対象の tsreadex・psisiarc・psisimux・Akebi のコミットハッシュ
-  TSREADEX_COMMIT_HASH: 'eddc8bca0de99627d3867259e7a6e777cbd3b3c6'
+  TSREADEX_COMMIT_HASH: 'a82528ccb698fcd07b4da1bb2243e63d685c34a7'
   PSISIARC_COMMIT_HASH: '6593a0f63aedaaecfac7682b51e267874a8ec549'
-  PSISIMUX_COMMIT_HASH: '1a01a38886dc41bac81d547ba31fa9eef1bad46b'
+  PSISIMUX_COMMIT_HASH: '18c3c020e51e16804340c834835e0cfd72c8b50d'
   AKEBI_COMMIT_HASH: 'be986980f7a560b4f74eefcfa2cd474f892f3bc7'
 
 # ジョブの定義
@@ -348,16 +344,18 @@ jobs:
 
           # QSV/NV/VCEEncC 向けの共有ライブラリ配置先を作成
           ## 最新の Linux 版 HWEncC バイナリは libav* を静的リンクしているため、
-          ## ここでは QSVEncC 向け Intel Media Stack と libmediainfo のみを同梱する
+          ## ここでは QSVEncC 向け Intel Media Stack を同梱する
           mkdir thirdparty/Library/
 
           # QSVEncC が依存する Intel Media Stack を Ubuntu 20.04 ベースで自前ビルドして同梱
           ## QSVEncC 本体は再ビルドせず、Intel 系ライブラリのみを glibc 互換の同梱構成としてまとめる
           ## libva には同梱ディレクトリ基準の相対探索へ切り替えるパッチを適用し、
           ## 旧世代 GPU 向けの libmfxhw64.so と新世代 GPU 向けの libmfx-gen.so.1.2 を同梱して後方互換性を維持する
-          if [ ! -e intel-media-stack/artifact/Library/dri/iHD_drv_video.so ] || [ ! -e intel-media-stack/artifact/Library/libva.so.2 ] || [ ! -e intel-media-stack/artifact/Library/libmfxhw64.so.1 ] || [ ! -e intel-media-stack/artifact/Library/libmfx-gen.so.1.2 ]; then
+          ## thirdparty/Library/ 自体を /lib/x86_64-linux-gnu 相当の配置先として扱い、
+          ## サブディレクトリとして dri/ と libmfx-gen/ のみを許容する
+          if [ ! -e intel-media-stack/artifact/Library/dri/iHD_drv_video.so ] || [ ! -e intel-media-stack/artifact/Library/libva.so.2 ] || [ ! -e intel-media-stack/artifact/Library/libmfxhw64.so.1 ] || [ ! -e intel-media-stack/artifact/Library/libmfx-gen.so.1.2 ] || [ ! -e intel-media-stack/artifact/Library/libmfx-gen/enctools.so ]; then
             docker run --rm -i \
-              -v $(pwd):/work \
+              -v "$(pwd):/work" \
               -w /work \
               -e HOST_UID=$(id -u) \
               -e HOST_GID=$(id -g) \
@@ -372,20 +370,22 @@ jobs:
             echo 'Intel Media Stack build cache hit. Skip rebuilding Intel Media Stack.'
           fi
 
+          # Intel Media Stack の成果物レイアウトを検証
+          ## 万が一 thirdparty/Library/ 以下にさらに lib/ や usr/ のような余計なネストが残っていた場合はその場で失敗させる
+          if [ -d intel-media-stack/artifact/Library/lib ] || [ -d intel-media-stack/artifact/Library/usr ]; then
+            echo 'Unexpected Intel Media Stack artifact layout. Only dri/ and libmfx-gen/ are allowed under Library/.' >&2
+            find intel-media-stack/artifact/Library -maxdepth 2 -type d | sort >&2
+            exit 1
+          fi
+
           # Intel Media Stack の成果物を thirdparty/Library にコピー
           mkdir -p thirdparty/Library/dri
           mkdir -p thirdparty/Library/libmfx-gen
           cp -a intel-media-stack/artifact/Library/. thirdparty/Library/
-
-          cp -ar thirdparty/Library/lib/x86_64-linux-gnu/* thirdparty/Library/
-          rm -rf thirdparty/Library/lib/
-          cp -ar thirdparty/Library/usr/lib/x86_64-linux-gnu/* thirdparty/Library/
-          rm -rf thirdparty/Library/usr/
-          rm -rf thirdparty/Library/pkgconfig
-          find thirdparty/Library -maxdepth 1 -name '*.so*' -not -type l -not -type d | while read fn; do patchelf --set-rpath '$ORIGIN:$ORIGIN/../lib:$ORIGIN/../Library' $fn; done
-          find thirdparty/Library/libmfx-gen -name '*.so*' -not -type l -not -type d | while read fn; do patchelf --set-rpath '$ORIGIN:$ORIGIN/..' $fn; done
+          find thirdparty/Library -maxdepth 1 -name '*.so*' -not -type l -not -type d -print0 | while IFS= read -r -d '' fn; do patchelf --set-rpath '$ORIGIN:$ORIGIN/../lib:$ORIGIN/../Library' "$fn"; done
+          find thirdparty/Library/libmfx-gen -name '*.so*' -not -type l -not -type d -print0 | while IFS= read -r -d '' fn; do patchelf --set-rpath '$ORIGIN:$ORIGIN/..' "$fn"; done
           patchelf --set-rpath '$ORIGIN:$ORIGIN/..' thirdparty/Library/dri/iHD_drv_video.so
-          find thirdparty/Library -name '*.so*' -not -type l -not -type d | xargs chmod a+x
+          find thirdparty/Library -name '*.so*' -not -type l -not -type d -exec chmod a+x {} +
 
           # QSVEncC のアーカイブのダウンロード
           curl -fSLO https://github.com/rigaya/QSVEnc/releases/download/${{ env.QSVENCC_VERSION }}/qsvencc_${{ env.QSVENCC_VERSION }}_amd64.deb
@@ -416,14 +416,6 @@ jobs:
           chmod a+x thirdparty/VCEEncC/VCEEncC.elf
           patchelf --set-rpath '$ORIGIN:$ORIGIN/../lib:$ORIGIN/../Library' thirdparty/VCEEncC/VCEEncC.elf
           curl -fSL -o thirdparty/VCEEncC/License.txt https://raw.githubusercontent.com/rigaya/VCEEnc/master/VCEEnc_license.txt
-
-          # libmediainfo のアーカイブのダウンロード
-          ## AWS Lambda 向けのビルドが完全な Static Build で扱いやすそうだったので、それを使う
-          curl -fSL -o libmediainfo.zip https://mediaarea.net/download/binary/libmediainfo0/${{ env.LIBMEDIAINFO_VERSION }}/MediaInfo_DLL_${{ env.LIBMEDIAINFO_VERSION }}_Lambda_x86_64.zip
-          7z x -y libmediainfo.zip
-          cp -a lib/* thirdparty/Library/
-          rm -rf lib/
-          chmod a+x thirdparty/Library/libmediainfo.so*
 
       # FFmpeg・rkmppenc のアーカイブのダウンロードと配置 (arm64 のみ)
       # ドライバさえ入っていればスタンドアローンで実行できるように構成を工夫している
@@ -479,14 +471,6 @@ jobs:
           chmod a+x thirdparty/rkmppenc/rkmppenc.elf
           patchelf --set-rpath '$ORIGIN:$ORIGIN/../lib:$ORIGIN/../Library' thirdparty/rkmppenc/rkmppenc.elf
           curl -fSL -o thirdparty/rkmppenc/License.txt https://raw.githubusercontent.com/rigaya/rkmppenc/master/rkmppenc_license.txt
-
-          # libmediainfo のアーカイブのダウンロード
-          ## AWS Lambda 向けのビルドが完全な Static Build で扱いやすそうだったので、それを使う
-          curl -fSL -o libmediainfo.zip https://mediaarea.net/download/binary/libmediainfo0/${{ env.LIBMEDIAINFO_VERSION }}/MediaInfo_DLL_${{ env.LIBMEDIAINFO_VERSION }}_Lambda_arm64.zip
-          7z x -y libmediainfo.zip
-          cp -a lib/* thirdparty/Library/
-          rm -rf lib/
-          chmod a+x thirdparty/Library/libmediainfo.so*
 
       # Python Standalone Builds のダウンロードと poetry のインストール
       - name: Install Python Standalone Builds & pip & poetry

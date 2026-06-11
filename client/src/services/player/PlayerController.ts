@@ -154,8 +154,10 @@ class PlayerController {
         tv_streaming_quality: LiveStreamingQuality;
         tv_data_saver_mode: boolean;
         tv_low_latency_mode: boolean;
+        tv_24fps_mode: boolean;
         video_streaming_quality: VideoStreamingQuality;
         video_data_saver_mode: boolean;
+        video_24fps_mode: boolean;
     } {
         const settings_store = useSettingsStore();
         // モバイル回線向けの画質プロファイルを返す
@@ -164,8 +166,10 @@ class PlayerController {
                 tv_streaming_quality: settings_store.settings.tv_streaming_quality_cellular,
                 tv_data_saver_mode: settings_store.settings.tv_data_saver_mode_cellular,
                 tv_low_latency_mode: settings_store.settings.tv_low_latency_mode_cellular,
+                tv_24fps_mode: settings_store.settings.tv_24fps_mode_cellular,
                 video_streaming_quality: settings_store.settings.video_streaming_quality_cellular,
                 video_data_saver_mode: settings_store.settings.video_data_saver_mode_cellular,
+                video_24fps_mode: settings_store.settings.video_24fps_mode_cellular,
             };
         // Wi-Fi 回線向けの画質プロファイルを返す
         } else {
@@ -173,8 +177,10 @@ class PlayerController {
                 tv_streaming_quality: settings_store.settings.tv_streaming_quality,
                 tv_data_saver_mode: settings_store.settings.tv_data_saver_mode,
                 tv_low_latency_mode: settings_store.settings.tv_low_latency_mode,
+                tv_24fps_mode: settings_store.settings.tv_24fps_mode,
                 video_streaming_quality: settings_store.settings.video_streaming_quality,
                 video_data_saver_mode: settings_store.settings.video_data_saver_mode,
+                video_24fps_mode: settings_store.settings.video_24fps_mode,
             };
         }
     }
@@ -283,6 +289,10 @@ class PlayerController {
             }
         }
 
+        // HEVC 10bit は通信節約モード中の対応環境にだけ透過的に要求する
+        // MediaCapabilities で滑らかに再生できると判断できない場合は、通常の HEVC 8bit に留めて互換性を優先する
+        const is_hevc_10bit_playback = is_hevc_playback === true && await PlayerUtils.isHEVC10bitVideoSupported();
+
         // ブラウザが MSE in Worker での H.265 / HEVC 再生に対応しているかどうか
         const is_hevc_video_supported_in_worker = await mpegts.supportWorkerForMSEH265Playback();
 
@@ -390,8 +400,27 @@ class PlayerController {
             video: (() => {
                 // 画質リスト
                 const qualities: DPlayerType.VideoQuality[] = [];
-                // H.265 / HEVC 再生時のみ、API に渡す画質に -hevc のプレフィックスをつける
-                const hevc_prefix = is_hevc_playback === true ? '-hevc' : '';
+                // H.265 / HEVC 再生時のみ、API に渡す画質の末尾に -hevc を付ける
+                const hevc_suffix = is_hevc_playback === true ? '-hevc' : '';
+                // -10bit や -24fps は品質名の末尾に付けて API パスに含める
+                // 録画再生では session_id が同じでも画質が違うリクエストはサーバー側でエラーになる
+                const build_api_quality = (quality_name: LiveStreamingQuality | VideoStreamingQuality): string => {
+                    let api_quality = `${quality_name}${hevc_suffix}`;
+                    if (is_hevc_10bit_playback === true) {
+                        api_quality += '-10bit';
+                    }
+                    if (
+                        quality_name !== '1080p-60fps' &&
+                        (
+                            this.playback_mode === 'Live' ?
+                                this.quality_profile.tv_24fps_mode :
+                                this.quality_profile.video_24fps_mode
+                        ) === true
+                    ) {
+                        api_quality += '-24fps';
+                    }
+                    return api_quality;
+                };
 
                 // ライブ視聴: チャンネル情報がセットされているはず
                 if (this.playback_mode === 'Live') {
@@ -414,7 +443,7 @@ class PlayerController {
                                 // 1080p-60fps のみ、見栄えの観点から表示上 "1080p (60fps)" と表示する
                                 name: quality_name === '1080p-60fps' ? '1080p (60fps)' : quality_name,
                                 type: 'mpegts',
-                                url: `${streaming_api_base_url}/${quality_name}${hevc_prefix}/mpegts`,
+                                url: `${streaming_api_base_url}/${build_api_quality(quality_name)}/mpegts`,
                             });
                         }
                     }
@@ -458,7 +487,7 @@ class PlayerController {
                             const session_id = crypto.randomUUID().split('-')[0];
 
                             // playlist URL を構築
-                            const playlist_url = `${streaming_api_base_url}/${quality_name}${hevc_prefix}/playlist?session_id=${session_id}`;
+                            const playlist_url = `${streaming_api_base_url}/${build_api_quality(quality_name)}/playlist?session_id=${session_id}`;
 
                             // 画質設定を追加
                             qualities.push({

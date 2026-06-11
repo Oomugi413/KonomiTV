@@ -5,13 +5,19 @@
 """
 tsreplace + QSVEncC/NVEncC のエンコードパターン横断検証スクリプト
 
-指定された生 TS (60i 地デジ前提) を入力として、以下の 12 パターンで tsreplace を使って
+指定された生 TS (60i 地デジ前提) を入力として、通常 12 パターンで tsreplace を使って
 映像のみを再エンコードし、KonomiTV での再生・キーフレーム解析が問題なく動くかを検証する
 
-パターン:
+通常パターン:
   {H.264, H.265} × {QSVEncC, NVEncC} × {30p normal deinterlace, 24p VFR afs, 60p bob deinterlace}
 
-フェーズ 1 で H.264 系の 6 パターンを並行実行し、終わったらフェーズ 2 で H.265 系を並行実行する
+デバッグ用拡張パターン (--debug-all / 個別フラグで有効化):
+  Arrow Lake の VEBOX + HEVC GPU hang 問題の切り分け用
+  - --include-hevc-8bit: HEVC 8bit パターン (8bit/10bit 固有の問題かを検証)
+  - --include-yadif: QSV --vpp-yadif パターン (VEBOX 固有の問題かを検証)
+  - --include-pipe-mode: tsreplace パイプ渡しモード (tsreplace -e の双方向 pipe が原因かを検証)
+
+フェーズ 1 で H.264 系のパターンを並行実行し、終わったらフェーズ 2 で H.265 系を並行実行する
 (GPU とハードウェアエンコーダーの同時利用耐性を加味して、コーデックごとに分けている)
 メモリ使用量を抑えたい場合は `--concurrency` でコーデックごとの同時実行数を絞れる
 
@@ -22,15 +28,24 @@ tsreplace + QSVEncC/NVEncC のエンコードパターン横断検証スクリ�
 設計メモ:
 - エンコードパラメータは rigaya 氏からご提案いただいた KonomiTV 向け録画後再エンコード
   用設定をベースにしている (HEVC 10bit / --icq 21 / --qvbr 30 / --gop-len 75 など)
-- tsreplace の -e モードを使い、tsreplace が encoder を直接起動する形にしている
-  これにより encoder と tsreplace の接続は tsreplace 側に任せられる
+- Arrow Lake 環境では Intel Media Driver の VEBOX ハードウェアデインタレースフィルタに
+  HEVC エンコードと組み合わせた際に GPU hang する不具合があり、Intel Media Driver に
+  pr1988 相当のパッチを適用して出荷している
+- QSVEncC 側には RFF 素材でフィールドオーダー判定が安定しない問題があることが判明したため、
+  このスクリプトの QSV 30p / 60p では RFF 映像向けに明示的な TFF モードを使う
+- 通常パターンでは tsreplace の -e モードを使い、tsreplace が encoder を直接起動する形に
+  している (これにより encoder と tsreplace の接続は tsreplace 側に任せられる)
+- デバッグ用の --include-pipe-mode を有効にすると、tsreplace の -r (パイプ渡し) モードも
+  テストされる (encoder がファイルから直接読み、stdout を tsreplace -r に pipe 渡しする)
 - subprocess の stdout/stderr は親プロセスから継承しているため、複数プロセス分のログが
   そのまま端末に混在する形で流れる (デバッグ目的なので分離は行わない)
 - 既存の .avc.*.ts / .hevc.*.ts は上書きされる (失敗したら単にもう一度実行すればよい)
 """
 
+import ctypes
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import time
@@ -39,6 +54,10 @@ from pathlib import Path
 from typing import Literal
 
 import typer
+from biim.mpeg2ts import ts
+from biim.mpeg2ts.parser import SectionParser
+from biim.mpeg2ts.pat import PATSection
+from biim.mpeg2ts.pmt import PMTSection
 
 from app.constants import LIBRARY_PATH
 
@@ -50,7 +69,17 @@ Codec = Literal['h264', 'hevc']
 # 使用エンコーダー (qsv or nvenc)
 Encoder = Literal['qsv', 'nvenc']
 # フレームレートモード (30p normal / 24p afs VFR / 60p bob)
-FpsMode = Literal['30p', '24p', '60p']
+FPSMode = Literal['30p', '24p', '60p']
+# HEVC のビット深度 (通常は 10bit、デバッグ用に 8bit も選択可能)
+HEVCBitDepth = Literal['8bit', '10bit']
+# tsreplace の接続モード (-e モード or パイプ渡しモード)
+TSReplaceMode = Literal['enc', 'pipe']
+# QSV のデインタレースフィルタ種別 (通常は vebox、デバッグ用に yadif も選択可能)
+QSVDeintFilter = Literal['vebox', 'yadif']
+# QSVEncC の品質設定プロファイル
+QSVQualityProfile = Literal['default', 'no-la', 'low-surface', 'simple']
+# deband の絞り込み状態
+DebandState = Literal['any', 'enabled', 'disabled']
 
 
 # ***** 定数 *****
@@ -68,7 +97,24 @@ class EncodePattern:
     # 使用エンコーダー (qsv or nvenc)
     encoder: Encoder
     # フレームレートモード (30p / 24p afs / 60p bob)
-    fps_mode: FpsMode
+    fps_mode: FPSMode
+    # HEVC のビット深度 (codec == 'hevc' の場合のみ参照される)
+    hevc_bit_depth: HEVCBitDepth = '10bit'
+    # tsreplace の接続モード
+    ## 'enc': tsreplace -e モード (tsreplace が encoder を直接起動し、stdin/stdout 双方向 pipe で接続)
+    ## 'pipe': パイプ渡しモード (encoder をこのスクリプトが起動し、encoder の stdout を tsreplace -r に pipe 渡し)
+    tsreplace_mode: TSReplaceMode = 'enc'
+    # QSV のデインタレースフィルタ種別 (encoder == 'qsv' の場合のみ参照される)
+    ## 'vebox': VEBOX ハードウェアデインタレース (--vpp-deinterlace) - 最も軽量だが Arrow Lake で問題あり
+    ## 'yadif': OpenCL ベースの yadif デインタレース (--vpp-yadif) - VEBOX を経由しない
+    qsv_deint_filter: QSVDeintFilter = 'vebox'
+    # バンディング対策フィルタ (--vpp-deband) を有効にするか
+    ## Arrow Lake の QSV HEVC + VEBOX デインタレース問題では、OpenCL deband を挟むかどうかで
+    ## GPU hang の発生条件が変わるため、同一パターンの deband 有無を横断検証できるようにする
+    use_deband: bool = True
+    # QSVEncC の品質設定プロファイル
+    ## default は KonomiTV の高画質設定相当、その他は surface 保持量や先読みの影響を切り分けるために使う
+    qsv_quality_profile: QSVQualityProfile = 'default'
 
     @property
     def suffix(self) -> str:
@@ -76,10 +122,29 @@ class EncodePattern:
         出力ファイル名に付加するサフィックス
 
         例: codec=h264, encoder=qsv, fps_mode=30p -> "avc.qsv30p"
+            codec=hevc, encoder=qsv, fps_mode=30p, hevc_bit_depth=8bit -> "hevc8.qsv30p"
+            codec=hevc, encoder=qsv, fps_mode=30p, tsreplace_mode=pipe -> "hevc.qsv30p.pipe"
+            codec=hevc, encoder=qsv, fps_mode=30p, qsv_deint_filter=yadif -> "hevc.qsv30p.yadif"
         """
 
         codec_part = 'avc' if self.codec == 'h264' else 'hevc'
-        return f'{codec_part}.{self.encoder}{self.fps_mode}'
+        # HEVC 8bit の場合はサフィックスに 8 を付けて区別する
+        if self.codec == 'hevc' and self.hevc_bit_depth == '8bit':
+            codec_part = 'hevc8'
+        base = f'{codec_part}.{self.encoder}{self.fps_mode}'
+        # tsreplace パイプ渡しモードの場合はサフィックスに .pipe を付ける
+        if self.tsreplace_mode == 'pipe':
+            base += '.pipe'
+        # QSV で yadif デインタレースを使う場合はサフィックスに .yadif を付ける
+        if self.encoder == 'qsv' and self.qsv_deint_filter == 'yadif':
+            base += '.yadif'
+        # deband 無効パターンは通常パターンと出力ファイル名が衝突しないように明示する
+        if self.use_deband is False:
+            base += '.nodeband'
+        # QSV 品質設定を変えたパターンは通常パターンと出力ファイル名が衝突しないように明示する
+        if self.encoder == 'qsv' and self.qsv_quality_profile != 'default':
+            base += f'.{self.qsv_quality_profile}'
+        return base
 
 
 @dataclass
@@ -192,48 +257,52 @@ def build_common_encoder_args(pattern: EncodePattern) -> list[str]:
     # 出力コーデック
     args += ['-c', pattern.codec]
 
-    # HEVC 10bit エンコードを有効化する条件を判定する
-    ## rigaya 氏の推奨設定では HEVC 10bit (main10) + --vpp-afs の組み合わせを前提としているが、
-    ## Arrow Lake iGPU の iHD driver は「HEVC 10bit + VEBOX deinterlace (--vpp-deinterlace normal/bob)」
-    ## の組み合わせで MFXENCODE の surface alloc に "incompatible video parameters" を返して gpu hang する
-    ## --vpp-afs は VEBOX ではなく shader / CPU 系のフィルタなので、HEVC 10bit でも問題なく動作する
-    ## そのため、HEVC の場合は「--vpp-afs (24p 混合 VFR) を使う場合のみ 10bit にする」というポリシーで分岐する
-    ## NVEncC では 10bit HEVC + deinterlace の組み合わせに制約はないため、どの fps_mode でも 10bit を使える
+    # HEVC のビット深度指定
     if pattern.codec == 'hevc':
-        use_10bit = (pattern.encoder == 'nvenc') or (pattern.fps_mode == '24p')
-        if use_10bit:
+        if pattern.hevc_bit_depth == '10bit':
             # --fallback-bitdepth は 10bit 非対応環境で 8bit にフォールバックする
             args += ['--output-depth', '10', '--fallback-bitdepth']
+        # 8bit の場合は --output-depth を指定しない (デフォルトの 8bit がそのまま使われる)
 
     # GOP 長 (rigaya 氏推奨値)
     args += ['--gop-len', '75']
 
     # バンディング対策 (--vpp-deband)
     ## 一部の GPU 世代では若干遅くなるが、品質重視のため有効化する
-    args += ['--vpp-deband']
+    ## ただし Arrow Lake の QSV HEVC + VEBOX デインタレース問題では、OpenCL deband の有無が
+    ## GPU hang の再現性に影響するため、検証時は use_deband=False で明示的に外せるようにする
+    if pattern.use_deband is True:
+        args += ['--vpp-deband']
 
     return args
 
 
-def build_deinterlace_args(encoder: Encoder, fps_mode: FpsMode) -> list[str]:
+def build_deinterlace_args(pattern: EncodePattern) -> list[str]:
     """
     デインタレース/フレームレート変換の引数を組み立てる
 
     Args:
-        encoder (Encoder): 使用エンコーダー
-        fps_mode (FpsMode): フレームレートモード
+        pattern (EncodePattern): エンコードパターン
 
     Returns:
         list[str]: デインタレース関連引数
     """
 
+    encoder = pattern.encoder
+    fps_mode = pattern.fps_mode
+
     if fps_mode == '30p':
         # 60i -> 30p single-field deinterlace
         if encoder == 'qsv':
+            if pattern.qsv_deint_filter == 'yadif':
+                # OpenCL ベースの yadif デインタレース (VEBOX を経由しない)
+                ## Arrow Lake の VEBOX + HEVC 10bit 問題の切り分けに使う
+                return ['--vpp-yadif']
             # QSVEncC: VEBOX デインタレース (normal モード)
-            ## Arrow Lake + intel-media-driver の古いバージョンでは crash する問題があったが、
-            ## パッチ適用済みの環境なら動作する
-            return ['--vpp-deinterlace', 'normal']
+            ## 日本の BS/CS 放送でたまに流れる RFF 映像は基本的に TFF 素材
+            ## QSVEncC の AUTO deinterlace 判定は progressive + RFF field flags を誤って tff <-> prog と見なすことがある
+            ## その結果 VPP reset が乱発して挙動が不安定になる（？）ため、このテストでは明示的に normal_tff を使う
+            return ['--vpp-deinterlace', 'normal_tff']
         # NVEncC: CUDA による yadif デインタレース (default mode=0, single rate)
         ## --vpp-afs や --vpp-nnedi に比べて速度と品質のバランスが良い
         return ['--vpp-yadif']
@@ -248,21 +317,55 @@ def build_deinterlace_args(encoder: Encoder, fps_mode: FpsMode) -> list[str]:
     # fps_mode == '60p'
     ## 60i -> 60p bob deinterlace
     if encoder == 'qsv':
+        if pattern.qsv_deint_filter == 'yadif':
+            # OpenCL ベースの yadif bob デインタレース (VEBOX を経由しない)
+            return ['--vpp-yadif', 'mode=bob']
         # QSVEncC: VEBOX デインタレース (bob モード)
-        return ['--vpp-deinterlace', 'bob']
+        ## 日本の BS/CS 放送でたまに流れる RFF 映像は基本的に TFF 素材
+        ## QSVEncC の AUTO deinterlace 判定は progressive + RFF field flags を誤って tff <-> prog と見なすことがある
+        ## その結果 VPP reset が乱発して挙動が不安定になる（？）ため、このテストでは明示的に bob_tff を使う
+        return ['--vpp-deinterlace', 'bob_tff']
     # NVEncC: CUDA yadif の bob モード (フィールドごとに 1 フレーム出力)
     return ['--vpp-yadif', 'mode=bob']
 
 
-def build_qsv_quality_args() -> list[str]:
+def build_qsv_quality_args(pattern: EncodePattern) -> list[str]:
     """
     QSVEncC の品質関連引数を組み立てる (rigaya 氏推奨設定)
+
+    Args:
+        pattern (EncodePattern): エンコードパターン
 
     Returns:
         list[str]: QSVEncC 品質関連引数
     """
 
-    return [
+    # simple は、HEVC encode 側の複雑な先読み・適応制御を極力外した対照群として使う
+    ## これでも hang するなら、EncTools / LookAhead / B-frame pressure よりも、
+    ## VPP output surface から HCPEnc へ渡る基礎経路の問題を優先して疑う
+    if pattern.qsv_quality_profile == 'simple':
+        return [
+            '--icq', '21',
+            '-b', '0',
+        ]
+
+    # low-surface は、B frame 階層参照と LookAhead による surface 保持量をまとめて減らす
+    ## default / no-la との差で、HCPEnc 側の参照保持量が hang の直接条件かを切り分ける
+    if pattern.qsv_quality_profile == 'low-surface':
+        return [
+            '--icq', '21',
+            '-b', '0',
+            '--extbrc',
+            '--mbbrc',
+            '--scenario-info', 'game_streaming',
+            '--tune', 'perceptual',
+            '--i-adapt',
+            '--weightp',
+            '--adapt-ref',
+            '--adapt-cqm',
+        ]
+
+    qsv_quality_args = [
         # ICQ (Intelligent Constant Quality) モード
         ## 21 は「MPEG-2 からの画質劣化をほぼ知覚できない」塩梅の目安
         '--icq', '21',
@@ -290,6 +393,15 @@ def build_qsv_quality_args() -> list[str]:
         '--adapt-ltr',
         # 量子化行列の適応制御
         '--adapt-cqm',
+    ]
+
+    # no-la は LookAhead だけを外し、それ以外の高画質設定は維持する
+    ## これで hang が消えるなら、LookAhead の future surface 保持が直接条件の可能性が高い
+    if pattern.qsv_quality_profile == 'no-la':
+        return qsv_quality_args
+
+    return [
+        *qsv_quality_args,
         # look-ahead 品質制御
         '--la-depth', '60',
         '--la-quality', 'slow',
@@ -338,11 +450,11 @@ def build_encoder_args(pattern: EncodePattern) -> list[str]:
     args += build_common_encoder_args(pattern)
 
     # デインタレース/フレームレート変換
-    args += build_deinterlace_args(pattern.encoder, pattern.fps_mode)
+    args += build_deinterlace_args(pattern)
 
     # 品質関連引数 (エンコーダーごとに異なる)
     if pattern.encoder == 'qsv':
-        args += build_qsv_quality_args()
+        args += build_qsv_quality_args(pattern)
     else:
         args += build_nvenc_quality_args()
 
@@ -354,9 +466,17 @@ def build_tsreplace_command(
     input_path: Path,
     output_path: Path,
     pattern: EncodePattern,
-) -> list[str]:
+) -> list[str] | str:
     """
-    tsreplace -e モードのコマンドを組み立てる
+    tsreplace のコマンドを組み立てる
+
+    tsreplace_mode == 'enc' の場合: tsreplace -e モード (従来の動作)
+      → list[str] を返す (tsreplace が encoder を直接起動する)
+
+    tsreplace_mode == 'pipe' の場合: パイプ渡しモード (rigaya 氏推奨)
+      → シェルコマンド文字列を返す (shell=True で実行する)
+      encoder の stdout を shell pipe で tsreplace -r に渡す
+      ref: https://github.com/rigaya/tsreplace の「基本的な使用方法」セクション
 
     Args:
         tsreplace_binary (str): tsreplace バイナリの絶対パス (shutil.which() 経由で解決する)
@@ -365,17 +485,53 @@ def build_tsreplace_command(
         pattern (EncodePattern): エンコードパターン
 
     Returns:
-        list[str]: tsreplace のコマンドライン全体
+        list[str] | str: -e モードの場合はコマンドライン引数リスト、
+            パイプ渡しモードの場合は shell=True 用のコマンド文字列
     """
 
     # encoder バイナリを KonomiTV の LIBRARY_PATH から取得
     ## この環境の絶対パスに依存しないように、必ず LIBRARY_PATH 経由で解決する
     encoder_binary = LIBRARY_PATH['QSVEncC'] if pattern.encoder == 'qsv' else LIBRARY_PATH['NVEncC']
 
-    # encoder 引数を組み立てる
-    encoder_args = build_encoder_args(pattern)
+    if pattern.tsreplace_mode == 'pipe':
+        # パイプ渡しモード: encoder がファイルから直接入力し、stdout に mpegts を出力
+        ## tsreplace は -r (replace) オプションで encoder の stdout を受け取る
+        ## この方式では encoder 側の stdin pipe が不要なため、backpressure が -e モードの半分になる
+        ## Python の subprocess.PIPE を介すとバッファリングや SIGPIPE のタイミングが変わるため、
+        ## shell=True でシェルの pipe を直接使う
+        encoder_args = build_encoder_args(pattern)
+        # パイプ渡しモードでは encoder が直接ファイルから読むので、-i と --input-format を上書きする
+        # build_encoder_args() は -i - / --input-format mpegts を返すので、それを置き換える
+        pipe_encoder_args: list[str] = []
+        skip_next = False
+        for i, arg in enumerate(encoder_args):
+            if skip_next:
+                skip_next = False
+                continue
+            # -i - を -i <input_path> に置き換える
+            if arg == '-i' and i + 1 < len(encoder_args) and encoder_args[i + 1] == '-':
+                pipe_encoder_args += ['-i', str(input_path)]
+                skip_next = True
+                continue
+            pipe_encoder_args.append(arg)
+        # shell=True 用のコマンド文字列を組み立てる
+        ## shlex.quote() で各引数を安全にエスケープする
+        encoder_part = ' '.join(shlex.quote(a) for a in [encoder_binary, *pipe_encoder_args])
+        tsreplace_part = ' '.join(shlex.quote(a) for a in [
+            tsreplace_binary,
+            '-i', str(input_path),
+            '-r', '-',
+            '-o', str(output_path),
+        ])
+        # pipe mode は encoder と tsreplace の終了コードを両方見る必要がある
+        ## /bin/sh のデフォルトでは pipeline の最後にある tsreplace の終了コードだけが返り、
+        ## encoder 側で GPU hang しても tsreplace が正常終了すると成功扱いになってしまう
+        ## bash の pipefail を有効にして、encoder 側の失敗も matrix 結果に反映する
+        pipeline_command = f'{encoder_part} | {tsreplace_part}'
+        return f'bash -o pipefail -c {shlex.quote(pipeline_command)}'
 
-    # tsreplace のコマンド
+    # -e モード (従来の動作): tsreplace が encoder を直接起動する
+    encoder_args = build_encoder_args(pattern)
     return [
         tsreplace_binary,
         '-i', str(input_path),
@@ -390,6 +546,7 @@ def build_tsreplace_command(
 def run_patterns_in_batches(
     tsreplace_binary: str,
     input_path: Path,
+    output_dir: Path,
     patterns: list[EncodePattern],
     concurrency: int,
 ) -> list[EncodeResult]:
@@ -402,6 +559,7 @@ def run_patterns_in_batches(
     Args:
         tsreplace_binary (str): tsreplace バイナリの絶対パス
         input_path (Path): 入力 TS ファイル
+        output_dir (Path): 出力 TS ファイルを保存するディレクトリ
         patterns (list[EncodePattern]): 実行するエンコードパターンのリスト
         concurrency (int): 1 バッチあたりの同時実行数 (1 以上)
 
@@ -419,25 +577,39 @@ def run_patterns_in_batches(
         launched: list[LaunchedProcess] = []
         for pattern in batch:
             # 出力ファイルパスを組み立てる
-            ## 例: .../foo.ts -> .../foo.avc.qsv30p.ts
-            output_path = input_path.with_suffix(f'.{pattern.suffix}.ts')
+            ## 例: /input/foo.ts + output_dir + avc.qsv30p -> /output/foo.avc.qsv30p.ts
+            ## 入力 TS と別ディレクトリに出力できるようにし、録画保存先に検証ファイルを増やさない
+            output_path = output_dir / input_path.with_suffix(f'.{pattern.suffix}.ts').name
 
             # tsreplace コマンドを組み立てる
-            cmd = build_tsreplace_command(tsreplace_binary, input_path, output_path, pattern)
+            cmd_or_pair = build_tsreplace_command(tsreplace_binary, input_path, output_path, pattern)
 
-            # ログ出力 (起動するコマンドを明示する)
-            print(f'[{pattern.suffix}] Launching tsreplace...', flush=True)
-            print(f'[{pattern.suffix}] {" ".join(cmd)}', flush=True)
-
-            # subprocess を起動 (stdout/stderr は親プロセスから継承)
-            ## これにより encoder と tsreplace の進捗ログがそのまま端末に流れる
             start_time = time.perf_counter()
-            process: subprocess.Popen[bytes] = subprocess.Popen(
-                cmd,
-                stdin=subprocess.DEVNULL,  # tsreplace は -i で入力を指定するので stdin は不要
-                stdout=None,  # 親から継承
-                stderr=None,  # 親から継承
-            )
+            if isinstance(cmd_or_pair, str):
+                # パイプ渡しモード: shell=True で encoder | tsreplace -r - のパイプラインを実行
+                ## Python の subprocess.PIPE を介すとバッファリングや SIGPIPE のタイミングが変わり
+                ## 出力が途中で切れる問題があるため、shell の pipe を直接使う
+                print(f'[{pattern.suffix}] Launching encoder | tsreplace (pipe mode)...', flush=True)
+                print(f'[{pattern.suffix}] {cmd_or_pair}', flush=True)
+                process: subprocess.Popen[bytes] = subprocess.Popen(
+                    cmd_or_pair,
+                    shell=True,
+                    stdin=subprocess.DEVNULL,
+                    stdout=None,  # 親から継承
+                    stderr=None,  # 親から継承
+                )
+            else:
+                # -e モード (従来の動作)
+                cmd = cmd_or_pair
+                print(f'[{pattern.suffix}] Launching tsreplace...', flush=True)
+                print(f'[{pattern.suffix}] {" ".join(cmd)}', flush=True)
+                process = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.DEVNULL,  # tsreplace は -i で入力を指定するので stdin は不要
+                    stdout=None,  # 親から継承
+                    stderr=None,  # 親から継承
+                )
+
             launched.append(LaunchedProcess(
                 pattern=pattern,
                 process=process,
@@ -485,15 +657,6 @@ def analyze_pcr(path: Path) -> PCRInfo:
     Raises:
         RuntimeError: PCR が見つからないか、PMT から PCR_PID を取得できなかった場合
     """
-
-    # biim / ctypes を関数内で遅延インポートする
-    ## (スクリプト冒頭でインポートすると biim 未インストール環境で全体が壊れるため)
-    import ctypes
-
-    from biim.mpeg2ts import ts
-    from biim.mpeg2ts.parser import SectionParser
-    from biim.mpeg2ts.pat import PATSection
-    from biim.mpeg2ts.pmt import PMTSection
 
     libc = ctypes.CDLL('libc.so.6', use_errno=True)
     POSIX_FADV_DONTNEED = 4
@@ -767,12 +930,27 @@ app = typer.Typer(add_completion=False)
 @app.command(help='tsreplace + QSVEncC/NVEncC の複数パターン横断検証を実行する')
 def main(
     input_path: Path = typer.Argument(..., exists=True, file_okay=True, dir_okay=False, readable=True, resolve_path=True, help='Input TS file (60i source).'),
+    output_dir: Path | None = typer.Option(None, '--output-dir', file_okay=False, dir_okay=True, writable=True, resolve_path=True, help='Directory to write encoded TS files. Defaults to the input file directory.'),
     concurrency: int = typer.Option(3, '--concurrency', '-c', min=1, max=6, help='Number of concurrent encodes per codec group.'),
     only_codec: str | None = typer.Option(None, '--only-codec', help='Run only the specified codec (h264 or hevc).'),
     only_encoder: str | None = typer.Option(None, '--only-encoder', help='Run only the specified encoder (qsv or nvenc).'),
     only_fps: str | None = typer.Option(None, '--only-fps', help='Run only the specified fps mode (30p, 24p, or 60p).'),
+    # デバッグ用拡張パターン (デフォルト無効、明示的に指定された時のみ有効)
+    ## Arrow Lake の VEBOX + HEVC GPU hang 問題の切り分けに使う追加パターン群
+    include_hevc_8bit: bool = typer.Option(False, '--include-hevc-8bit', help='[Debug] Include HEVC 8bit patterns (tests if 10bit-specific issue).'),
+    include_yadif: bool = typer.Option(False, '--include-yadif', help='[Debug] Include QSV --vpp-yadif patterns (tests if VEBOX-specific issue).'),
+    include_pipe_mode: bool = typer.Option(False, '--include-pipe-mode', help='[Debug] Include tsreplace pipe mode patterns (tests if -e mode pipe issue).'),
+    include_no_deband: bool = typer.Option(False, '--include-no-deband', help='[Debug] Add no-deband variants for QSV HEVC patterns.'),
+    qsv_quality_profile: QSVQualityProfile = typer.Option('default', '--qsv-quality-profile', help='QSV quality profile for all QSV patterns.'),
+    only_deband: DebandState = typer.Option('any', '--only-deband', help='Filter deband state: any, enabled, or disabled.'),
+    debug_all: bool = typer.Option(False, '--debug-all', help='[Debug] Enable all debug patterns (equivalent to --include-hevc-8bit --include-yadif --include-pipe-mode --include-no-deband).'),
 ) -> None:
     """エントリーポイント"""
+
+    # 出力先を明示できるようにし、録画保存先に検証用 TS を生成しない運用を可能にする
+    if output_dir is None:
+        output_dir = input_path.parent
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     # tsreplace バイナリを PATH から解決する (環境依存の絶対パスを使わない)
     tsreplace_binary = shutil.which('tsreplace')
@@ -798,27 +976,153 @@ def main(
     typer.echo(SEPARATOR)
     typer.echo(f'Input:       {input_path}')
     typer.echo(f'Size:        {input_path.stat().st_size / 1024 / 1024 / 1024:.2f} GB')
+    typer.echo(f'Output dir:  {output_dir}')
     typer.echo(f'Concurrency: {concurrency} per codec group')
     typer.echo(f'tsreplace:   {tsreplace_binary}')
     typer.echo(f'QSVEncC:     {qsvencc_binary}')
     typer.echo(f'NVEncC:      {nvencc_binary}')
     typer.echo(SEPARATOR)
 
-    # 全 12 パターンを定義
+    # --debug-all が指定されていたら全てのデバッグパターンを有効化する
+    if debug_all is True:
+        include_hevc_8bit = True
+        include_yadif = True
+        include_pipe_mode = True
+        include_no_deband = True
+
+    def _pattern(
+        codec: Codec,
+        encoder: Encoder,
+        fps_mode: FPSMode,
+        hevc_bit_depth: HEVCBitDepth = '10bit',
+        tsreplace_mode: TSReplaceMode = 'enc',
+        qsv_deint_filter: QSVDeintFilter = 'vebox',
+        use_deband: bool = True,
+    ) -> EncodePattern:
+        """
+        CLI で指定された共通 QSV 品質プロファイルを反映した EncodePattern を生成する。
+
+        Args:
+            codec (Codec): 出力コーデック
+            encoder (Encoder): 使用エンコーダー
+            fps_mode (FPSMode): フレームレートモード
+            hevc_bit_depth (HEVCBitDepth): HEVC のビット深度
+            tsreplace_mode (TSReplaceMode): tsreplace 接続モード
+            qsv_deint_filter (QSVDeintFilter): QSV デインタレースフィルタ
+            use_deband (bool): `--vpp-deband` を有効にするか
+
+        Returns:
+            EncodePattern: 共通 QSV 品質プロファイルを反映したエンコードパターン
+        """
+
+        return EncodePattern(
+            codec=codec,
+            encoder=encoder,
+            fps_mode=fps_mode,
+            hevc_bit_depth=hevc_bit_depth,
+            tsreplace_mode=tsreplace_mode,
+            qsv_deint_filter=qsv_deint_filter,
+            use_deband=use_deband,
+            qsv_quality_profile=qsv_quality_profile if encoder == 'qsv' else 'default',
+        )
+
+    # 通常の 12 パターンを定義
     all_patterns: list[EncodePattern] = [
-        EncodePattern(codec='h264', encoder='qsv', fps_mode='30p'),
-        EncodePattern(codec='h264', encoder='qsv', fps_mode='24p'),
-        EncodePattern(codec='h264', encoder='qsv', fps_mode='60p'),
-        EncodePattern(codec='h264', encoder='nvenc', fps_mode='30p'),
-        EncodePattern(codec='h264', encoder='nvenc', fps_mode='24p'),
-        EncodePattern(codec='h264', encoder='nvenc', fps_mode='60p'),
-        EncodePattern(codec='hevc', encoder='qsv', fps_mode='30p'),
-        EncodePattern(codec='hevc', encoder='qsv', fps_mode='24p'),
-        EncodePattern(codec='hevc', encoder='qsv', fps_mode='60p'),
-        EncodePattern(codec='hevc', encoder='nvenc', fps_mode='30p'),
-        EncodePattern(codec='hevc', encoder='nvenc', fps_mode='24p'),
-        EncodePattern(codec='hevc', encoder='nvenc', fps_mode='60p'),
+        _pattern(codec='h264', encoder='qsv', fps_mode='30p'),
+        _pattern(codec='h264', encoder='qsv', fps_mode='24p'),
+        _pattern(codec='h264', encoder='qsv', fps_mode='60p'),
+        _pattern(codec='h264', encoder='nvenc', fps_mode='30p'),
+        _pattern(codec='h264', encoder='nvenc', fps_mode='24p'),
+        _pattern(codec='h264', encoder='nvenc', fps_mode='60p'),
+        _pattern(codec='hevc', encoder='qsv', fps_mode='30p'),
+        _pattern(codec='hevc', encoder='qsv', fps_mode='24p'),
+        _pattern(codec='hevc', encoder='qsv', fps_mode='60p'),
+        _pattern(codec='hevc', encoder='nvenc', fps_mode='30p'),
+        _pattern(codec='hevc', encoder='nvenc', fps_mode='24p'),
+        _pattern(codec='hevc', encoder='nvenc', fps_mode='60p'),
     ]
+
+    # デバッグ用拡張パターンを追加 (各フラグで明示的に有効化された場合のみ)
+    ## Arrow Lake の VEBOX + HEVC GPU hang 問題の切り分けに使う
+    if include_hevc_8bit is True:
+        # HEVC 8bit パターン: 10bit 固有の問題かを検証する
+        ## Arrow Lake の QSV HEVC + DI 問題は、10bit のみで発生するとは限らないため、
+        ## 8bit でも同じ入力・同じ接続方式で確認し、P010 固有問題かどうかを切り分ける
+        all_patterns += [
+            _pattern(codec='hevc', encoder='qsv', fps_mode='30p', hevc_bit_depth='8bit'),
+            _pattern(codec='hevc', encoder='qsv', fps_mode='60p', hevc_bit_depth='8bit'),
+        ]
+    if include_yadif is True:
+        # QSV --vpp-yadif パターン: VEBOX を経由しない OpenCL デインタレースで検証する
+        ## yadif は VEBOX DI と異なる VPP 経路を通るため、hang が VEBOX 固有なのか、
+        ## HEVC encode 側・OpenCL VPP 側・tsreplace 接続側にも広がるのかを比較できる
+        all_patterns += [
+            _pattern(codec='hevc', encoder='qsv', fps_mode='30p', qsv_deint_filter='yadif'),
+            _pattern(codec='hevc', encoder='qsv', fps_mode='60p', qsv_deint_filter='yadif'),
+        ]
+    if include_pipe_mode is True:
+        # tsreplace パイプ渡しモード: -e モードの双方向 pipe が問題かを検証する
+        ## パイプ渡しモードでは encoder がファイルから直接読み、stdout のみを tsreplace に pipe 渡しする
+        ## これにより backpressure が -e モード (双方向 pipe) の半分になる
+        ## パイプ渡しモードで GPU hang が発生しなければ、-e モードの pipe ハンドリングに問題がある
+        # VEBOX (--vpp-deinterlace) を使うパターン
+        all_patterns += [
+            _pattern(codec='hevc', encoder='qsv', fps_mode='30p', tsreplace_mode='pipe'),
+            _pattern(codec='hevc', encoder='qsv', fps_mode='60p', tsreplace_mode='pipe'),
+        ]
+        # VEBOX を使わない (--vpp-yadif) パターン
+        ## pipe モードで出力が不完全になる問題が VEBOX 起因なのか、pipe 接続自体の問題なのかを切り分ける
+        ## yadif + pipe でも出力が不完全なら、パイプ渡しモードの実装自体に問題がある (VEBOX とは無関係の別件)
+        all_patterns += [
+            _pattern(codec='hevc', encoder='qsv', fps_mode='30p', tsreplace_mode='pipe', qsv_deint_filter='yadif'),
+        ]
+
+    if include_no_deband is True:
+        # QSV HEVC の no-deband パターンを追加する
+        ## deband は OpenCL VPP を 1 段追加するため、VEBOX -> OpenCL -> HCPEnc の engine 境界や
+        ## surface 再利用タイミングが GPU hang に影響しているかを通常パターンと同じ条件で比較する
+        no_deband_patterns: list[EncodePattern] = []
+        existing_keys = {
+            (
+                pattern.codec,
+                pattern.encoder,
+                pattern.fps_mode,
+                pattern.hevc_bit_depth,
+                pattern.tsreplace_mode,
+                pattern.qsv_deint_filter,
+                pattern.use_deband,
+                pattern.qsv_quality_profile,
+            )
+            for pattern in all_patterns
+        }
+        for pattern in all_patterns:
+            if pattern.codec != 'hevc' or pattern.encoder != 'qsv' or pattern.use_deband is False:
+                continue
+            no_deband_pattern = EncodePattern(
+                codec=pattern.codec,
+                encoder=pattern.encoder,
+                fps_mode=pattern.fps_mode,
+                hevc_bit_depth=pattern.hevc_bit_depth,
+                tsreplace_mode=pattern.tsreplace_mode,
+                qsv_deint_filter=pattern.qsv_deint_filter,
+                use_deband=False,
+                qsv_quality_profile=pattern.qsv_quality_profile,
+            )
+            no_deband_key = (
+                no_deband_pattern.codec,
+                no_deband_pattern.encoder,
+                no_deband_pattern.fps_mode,
+                no_deband_pattern.hevc_bit_depth,
+                no_deband_pattern.tsreplace_mode,
+                no_deband_pattern.qsv_deint_filter,
+                no_deband_pattern.use_deband,
+                no_deband_pattern.qsv_quality_profile,
+            )
+            if no_deband_key in existing_keys:
+                continue
+            existing_keys.add(no_deband_key)
+            no_deband_patterns.append(no_deband_pattern)
+        all_patterns += no_deband_patterns
 
     # フィルタ (--only-codec / --only-encoder / --only-fps が指定されている場合)
     def _pattern_matches(pattern: EncodePattern) -> bool:
@@ -827,6 +1131,10 @@ def main(
         if only_encoder is not None and pattern.encoder != only_encoder:
             return False
         if only_fps is not None and pattern.fps_mode != only_fps:
+            return False
+        if only_deband == 'enabled' and pattern.use_deband is False:
+            return False
+        if only_deband == 'disabled' and pattern.use_deband is True:
             return False
         return True
 
@@ -848,7 +1156,7 @@ def main(
         typer.echo(SEPARATOR)
         phase1_start = time.perf_counter()
         h264_results = run_patterns_in_batches(
-            tsreplace_binary, input_path, h264_patterns, concurrency,
+            tsreplace_binary, input_path, output_dir, h264_patterns, concurrency,
         )
         phase1_elapsed = time.perf_counter() - phase1_start
         typer.echo(f'\nPhase 1 complete in {phase1_elapsed:.1f} sec')
@@ -861,7 +1169,7 @@ def main(
         typer.echo(SEPARATOR)
         phase2_start = time.perf_counter()
         h265_results = run_patterns_in_batches(
-            tsreplace_binary, input_path, h265_patterns, concurrency,
+            tsreplace_binary, input_path, output_dir, h265_patterns, concurrency,
         )
         phase2_elapsed = time.perf_counter() - phase2_start
         typer.echo(f'\nPhase 2 complete in {phase2_elapsed:.1f} sec')

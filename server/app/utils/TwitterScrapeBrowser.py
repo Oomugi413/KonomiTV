@@ -2,18 +2,28 @@ import asyncio
 import atexit
 import base64
 import json
+import platform as platform_module
 import random
+import re
+import sys
 import time
-from typing import Any, ClassVar
+from datetime import datetime
+from typing import Any, ClassVar, cast
 
 import anyio
 import psutil
 from fastapi import UploadFile
 from pydantic import BaseModel
+from typing_extensions import TypedDict
 from zendriver import Browser, Tab, cdp
 
-from app import logging
-from app.constants import STATIC_DIR
+from app import logging, schemas
+from app.constants import (
+    JST,
+    STATIC_DIR,
+    TWITTER_DEBUG_SCREENSHOTS_DIR,
+    TWITTER_DEBUG_SCREENSHOTS_RETENTION_DAYS,
+)
 from app.models.TwitterAccount import TwitterAccount
 
 
@@ -60,6 +70,23 @@ class TwitterScrapeBrowser:
 
     # Python プロセス終了時に取り残しなくブラウザを回収するため、起動したブラウザ親プロセスを保持する
     _active_browser_processes: ClassVar[dict[int, psutil.Process]] = {}
+    # Chrome の User-Agent 簡略化後も文字列に残る OS 表記
+    ## 細かい OS バージョンは UA-CH 側に移され、User-Agent には丸められた表記だけが残る
+    _UA_OS_INFO_BY_PLATFORM: ClassVar[dict[str, str]] = {
+        'macOS': 'Macintosh; Intel Mac OS X 10_15_7',
+        'Windows': 'Windows NT 10.0; Win64; x64',
+        'Linux': 'X11; Linux x86_64',
+    }
+    # navigator.platform が空だった場合に使う OS ごとの代表値
+    _NAVIGATOR_PLATFORM_BY_PLATFORM: ClassVar[dict[str, str]] = {
+        'macOS': 'MacIntel',
+        'Windows': 'Win32',
+        'Linux': 'Linux x86_64',
+    }
+    # Cookie 採取元ブラウザの情報がない既存アカウント向けに、日本語ロケールを名乗るための既定の言語設定
+    ## 保存値がない場合だけこの既定値を使い、x.com へ `Accept-Language: en-US` を送信しないようにする
+    _FALLBACK_ACCEPT_LANGUAGE: ClassVar[str] = 'ja,en;q=0.9'
+    _FALLBACK_ACCEPT_LANGUAGES: ClassVar[tuple[str, ...]] = ('ja', 'en')
 
     def __init__(self, twitter_account: TwitterAccount) -> None:
         """
@@ -91,6 +118,389 @@ class TwitterScrapeBrowser:
         ログのプレフィックス
         """
         return f'[TwitterScrapeBrowser][@{self.twitter_account.screen_name}]'
+
+    async def _detectCurrentUserAgent(self, page: Tab) -> str | None:
+        """
+        現在のヘッドレスブラウザが JavaScript 上で公開している User-Agent を取得する
+
+        Args:
+            page (Tab): 情報取得に使うタブ
+
+        Returns:
+            str | None: 現在の User-Agent
+        """
+
+        # ZenDriver は headless=True で起動した際に User-Agent 文字列から "HeadlessChrome" の "Headless" を除去するため、
+        # Browser.getVersion() ではなく、ページ上で実際に見える navigator.userAgent を読む
+        result, exception = await page.send(cdp.runtime.evaluate(
+            expression='navigator.userAgent',
+            return_by_value=True,
+        ))
+        # User-Agent が取れない場合は OS 表現を差し替えられないため、補正せずに続行する
+        if exception is not None:
+            logging.warning(f'{self.log_prefix} Failed to detect current User-Agent. exception: {exception}')
+            return None
+        if not isinstance(result.value, str) or result.value == '':
+            logging.warning(f'{self.log_prefix} Current User-Agent result is invalid. value: {result.value}')
+            return None
+        return result.value
+
+    def _buildSpoofedUserAgent(self, server_user_agent: str, cookie_platform: str) -> str | None:
+        """
+        ヘッドレスブラウザの User-Agent 文字列から、OS 部分だけを Cookie 採取元ブラウザの OS 表現へ差し替える
+
+        Args:
+            server_user_agent (str): ヘッドレスブラウザの現在の User-Agent 文字列
+            cookie_platform (str): Cookie 採取元ブラウザの platform
+
+        Returns:
+            str | None: 差し替え後の User-Agent 文字列
+        """
+
+        spoofed_os_info = self._UA_OS_INFO_BY_PLATFORM.get(cookie_platform)
+        if spoofed_os_info is None:
+            return None
+
+        # Chrome のバージョンは現在の環境に合わせ、OS 表現だけを Cookie 採取元に合わせる
+        spoofed_user_agent = re.sub(
+            r'^(Mozilla/5\.0 \()[^)]+(\))',
+            rf'\g<1>{spoofed_os_info}\g<2>',
+            server_user_agent,
+            count=1,
+        )
+        # 想定外の UA 形式では置換できないため、壊れた文字列を作らず補正をやめる
+        ## 同じ OS の場合は置換前後が同じ文字列になるため、正規表現に一致したかだけを見る
+        if re.match(r'^(Mozilla/5\.0 \()[^)]+(\))', server_user_agent) is None:
+            return None
+        return spoofed_user_agent
+
+    def _buildAcceptLanguage(self, accept_languages: Any) -> str | None:
+        """
+        保存済み Accept-Language 言語タグ配列を CDP に渡す文字列へ変換する
+
+        Args:
+            accept_languages (Any): HTTP Accept-Language から q 値を除去した言語タグ配列
+
+        Returns:
+            str | None: CDP に渡す Accept-Language
+        """
+
+        # CDP には q 値を除いた言語タグだけを渡し、実際の重み付けは Chrome に任せる
+        ## `en;q=0.9` みたいな q 値付き文字列をそのまま渡すと、Chrome 側で重みが二重に付く
+        if not isinstance(accept_languages, list):
+            return None
+
+        # 空文字や非文字列は保存値として不自然なので、CDP に渡す前に除外する
+        normalized_languages = [
+            language.strip()
+            for language in accept_languages
+            if isinstance(language, str) and language.strip() != ''
+        ]
+        # 有効な言語がない場合は空のヘッダーを作らず、Chrome の既定値に任せる
+        if len(normalized_languages) == 0:
+            return None
+
+        return ','.join(normalized_languages)
+
+    def _buildFallbackBrowserEnvironmentInfo(self) -> schemas.BrowserEnvironmentInfo | None:
+        """
+        Cookie 認証時にブラウザ環境情報を保存していない既存アカウント向けのフォールバックとして、
+        サーバーの実行環境から最低限のブラウザ環境情報を組み立てる
+
+        Returns:
+            schemas.BrowserEnvironmentInfo | None: ヘッドレスブラウザに反映するフォールバック用ブラウザ情報
+        """
+
+        # 既存アカウントは Cookie 再認証後までブラウザ環境情報を持たないため、サーバー OS の情報から代替値を作る
+        ## 保存値がないまま CDP 設定を省くと、headless=True の ZenDriver 既定の UA-CH と Accept-Language がそのまま送信されてしまう
+        system_name = platform_module.system()
+        if system_name == 'Darwin':
+            browser_platform = 'macOS'
+            platform_version = platform_module.mac_ver()[0]
+        elif system_name == 'Windows':
+            browser_platform = 'Windows'
+            platform_version = platform_module.version()
+        elif system_name == 'Linux':
+            browser_platform = 'Linux'
+            platform_version = platform_module.release().split('-', maxsplit=1)[0]
+        else:
+            logging.warning(
+                f'{self.log_prefix} Server OS is unsupported for fallback UA override. '
+                f'system_name: {system_name}',
+            )
+            return None
+
+        # UA-CH の architecture / bitness は、実行中サーバーの CPU 情報を Chrome での表記へ変換する
+        ## 画面サイズ・メモリ・CPU コア数のような変動しやすい値は、Cookie 認証時点の固定値ではなく実行中のサーバー環境の値を使う
+        machine = platform_module.machine().lower()
+        if machine in ('aarch64', 'arm64') or machine.startswith('arm'):
+            architecture = 'arm'
+        else:
+            architecture = 'x86'
+        bitness = '64' if sys.maxsize > 2 ** 32 else '32'
+
+        # navigator.platform は UA-CH とは別に JavaScript から見えるため、OS と CPU に合う代表値を入れる
+        if browser_platform == 'macOS':
+            navigator_platform = 'MacIntel'
+        elif browser_platform == 'Windows':
+            navigator_platform = 'Win32'
+        elif architecture == 'arm':
+            navigator_platform = 'Linux aarch64' if bitness == '64' else 'Linux armv7l'
+        else:
+            navigator_platform = 'Linux x86_64' if bitness == '64' else 'Linux i686'
+
+        fallback_browser_info = schemas.BrowserEnvironmentInfo(
+            http_headers=schemas.BrowserEnvironmentHTTPHeaders(
+                user_agent=None,
+                accept_language=self._FALLBACK_ACCEPT_LANGUAGE,
+                accept_languages=list(self._FALLBACK_ACCEPT_LANGUAGES),
+                sec_ch_ua=None,
+                sec_ch_ua_mobile=None,
+                sec_ch_ua_platform=f'"{browser_platform}"',
+            ),
+            user_agent_data=schemas.BrowserEnvironmentUserAgentData(
+                platform=browser_platform,
+                platform_version=platform_version,
+                architecture=architecture,
+                bitness=bitness,
+                mobile=False,
+                model='',
+                wow64=False,
+            ),
+            navigator_platform=navigator_platform,
+            locale='ja',
+            timezone='Asia/Tokyo',
+        )
+        logging.info(
+            f'{self.log_prefix} Built fallback browser info for UA override. '
+            f'platform: {browser_platform}, architecture: {architecture}, bitness: {bitness}, '
+            f'navigator_platform: {navigator_platform}, accept_language: {self._FALLBACK_ACCEPT_LANGUAGE}',
+        )
+        return fallback_browser_info
+
+    async def _detectOverriddenNavigatorInfo(self, page: Tab) -> dict[str, Any] | None:
+        """
+        UA / UA-CH override 適用後に navigator から見える値を取得する
+
+        Args:
+            page (Tab): 情報取得に使うタブ
+
+        Returns:
+            dict[str, Any] | None: override 後の navigator 情報
+        """
+
+        # navigator / Intl から見える値をログに残し、User-Agent 補正後の状態を確認する
+        result, exception = await page.send(cdp.runtime.evaluate(
+            expression='''
+            (async () => {
+                const userAgentData = navigator.userAgentData;
+                let highEntropyValues = null;
+                if (typeof userAgentData?.getHighEntropyValues === 'function') {
+                    highEntropyValues = await userAgentData.getHighEntropyValues([
+                        'architecture',
+                        'bitness',
+                        'brands',
+                        'fullVersionList',
+                        'mobile',
+                        'model',
+                        'platform',
+                        'platformVersion',
+                        'uaFullVersion',
+                        'wow64',
+                    ]);
+                } else if (userAgentData) {
+                    highEntropyValues = {
+                        brands: userAgentData.brands ?? [],
+                        mobile: userAgentData.mobile ?? false,
+                        platform: userAgentData.platform ?? '',
+                    };
+                }
+                return {
+                    userAgent: navigator.userAgent,
+                    platform: navigator.platform,
+                    language: navigator.language,
+                    languages: navigator.languages,
+                    locale: Intl.DateTimeFormat().resolvedOptions().locale,
+                    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                    userAgentData: highEntropyValues,
+                };
+            })()
+            ''',
+            await_promise=True,
+            return_by_value=True,
+        ))
+        # ログ用の取得に失敗しても補正処理は完了しているため、セットアップは続ける
+        if exception is not None:
+            logging.warning(f'{self.log_prefix} Failed to verify overridden navigator info. exception: {exception}')
+            return None
+        if not isinstance(result.value, dict):
+            logging.warning(f'{self.log_prefix} Overridden navigator info result is invalid. value: {result.value}')
+            return None
+        return result.value
+
+    def _logNetworkResponseDiagnostics(
+        self,
+        reason: str,
+        status_code: int | None,
+        headers: dict[str, Any] | None,
+        response_text: str | None,
+    ) -> None:
+        """
+        CDP Network で取得したレスポンスの診断情報をログに出力する
+
+        Args:
+            reason (str): 診断ログを出力する理由
+            status_code (int | None): HTTP ステータスコード
+            headers (dict[str, Any] | None): HTTP レスポンスヘッダー
+            response_text (str | None): HTTP レスポンス本文
+        """
+
+        # JSON パース失敗時は本文だけでは原因を追いづらいため、ステータスコードと HTTP レスポンスヘッダーも出力する
+        logging.error(f'{self.log_prefix} {reason}. status_code: {status_code}')
+        logging.error(f'{self.log_prefix} Response headers: {json.dumps(headers or {}, ensure_ascii=False)}')
+
+        # レスポンス本文は巨大化しやすいため、原因確認に必要な先頭部分だけを残す
+        if response_text is None:
+            logging.error(f'{self.log_prefix} Response text: <None>')
+            return
+        response_text_limit = 4000
+        if len(response_text) > response_text_limit:
+            logging.error(
+                f'{self.log_prefix} Response text: '
+                f'{response_text[:response_text_limit]}... (truncated, total_length: {len(response_text)})',
+            )
+        else:
+            logging.error(f'{self.log_prefix} Response text: {response_text}')
+
+    async def _applyBrowserEnvironmentOverride(self, page: Tab) -> None:
+        """
+        Cookie 採取元ブラウザの OS / 言語情報に基づいて UA / UA-CH を補正する
+
+        Args:
+            page (Tab): override を適用するタブ
+        """
+
+        # Cookie 認証時にブラウザ環境情報を採取できていない既存アカウントでは、サーバー OS の情報から代替値を作る
+        ## Accept-Language: en-US や sec-ch-ua 系ヘッダーが欠落したまま x.com へアクセスしないようにする
+        raw_cookie_browser_info: Any = self.twitter_account.cookie_browser_info
+        if not isinstance(raw_cookie_browser_info, dict):
+            fallback_browser_info = self._buildFallbackBrowserEnvironmentInfo()
+            if fallback_browser_info is None:
+                logging.info(f'{self.log_prefix} No browser info available, skipping UA override.')
+                return
+            cookie_browser_info = fallback_browser_info
+        else:
+            cookie_browser_info = cast(schemas.BrowserEnvironmentInfo, raw_cookie_browser_info)
+        typed_http_headers = cookie_browser_info['http_headers']
+        typed_user_agent_data = cookie_browser_info['user_agent_data']
+
+        # UA 文字列を安全に作れる OS だけを補正対象にする
+        cookie_platform = typed_user_agent_data['platform']
+        if cookie_platform not in self._UA_OS_INFO_BY_PLATFORM:
+            logging.info(f'{self.log_prefix} Cookie browser platform is unsupported, skipping UA override. platform: {cookie_platform}')
+            return
+
+        try:
+            # Chrome バージョンは実行中のブラウザに合わせるため、現在の User-Agent 文字列を基準にする
+            server_user_agent = await self._detectCurrentUserAgent(page)
+            if server_user_agent is None:
+                return
+
+            # User-Agent は OS 部分だけを差し替え、ブラウザ名と Chrome バージョンは維持する
+            spoofed_user_agent = self._buildSpoofedUserAgent(server_user_agent, cookie_platform)
+            if spoofed_user_agent is None:
+                logging.warning(f'{self.log_prefix} Failed to build spoofed User-Agent, skipping UA override.')
+                return
+
+            # UA-CH には Cookie 採取元の OS 情報を入れ、ブランド情報と詳細版は Chrome 側に任せる
+            ## headless=True で欠けやすい OS 系の値だけを補い、実行中の Chrome と違うバージョンは名乗らない
+            cookie_mobile = typed_user_agent_data['mobile']
+            is_cookie_mobile = cookie_mobile
+            cookie_platform_version = typed_user_agent_data['platform_version']
+            cookie_architecture = typed_user_agent_data['architecture']
+            cookie_model = typed_user_agent_data['model']
+            cookie_bitness = typed_user_agent_data['bitness']
+            cookie_wow64 = typed_user_agent_data['wow64']
+            user_agent_metadata = cdp.emulation.UserAgentMetadata(
+                platform=cookie_platform,
+                platform_version=cookie_platform_version,
+                architecture=cookie_architecture,
+                model=cookie_model,
+                mobile=is_cookie_mobile,
+                bitness=cookie_bitness,
+                wow64=cookie_wow64,
+            )
+
+            # 言語情報は Cookie 認証時の HTTP ヘッダーから作った配列を使う
+            accept_language = self._buildAcceptLanguage(typed_http_headers['accept_languages'])
+            # navigator.platform は UA-CH と別枠なので、空の場合だけ OS ごとの代表値を使う
+            cookie_navigator_platform = cookie_browser_info['navigator_platform']
+            navigator_platform = (
+                cookie_navigator_platform
+                if cookie_navigator_platform != ''
+                else self._NAVIGATOR_PLATFORM_BY_PLATFORM[cookie_platform]
+            )
+            # ロケールとタイムゾーンは JavaScript から見えるため、Cookie 採取元に合わせる
+            locale = cookie_browser_info['locale']
+            timezone = cookie_browser_info['timezone']
+
+            # CDP に渡す値と、その設定から Chrome が送信する HTTP リクエストヘッダーをログに残す
+            user_agent_metadata_json = user_agent_metadata.to_json()
+            expected_headers: dict[str, str] = {
+                'user-agent': spoofed_user_agent,
+                'sec-ch-ua-platform': f'"{user_agent_metadata_json["platform"]}"',
+                'sec-ch-ua-platform-version': f'"{user_agent_metadata_json["platformVersion"]}"',
+                'sec-ch-ua-arch': f'"{user_agent_metadata_json["architecture"]}"',
+                'sec-ch-ua-mobile': '?1' if user_agent_metadata_json['mobile'] is True else '?0',
+                'sec-ch-ua-model': f'"{user_agent_metadata_json["model"]}"',
+            }
+            # Accept-Language が空の場合は CDP に渡さないため、ログにも出さない
+            if accept_language is not None:
+                expected_headers['accept-language'] = accept_language
+            # bitness がない場合は、空の UA-CH ヘッダーを作らない
+            if 'bitness' in user_agent_metadata_json:
+                expected_headers['sec-ch-ua-bitness'] = f'"{user_agent_metadata_json["bitness"]}"'
+
+            # CDP に渡す値をそのままログ化し、検証時に同じ値を見られるようにする
+            cdp_payload = {
+                'userAgent': spoofed_user_agent,
+                'acceptLanguage': accept_language,
+                'platform': navigator_platform,
+                'userAgentMetadata': user_agent_metadata_json,
+                'locale': locale,
+                'timezone': timezone,
+            }
+            # x.com への初回アクセス前に補正し、最初の GraphQL リクエストから反映させる
+            logging.info(
+                f'{self.log_prefix} Applying UA override. '
+                f'cookie_platform: {cookie_platform}, navigator_platform: {navigator_platform}',
+            )
+            logging.info(
+                f'{self.log_prefix} UA override CDP payload: '
+                f'{json.dumps(cdp_payload, ensure_ascii=False)}',
+            )
+            logging.info(
+                f'{self.log_prefix} Expected UA request headers after override: '
+                f'{json.dumps(expected_headers, ensure_ascii=False)}',
+            )
+            await page.send(cdp.emulation.set_user_agent_override(
+                user_agent=spoofed_user_agent,
+                accept_language=accept_language,
+                platform=navigator_platform,
+                user_agent_metadata=user_agent_metadata,
+            ))
+            # Intl 系の API は User-Agent とは別の CDP コマンドで反映する
+            ## 空文字は既定値へ戻す指定になるため、値がある場合だけ上書きする
+            if locale != '':
+                await page.send(cdp.emulation.set_locale_override(locale=locale))
+            if timezone != '':
+                await page.send(cdp.emulation.set_timezone_override(timezone_id=timezone))
+
+            # about:blank では UA-CH を確認しづらいため、navigator の検証ログは x.com への遷移後に出す
+            logging.info(f'{self.log_prefix} UA override applied successfully.')
+        except Exception as ex:
+            # 補正に失敗しても Twitter 機能は止めず、ヘッドレスブラウザの環境で続行する
+            logging.warning(f'{self.log_prefix} Failed to apply UA override, continuing with server Chrome defaults:', exc_info=ex)
 
     async def setup(self) -> None:
         """
@@ -195,6 +605,10 @@ class TwitterScrapeBrowser:
                     # ヘッドレスモードではウィンドウサイズ操作が失敗する場合があるが、
                     # set_device_metrics_override で CSS ビューポートは確保されているので無視して問題ない
                     logging.debug(f'{self.log_prefix} Failed to set window bounds (expected in headless mode):', exc_info=ex)
+
+                # Cookie 採取時に保存したブラウザ情報を、x.com へ移動する前に Chrome へ渡す
+                ## 最初の x.com リクエストから User-Agent / UA-CH / 言語設定を揃えるため、about:blank の時点で設定する
+                await self._applyBrowserEnvironmentOverride(self._page)
 
                 # DB から復号した cookies.txt の内容をパースし、ヘッドレスブラウザの Cookie に設定
                 cookies_txt_content = self.twitter_account.decryptAccessTokenSecret()
@@ -314,6 +728,15 @@ class TwitterScrapeBrowser:
                     self.is_setup_complete = False
                     raise ex
 
+                # x.com のページ内 JavaScript から見える navigator / Intl の値をログに残す
+                ## about:blank では基本的に UA-CH が取れないため、実ページへ遷移した後に確認しなければならない
+                overridden_navigator_info = await self._detectOverriddenNavigatorInfo(self._page)
+                if overridden_navigator_info is not None:
+                    logging.info(
+                        f'{self.log_prefix} Navigator info after UA override on x.com: '
+                        f'{json.dumps(overridden_navigator_info, ensure_ascii=False)}',
+                    )
+
                 # ===========================================
                 # タイムラインタブを「フォロー中」に切り替える
                 # ===========================================
@@ -395,6 +818,80 @@ class TwitterScrapeBrowser:
                 self._browser_process = None
                 raise
 
+    def isBrowserProcessAlive(self) -> bool:
+        """
+        ブラウザプロセスがまだ生存しているかどうかを確認する
+        ブラウザが外部から kill された場合やクラッシュした場合に False を返す
+        psutil でプロセス情報を取得できなかった場合 (_browser_process が None) は、
+        プロセスの死活が不明なため安全側に倒して True を返す (健全なブラウザを誤って再起動しないため)
+
+        Returns:
+            bool: ブラウザプロセスが生存している (または死活不明) 場合は True、確実に死んでいる場合は False
+        """
+
+        # _browser_process が None の場合は psutil でプロセス情報を取得できなかったケース
+        # プロセスの死活が判定できないため、安全側に倒して True を返す
+        if self._browser_process is None:
+            return True
+        try:
+            return self._browser_process.is_running()
+        except psutil.Error:
+            return True
+
+    async def captureDebugScreenshot(self, reason: str) -> str | None:
+        """
+        デバッグ用にヘッドレスブラウザの現在の画面をスクリーンショットとして保存する
+        ツイート送信モーダルでのエラー発生時など、ブラウザの状態を確認するために使用する
+        スクリーンショットの撮影自体が失敗してもエラーを伝搬させず、None を返す
+
+        Args:
+            reason (str): スクリーンショットを保存する理由 (ファイル名に使用される)
+
+        Returns:
+            str | None: 保存したスクリーンショットのファイルパス、または撮影に失敗した場合は None
+        """
+
+        if self._page is None:
+            logging.warning(f'{self.log_prefix} Cannot capture screenshot: page is not initialized.')
+            return None
+
+        try:
+            # スクリーンショットの保存先ディレクトリを作成
+            TWITTER_DEBUG_SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+
+            # CDP Page.captureScreenshot でスクリーンショットを取得
+            ## capture_screenshot() は Base64 エンコードされた画像データを str として直接返す
+            ## runtime.evaluate() とは異なりタプルではないため、アンパッキングせずそのまま受け取る
+            screenshot_data = await self._page.send(cdp.page.capture_screenshot(format_='png'))
+            screenshot_bytes = base64.b64decode(screenshot_data)
+
+            # ファイル名を生成して保存
+            ## reason に含まれるファイル名に使えない文字を置換する
+            ## Windows では <>:"/\|?* と制御文字がファイル名に使用できないため、正規表現で一括置換する
+            safe_reason = re.sub(r'[<>:"/\\|?*\x00-\x1f\s]+', '_', reason).strip('_')[:80]
+            timestamp = datetime.now(JST).strftime('%Y%m%d_%H%M%S')
+            filename = f'{self.twitter_account.screen_name}_{timestamp}_{safe_reason}.png'
+            filepath = TWITTER_DEBUG_SCREENSHOTS_DIR / filename
+            filepath.write_bytes(screenshot_bytes)
+
+            logging.info(f'{self.log_prefix} Debug screenshot saved: {filepath}')
+
+            # 保持期限を超えた古いスクリーンショットを自動削除する
+            ## スクリーンショットにはユーザーの下書きテキストやタイムラインが写り込む可能性があるため、
+            ## 診断に十分な期間だけ保持し、それ以降は自動的に削除する
+            cutoff_time = time.time() - (TWITTER_DEBUG_SCREENSHOTS_RETENTION_DAYS * 86400)
+            for old_file in TWITTER_DEBUG_SCREENSHOTS_DIR.glob('*.png'):
+                try:
+                    if old_file.stat().st_mtime < cutoff_time:
+                        old_file.unlink()
+                except OSError:
+                    pass
+
+            return str(filepath)
+        except Exception as ex:
+            logging.warning(f'{self.log_prefix} Failed to capture debug screenshot:', exc_info=ex)
+            return None
+
     async def invokeGraphQLAPI(
         self,
         endpoint_name: str,
@@ -468,22 +965,30 @@ class TwitterScrapeBrowser:
         tweet_text: str,
         images: list[UploadFile],
         throttle_remaining_seconds: float,
+        in_reply_to_status_id: str | None = None,
     ) -> PostTweetViaComposeUIResult:
         """
         Twitter Web App のツイート送信モーダルを DOM 操作で自動化し、ツイートを送信する
-        "n" キーのショートカットで compose モーダルを開き、compose を開いたまま自然な待機を入れた後、
-        テキスト入力・画像添付・Ctrl+Enter 送信を行う
+        通常投稿では "n" キーのショートカット、リプライ投稿では履歴状態と query を使ってツイート送信モーダルを開く
+        ツイート送信モーダルを開いたまま自然な待機を入れた後、テキスト入力・画像添付・Ctrl+Enter 送信を行う
         読み取り系 API と異なり、Web App の正規 UI 経路を通すため user_flow.json の scribe イベントが自然に発火する
         画像アップロードの完了と CreateTweet のレスポンスは CDP Network ドメインで監視する
 
         Args:
             tweet_text (str): ツイートの本文
             images (list[UploadFile]): 添付する画像（無いときは空リスト）
-            throttle_remaining_seconds (float): compose モーダルを開いた後に吸収したいスロットル残り時間
+            throttle_remaining_seconds (float): ツイート送信モーダルを開いた後に吸収したいスロットル残り時間
+            in_reply_to_status_id (str | None): リプライ先のツイート ID (None の場合は単独ツイート)
 
         Returns:
             PostTweetViaComposeUIResult: ツイート送信結果
         """
+
+        class TwitterNetworkResponseInfo(TypedDict):
+            """CDP Network イベントから取得したレスポンスの診断情報。"""
+
+            status_code: int
+            headers: dict[str, Any]
 
         # ヘッドレスブラウザが起動していない場合はエラー
         if self._browser is None or self._page is None:
@@ -496,14 +1001,19 @@ class TwitterScrapeBrowser:
         ## CreateTweet のレスポンスと画像アップロードの完了を CDP Network ドメインで監視する
         ## XHR フックと異なり、ページの JavaScript グローバル状態を一切汚染しない
         create_tweet_future: asyncio.Future[TwitterBrowserGraphQLAPIResult] = asyncio.Future()
-        # CreateTweet の request_id と HTTP ステータスコードを保持する辞書
-        create_tweet_requests: dict[str, int] = {}
+        # CreateTweet の request_id と HTTP レスポンス情報を保持する辞書
+        ## ボディ取得時点では responseReceived イベントの詳細へ戻れないため、
+        ## JSON パース失敗時にステータスコードとヘッダーをログへ残せるよう先に退避しておく
+        create_tweet_responses: dict[str, TwitterNetworkResponseInfo] = {}
         expected_upload_count = len(images)
         upload_finalize_count = 0
         # 画像アップロード完了を通知するイベント (画像がない場合は None)
         upload_complete_event: asyncio.Event | None = asyncio.Event() if expected_upload_count > 0 else None
         # 画像アップロード失敗を通知するイベント (FINALIZE が 4xx/5xx を返した場合にセットされる)
         upload_failed_event: asyncio.Event | None = asyncio.Event() if expected_upload_count > 0 else None
+        # upload.x.com へのリクエスト総数を追跡するカウンター (デバッグ用)
+        ## アップロードタイムアウト時に「リクエスト自体が出ていないのか、出ているが応答がないのか」を切り分ける
+        upload_request_count = 0
         # ネットワーク監視が有効かどうかのフラグ
         ## CDP Network を disable した後もイベントハンドラは登録されたままなので、
         ## このフラグでイベントを無視するかどうかを制御する
@@ -515,7 +1025,7 @@ class TwitterScrapeBrowser:
             CreateTweet の request_id と画像アップロード FINALIZE の完了を追跡する
             """
 
-            nonlocal upload_finalize_count
+            nonlocal upload_finalize_count, upload_request_count
             if is_network_monitoring_active is not True:
                 return
 
@@ -526,9 +1036,16 @@ class TwitterScrapeBrowser:
                 return
             url = event.response.url
 
+            # upload.x.com へのリクエスト総数を追跡 (デバッグ用)
+            if 'upload.x.com' in url:
+                upload_request_count += 1
+
             # CreateTweet のリクエストを追跡
             if 'CreateTweet' in url:
-                create_tweet_requests[str(event.request_id)] = event.response.status
+                create_tweet_responses[str(event.request_id)] = {
+                    'status_code': event.response.status,
+                    'headers': dict(event.response.headers),
+                }
 
             # 画像アップロード FINALIZE の完了を追跡
             # HTTP ステータスが 2xx 以外の場合はアップロード失敗として扱い、カウントしない
@@ -555,23 +1072,34 @@ class TwitterScrapeBrowser:
             request_id_str = str(event.request_id)
 
             # CreateTweet のリクエスト以外は無視
-            if request_id_str not in create_tweet_requests:
+            if request_id_str not in create_tweet_responses:
                 return
             if create_tweet_future.done():
                 return
 
             # レスポンスボディを取得して Future に設定する
+            ## get_response_body() が失敗した場合も診断ログで本文なしと明示できるよう、先に None で初期化する
+            response_text: str | None = None
             try:
-                body, _ = await page.send(cdp.network.get_response_body(event.request_id))
-                parsed_response = json.loads(body)
+                response_info = create_tweet_responses[request_id_str]
+                response_text, _ = await page.send(cdp.network.get_response_body(event.request_id))
+                parsed_response = json.loads(response_text)
                 create_tweet_future.set_result(TwitterBrowserGraphQLAPIResult(
-                    status_code=create_tweet_requests[request_id_str],
+                    status_code=response_info['status_code'],
                     parsed_response=parsed_response,
-                    response_text=body,
-                    headers=None,
+                    response_text=response_text,
+                    headers=response_info['headers'],
                     request_error=None,
                 ))
             except Exception as ex:
+                logging.error(f'{self.log_prefix} Failed to read or parse CreateTweet response:', exc_info=ex)
+                response_info = create_tweet_responses.get(request_id_str)
+                self._logNetworkResponseDiagnostics(
+                    reason='Failed to read or parse CreateTweet response',
+                    status_code=response_info['status_code'] if response_info is not None else None,
+                    headers=response_info['headers'] if response_info is not None else None,
+                    response_text=response_text,
+                )
                 if not create_tweet_future.done():
                     create_tweet_future.set_exception(ex)
 
@@ -585,7 +1113,7 @@ class TwitterScrapeBrowser:
             if is_network_monitoring_active is not True:
                 return
             request_id_str = str(event.request_id)
-            if request_id_str not in create_tweet_requests:
+            if request_id_str not in create_tweet_responses:
                 return
             if create_tweet_future.done():
                 return
@@ -595,17 +1123,17 @@ class TwitterScrapeBrowser:
                 RuntimeError(f'CreateTweet request failed: {event.error_text}')
             )
 
-        # compose モーダルを閉じるためのヘルパー関数
+        # ツイート送信モーダルを閉じるためのヘルパー関数
         # エラー発生時のクリーンアップに使用する
         async def CloseComposeModal() -> None:
             """
-            compose モーダルが開いている場合、Escape キーで閉じる
+            ツイート送信モーダルが開いている場合、Escape キーで閉じる
             テキストや画像が入力されている場合は「変更を破棄」ダイアログが表示されるため、
             破棄ボタンのクリックも試行する
             """
 
             try:
-                # Escape キーを送信して compose モーダルを閉じる
+                # Escape キーを送信して ツイート送信モーダルを閉じる
                 await page.send(cdp.input_.dispatch_key_event(
                     type_='keyDown',
                     key='Escape',
@@ -630,12 +1158,19 @@ class TwitterScrapeBrowser:
                 if discard_result and discard_result.value is True:
                     await asyncio.sleep(0.5)
             except Exception as ex:
-                logging.warning(f'{self.log_prefix} Failed to close compose modal:', exc_info=ex)
+                logging.warning(f'{self.log_prefix} Failed to close tweet posting modal:', exc_info=ex)
 
         compose_submitted_at: float | None = None
 
         # エラー時の共通レスポンスを生成するヘルパー
-        def MakeErrorResult(error_message: str) -> PostTweetViaComposeUIResult:
+        # エラー発生時にデバッグ用スクリーンショットも自動保存する
+        # ツイート送信モーダルを閉じる前にスクリーンショットを撮ることで、エラー時の UI 状態を正確に記録する
+        async def MakeErrorResult(error_message: str) -> PostTweetViaComposeUIResult:
+            # エラー発生時のブラウザ画面を保存して、根本原因の特定に役立てる
+            # スクリーンショットはモーダルを閉じる前に撮影する (閉じた後ではエラー状態が見えない)
+            await self.captureDebugScreenshot(f'compose_error_{error_message[:50]}')
+            # スクリーンショット撮影後に ツイート送信モーダルを閉じてクリーンアップする
+            await CloseComposeModal()
             return PostTweetViaComposeUIResult(
                 is_success=False,
                 error_message=error_message,
@@ -645,7 +1180,7 @@ class TwitterScrapeBrowser:
 
         # CDP Network 監視を有効化するヘルパー関数
         ## 画像アップロードの FINALIZE 監視と CreateTweet レスポンスの取得に使用する
-        ## compose モーダルを開く → テキスト paste の間は Network 監視不要なので、
+        ## ツイート送信モーダルを開く → テキスト paste の間は Network 監視不要なので、
         ## 必要になる直前まで遅延させることで、Twitter Web App のバックグラウンド通信
         ## (TL 更新、badge_count、user_flow.json 等) による CDP イベントハンドラの呼び出しを抑制し、
         ## asyncio イベントループの輻輳を防ぐ
@@ -662,60 +1197,87 @@ class TwitterScrapeBrowser:
 
         async def OpenComposeModal() -> PostTweetViaComposeUIResult | None:
             """
-            compose モーダルを開き、送信前の待機に入れる状態まで遷移させる。
+            ツイート送信モーダルを開き、送信前の待機に入れる状態まで遷移させる。
 
             Returns:
                 PostTweetViaComposeUIResult | None: 失敗時はエラー結果、成功時は None
             """
 
             # ===========================================
-            # Step 1: "n" キーのショートカットで compose モーダルを開く
+            # Step 1: ツイート送信モーダルを開く
             # (この時点では CDP Network 監視はまだ有効化しない)
             # ===========================================
-            # "n" キーは Twitter Web App のキーボードショートカットで、compose ダイアログを開く
-            # SideNav ボタンのクリックと異なり、ビューポートサイズに依存しない
-            # モーダルが開くと URL が /compose/post に SPA 遷移する
-            #
-            # CDP Input.dispatchKeyEvent で "n" ショートカットを発火させるには以下の条件が必要:
-            # 1. ページがアクティブ (bring_to_front) であること
-            # 2. document.body にフォーカスが当たっていること (テキスト入力欄にフォーカスがあると "n" が入力される)
-            # 3. keyDown イベントに text='n' を含めること
-            #    text パラメータなしだと keydown DOM イベントのみが生成され、keypress イベントが発生しない
-            #    Twitter のキーボードショートカットハンドラが keypress に依存している場合、ショートカットが発火しない
-            logging.info(f'{self.log_prefix} Opening compose modal via "n" keyboard shortcut...')
-            # ページをアクティブにし、フォーカスを document.body に設定する
-            await page.send(cdp.page.bring_to_front())
-            await page.send(cdp.runtime.evaluate(
-                expression='document.body.focus()',
-                return_by_value=True,
-            ))
-            await asyncio.sleep(0.1)
-            # keyDown (text='n' を含めて keypress も生成させる) → keyUp の順に送信
-            await page.send(cdp.input_.dispatch_key_event(
-                type_='keyDown',
-                key='n',
-                code='KeyN',
-                text='n',
-                windows_virtual_key_code=78,
-                native_virtual_key_code=78,
-            ))
-            await page.send(cdp.input_.dispatch_key_event(
-                type_='keyUp',
-                key='n',
-                code='KeyN',
-                windows_virtual_key_code=78,
-                native_virtual_key_code=78,
-            ))
+            if in_reply_to_status_id is None:
+                # "n" キーは Twitter Web App のキーボードショートカットで、ツイート送信モーダルを開く
+                # SideNav ボタンのクリックと異なり、ビューポートサイズに依存しない
+                # モーダルが開くと URL が /compose/post に SPA 遷移する
+                #
+                # CDP Input.dispatchKeyEvent で "n" ショートカットを発火させるには以下の条件が必要:
+                # 1. ページがアクティブ (bring_to_front) であること
+                # 2. document.body にフォーカスが当たっていること (テキスト入力欄にフォーカスがあると "n" が入力される)
+                # 3. keyDown イベントに text='n' を含めること
+                #    text パラメータなしだと keydown DOM イベントのみが生成され、keypress イベントが発生しない
+                #    Twitter のキーボードショートカットハンドラが keypress に依存している場合、ショートカットが発火しない
+                logging.info(f'{self.log_prefix} Opening tweet posting modal via "n" keyboard shortcut...')
+                # ページをアクティブにし、フォーカスを document.body に設定する
+                await page.send(cdp.page.bring_to_front())
+                await page.send(cdp.runtime.evaluate(
+                    expression='document.body.focus()',
+                    return_by_value=True,
+                ))
+                await asyncio.sleep(0.1)
+                # keyDown (text='n' を含めて keypress も生成させる) → keyUp の順に送信
+                await page.send(cdp.input_.dispatch_key_event(
+                    type_='keyDown',
+                    key='n',
+                    code='KeyN',
+                    text='n',
+                    windows_virtual_key_code=78,
+                    native_virtual_key_code=78,
+                ))
+                await page.send(cdp.input_.dispatch_key_event(
+                    type_='keyUp',
+                    key='n',
+                    code='KeyN',
+                    windows_virtual_key_code=78,
+                    native_virtual_key_code=78,
+                ))
+            else:
+                # リプライ投稿では Twitter Web App の compose ルートが読む履歴状態と query の両方にリプライ先 ID を渡す
+                # query も併用することで、親ツイートが未取得のページ状態でも Web App 側の取得処理へ入れる
+                if re.fullmatch(r'\d+', in_reply_to_status_id) is None:
+                    logging.error(f'{self.log_prefix} Invalid in_reply_to_status_id for reply modal: {in_reply_to_status_id}')
+                    return await MakeErrorResult('リプライ先のツイート ID が不正です。')
+                validated_reply_to_status_id = in_reply_to_status_id
+                logging.info(f'{self.log_prefix} Opening reply modal via SPA navigation. in_reply_to_status_id: {validated_reply_to_status_id}')
+                reply_state = {
+                    'state': {
+                        'inReplyToStatusId': validated_reply_to_status_id,
+                    },
+                    'key': ''.join(random.choice('abcdefghijklmnopqrstuvwxyz0123456789') for _ in range(6)),
+                }
+                await page.send(cdp.page.bring_to_front())
+                await page.send(cdp.runtime.evaluate(
+                    expression=f'''
+                    (() => {{
+                        const wrappedState = {json.dumps(reply_state)};
+                        const composeUrl = `/compose/post?in_reply_to=${{encodeURIComponent({json.dumps(validated_reply_to_status_id)})}}`;
+                        window.history.pushState(wrappedState, '', composeUrl);
+                        window.dispatchEvent(new PopStateEvent('popstate', {{ state: wrappedState }}));
+                    }})()
+                    ''',
+                    return_by_value=True,
+                ))
 
             # ===========================================
-            # Step 2: compose モーダルが開くのを待機する
+            # Step 2: ツイート送信モーダルが開くのを待機する
             # ===========================================
             # /home のタイムライン上部にもインラインの tweetTextarea_0 が存在するため、
             # 単に tweetTextarea_0 の存在をチェックするだけではモーダルが開いたことを正しく判定できない
-            # compose モーダルが開くと URL が /compose/post に SPA 遷移し、
+            # ツイート送信モーダルが開くと URL が /compose/post に SPA 遷移し、
             # モーダル内の tweetTextarea_0 は [role="dialog"] の子孫に配置される
             # そのため「URL が /compose/post に遷移 && [role="dialog"] 内に tweetTextarea_0 が存在」を条件にする
-            logging.info(f'{self.log_prefix} Waiting for compose modal to open...')
+            logging.info(f'{self.log_prefix} Waiting for tweet posting modal to open...')
             _, compose_modal_exception = await page.send(cdp.runtime.evaluate(
                 expression='''
                 new Promise((resolve, reject) => {
@@ -738,16 +1300,15 @@ class TwitterScrapeBrowser:
             ))
 
             if compose_modal_exception is not None:
-                logging.error(f'{self.log_prefix} Compose modal not found: {compose_modal_exception}')
-                await CloseComposeModal()
-                return MakeErrorResult('compose モーダルが開きませんでした。')
+                logging.error(f'{self.log_prefix} Tweet posting modal not found: {compose_modal_exception}')
+                return await MakeErrorResult('ツイート送信モーダルが開きませんでした。')
 
             logging.debug(f'{self.log_prefix} Compose modal opened.')
             return None
 
         async def SubmitTweet() -> PostTweetViaComposeUIResult:
             """
-            開いている compose モーダルに対して内容を入力し、送信レスポンスまで待機する。
+            開いている ツイート送信モーダルに対して内容を入力し、送信レスポンスまで待機する。
 
             Returns:
                 PostTweetViaComposeUIResult: ツイート送信結果
@@ -770,7 +1331,7 @@ class TwitterScrapeBrowser:
                 paste_result, paste_exception = await page.send(cdp.runtime.evaluate(
                     expression=f'''
                     (() => {{
-                        // モーダル内の tweetTextarea_0 を対象にする (インラインの compose ではなくモーダルのもの)
+                        // ツイート送信モーダル内の tweetTextarea_0 を対象にする (タイムラインのインライン投稿欄ではなくモーダルのもの)
                         const textarea = document.querySelector('[role="dialog"] [data-testid="tweetTextarea_0"]');
                         if (!textarea) return false;
                         textarea.focus();
@@ -790,8 +1351,7 @@ class TwitterScrapeBrowser:
 
                 if paste_exception is not None or (paste_result and paste_result.value is not True):
                     logging.error(f'{self.log_prefix} Failed to paste tweet text: {paste_exception}')
-                    await CloseComposeModal()
-                    return MakeErrorResult('テキストの入力に失敗しました。')
+                    return await MakeErrorResult('テキストの入力に失敗しました。')
 
                 logging.debug(f'{self.log_prefix} Tweet text pasted.')
 
@@ -835,7 +1395,7 @@ class TwitterScrapeBrowser:
                 )
 
                 # CDP Network 監視を有効化する (画像アップロードの FINALIZE を監視するために必要)
-                ## compose モーダルを開く → テキスト paste の間は Network 監視が不要なので、ここまで遅延させている
+                ## ツイート送信モーダルを開く → テキスト paste の間は Network 監視が不要なので、ここまで遅延させている
                 await EnableNetworkMonitoring()
 
                 # プリロード済みデータからファイルを生成して fileInput に設定する
@@ -870,8 +1430,7 @@ class TwitterScrapeBrowser:
                 if upload_exception is not None or (upload_result and upload_result.value is not True):
                     error_detail = upload_result.value if upload_result else str(upload_exception)
                     logging.error(f'{self.log_prefix} Failed to set images on fileInput: {error_detail}')
-                    await CloseComposeModal()
-                    return MakeErrorResult(f'画像の設定に失敗しました。({error_detail})')
+                    return await MakeErrorResult(f'画像の設定に失敗しました。({error_detail})')
 
                 logging.debug(f'{self.log_prefix} Images set on fileInput.')
 
@@ -900,17 +1459,19 @@ class TwitterScrapeBrowser:
                             pass
                     if len(done) == 0:
                         # タイムアウト
-                        logging.error(f'{self.log_prefix} Timeout waiting for image upload FINALIZE.')
-                        await CloseComposeModal()
-                        return MakeErrorResult('画像アップロードがタイムアウトしました。')
+                        # リクエスト自体が出ていないのか、出ているが応答がないのかを切り分けるためにネットワーク状態をログ出力する
+                        logging.error(
+                            f'{self.log_prefix} Timeout waiting for image upload FINALIZE. '
+                            f'upload requests observed: {upload_request_count}, '
+                            f'FINALIZE succeeded: {upload_finalize_count}/{expected_upload_count}',
+                        )
+                        return await MakeErrorResult('画像アップロードがタイムアウトしました。')
                     if upload_failed_event.is_set():
                         logging.error(f'{self.log_prefix} Image upload FINALIZE returned an error.')
-                        await CloseComposeModal()
-                        return MakeErrorResult('画像のアップロードに失敗しました。')
+                        return await MakeErrorResult('画像のアップロードに失敗しました。')
                 except Exception as ex:
                     logging.error(f'{self.log_prefix} Error waiting for image uploads:', exc_info=ex)
-                    await CloseComposeModal()
-                    return MakeErrorResult(f'画像アップロードの待機中にエラーが発生しました。({ex})')
+                    return await MakeErrorResult(f'画像アップロードの待機中にエラーが発生しました。({ex})')
 
                 logging.info(f'{self.log_prefix} All image uploads completed.')
 
@@ -942,8 +1503,7 @@ class TwitterScrapeBrowser:
 
             if button_ready_exception is not None:
                 logging.error(f'{self.log_prefix} tweetButton did not become enabled: {button_ready_exception}')
-                await CloseComposeModal()
-                return MakeErrorResult('ツイートボタンが有効になりませんでした。テキストや画像の入力に問題がある可能性があります。')
+                return await MakeErrorResult('ツイートボタンが有効になりませんでした。テキストや画像の入力に問題がある可能性があります。')
 
             logging.debug(f'{self.log_prefix} tweetButton is enabled.')
 
@@ -954,9 +1514,9 @@ class TwitterScrapeBrowser:
             ## (CreateTweet レスポンスを監視するために必要)
             await EnableNetworkMonitoring()
 
-            # Ctrl+Enter 送信前に、compose textarea にフォーカスが戻っていることを確認する
-            ## 画像添付後は fileInput 側へフォーカスが移る場合があるため、明示的に compose textarea を再 focus する
-            logging.info(f'{self.log_prefix} Ensuring compose textarea is focused...')
+            # Ctrl+Enter 送信前に、ツイートテキストエリアにフォーカスが戻っていることを確認する
+            ## 画像添付後は fileInput 側へフォーカスが移る場合があるため、明示的にツイートテキストエリアを再 focus する
+            logging.info(f'{self.log_prefix} Ensuring tweet textarea is focused...')
             focus_result, focus_exception = await page.send(cdp.runtime.evaluate(
                 expression='''
                 (() => {
@@ -974,9 +1534,8 @@ class TwitterScrapeBrowser:
             ))
 
             if focus_exception is not None or (focus_result and focus_result.value is not True):
-                logging.error(f'{self.log_prefix} Failed to focus compose textarea: {focus_exception}')
-                await CloseComposeModal()
-                return MakeErrorResult('compose テキストエリアへのフォーカスに失敗しました。')
+                logging.error(f'{self.log_prefix} Failed to focus tweet textarea: {focus_exception}')
+                return await MakeErrorResult('ツイートテキストエリアへのフォーカスに失敗しました。')
 
             logging.info(f'{self.log_prefix} Submitting tweet via Ctrl+Enter...')
             await page.send(cdp.input_.dispatch_key_event(
@@ -1024,12 +1583,10 @@ class TwitterScrapeBrowser:
                 response_data = await asyncio.wait_for(create_tweet_future, timeout=30.0)
             except TimeoutError:
                 logging.error(f'{self.log_prefix} Timeout waiting for CreateTweet response.')
-                await CloseComposeModal()
-                return MakeErrorResult('CreateTweet のレスポンスがタイムアウトしました。')
+                return await MakeErrorResult('CreateTweet のレスポンスがタイムアウトしました。')
             except Exception as ex:
                 logging.error(f'{self.log_prefix} Error waiting for CreateTweet response:', exc_info=ex)
-                await CloseComposeModal()
-                return MakeErrorResult(f'CreateTweet のレスポンスを取得できませんでした。({ex})')
+                return await MakeErrorResult(f'CreateTweet のレスポンスを取得できませんでした。({ex})')
 
             status_code = response_data.status_code
             logging.info(f'{self.log_prefix} CreateTweet response received. (HTTP {status_code})')
@@ -1047,14 +1604,14 @@ class TwitterScrapeBrowser:
             if open_compose_result is not None:
                 return open_compose_result
 
-            # compose を開いた後に、まだ必要なスロットル待機だけを残して自然な「考え中」時間として吸収する
-            ## OpenComposeModal() の実行時間を差し引き、compose が開いた直後に即 paste しないよう最低限の待機も確保する
+            # ツイート送信モーダルを開いた後に、まだ必要なスロットル待機だけを残して自然な「考え中」時間として吸収する
+            ## OpenComposeModal() の実行時間を差し引き、モーダルが開いた直後に即 paste しないよう最低限の待機も確保する
             elapsed_seconds = time.time() - compose_flow_started_at
             compose_throttle_remaining_seconds = max(0.0, throttle_remaining_seconds - elapsed_seconds)
             minimum_thinking_seconds = round(random.uniform(1.0, 2.0), 3)
             compose_thinking_wait_seconds = max(compose_throttle_remaining_seconds, minimum_thinking_seconds)
             logging.info(
-                f'{self.log_prefix} Waiting before compose submission. '
+                f'{self.log_prefix} Waiting before tweet submission. '
                 f'throttle remaining: {compose_throttle_remaining_seconds:.3f}s, '
                 f'thinking wait: {compose_thinking_wait_seconds:.3f}s',
             )
@@ -1065,9 +1622,7 @@ class TwitterScrapeBrowser:
 
         except Exception as ex:
             logging.error(f'{self.log_prefix} Unexpected error during tweet posting via modal:', exc_info=ex)
-            # エラー発生時はモーダルを閉じてクリーンアップする
-            await CloseComposeModal()
-            return MakeErrorResult(f'ツイート送信中に予期しないエラーが発生しました。({ex})')
+            return await MakeErrorResult(f'ツイート送信中に予期しないエラーが発生しました。({ex})')
 
         finally:
             # CDP Network 監視を無効化し、登録したイベントハンドラを解除する

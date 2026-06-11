@@ -8,8 +8,11 @@ from fastapi.responses import Response
 from sse_starlette.sse import EventSourceResponse
 
 from app import logging
-from app.constants import QUALITY, QUALITY_TYPES
 from app.models.RecordedProgram import RecordedProgram
+from app.streams.StreamEncodingOptions import (
+    SplitQualityAndEncodingOptions,
+    StreamQualityWithOptions,
+)
 from app.streams.VideoStream import VideoStream
 
 
@@ -58,11 +61,12 @@ async def ValidateVideoID(video_id: Annotated[int, Path(description='録画番�
                     # バックグラウンドで再解析を実行（files_only=True でメタデータのみ更新）
                     # 再生開始を遅延させないため await せずにバックグラウンドタスクとして実行
                     import asyncio
-                    asyncio.create_task(RecordedScanTask().processRecordedFile(
+                    background_task = asyncio.create_task(RecordedScanTask().processRecordedFile(
                         file_path = file_path,
                         force_update = True,
                         files_only = True,  # CM 解析・サムネイル生成はスキップ
                     ))
+                    background_task.add_done_callback(lambda task: task.exception() if task.cancelled() is False else None)
     except Exception as ex:
         # ファイルサイズチェックに失敗しても再生は継続できるようエラーをログに出力するのみ
         logging.warning(f'[VideoStreamsRouter][ValidateVideoID] Failed to check file size: {ex}')
@@ -70,18 +74,20 @@ async def ValidateVideoID(video_id: Annotated[int, Path(description='録画番�
     return recorded_program
 
 
-async def ValidateQuality(quality: Annotated[str, Path(description='映像の品質。ex: 1080p')]) -> QUALITY_TYPES:
+async def ValidateQuality(quality: Annotated[str, Path(description='映像の品質。ex: 1080p')]) -> StreamQualityWithOptions:
     """ 映像の品質のバリデーション """
 
     # 指定された品質が存在するか確認
-    if quality not in QUALITY:
+    ## 品質の指定に -10bit や -24fps が付いていれば分解する
+    stream_quality = SplitQualityAndEncodingOptions(quality)
+    if stream_quality is None:
         logging.error(f'[VideoStreamsRouter][ValidateQuality] Specified quality was not found. [quality: {quality}]')
         raise HTTPException(
             status_code = status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail = 'Specified quality was not found',
         )
 
-    return quality
+    return stream_quality
 
 
 @router.get(
@@ -97,7 +103,7 @@ async def ValidateQuality(quality: Annotated[str, Path(description='映像の品
 )
 async def VideoHLSPlaylistAPI(
     recorded_program: Annotated[RecordedProgram, Depends(ValidateVideoID)],
-    quality: Annotated[QUALITY_TYPES, Depends(ValidateQuality)],
+    stream_quality: Annotated[StreamQualityWithOptions, Depends(ValidateQuality)],
     session_id: Annotated[str, Query(description='セッション ID（クライアント側で適宜生成したランダム値を指定する）。')],
     cache_key: Annotated[str | None, Query(description='キャッシュ制御用のキー。')] = None,
 ):
@@ -106,8 +112,14 @@ async def VideoHLSPlaylistAPI(
     この M3U8 プレイリストは仮想的なもので、すべてのセグメントデータがエンコード済みとは限らない。セグメントはリクエストされ次第随時生成される。
     """
 
-    # 録画視聴セッションを取得
-    video_stream = VideoStream(session_id, recorded_program, quality)
+    # 品質とオプション指定に対応する録画視聴セッションを作成または取得
+    video_stream = VideoStream(
+        session_id,
+        recorded_program,
+        stream_quality.quality,
+        stream_quality.encoding_options,
+        is_new_session_allowed = True,
+    )
 
     # 仮想 HLS M3U8 プレイリストを取得
     virtual_playlist = video_stream.getVirtualPlaylist(cache_key)
@@ -133,7 +145,7 @@ async def VideoHLSPlaylistAPI(
 )
 async def VideoHLSSegmentAPI(
     recorded_program: Annotated[RecordedProgram, Depends(ValidateVideoID)],
-    quality: Annotated[QUALITY_TYPES, Depends(ValidateQuality)],
+    stream_quality: Annotated[StreamQualityWithOptions, Depends(ValidateQuality)],
     session_id: Annotated[str, Query(description='セッション ID（クライアント側で適宜生成したランダム値を指定する）。')],
     sequence: Annotated[int, Query(description='HLS セグメントの 0 スタートのシーケンス番号。')],
     cache_key: Annotated[str | None, Query(description='キャッシュ制御用のキー。')],
@@ -144,13 +156,16 @@ async def VideoHLSSegmentAPI(
     sequence の HLS セグメントが含まれる範囲から新たにエンコードタスクが開始される。
     """
 
-    # 録画視聴セッションを取得
-    video_stream = VideoStream(session_id, recorded_program, quality)
+    # 品質とオプション指定に対応する録画視聴セッションを取得
+    video_stream = VideoStream(session_id, recorded_program, stream_quality.quality, stream_quality.encoding_options)
 
     # セグメントを取得（キャッシュキーはブラウザキャッシュ避けのための ID なので特に使わない）
     segment_data = await video_stream.getSegment(sequence)
     if segment_data is None:
-        logging.error(f'[VideoHLSSegmentAPI] Specified sequence segment was not found. [video_id: {recorded_program.id}, quality: {quality}, sequence: {sequence}]')
+        logging.error(
+            f'{video_stream.log_prefix} Specified sequence segment was not found. '
+            f'[sequence: {sequence}]'
+        )
         raise HTTPException(
             status_code = status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail = 'Specified sequence segment was not found',
@@ -180,7 +195,7 @@ async def VideoHLSSegmentAPI(
 )
 async def VideoHLSBufferAPI(
     recorded_program: Annotated[RecordedProgram, Depends(ValidateVideoID)],
-    quality: Annotated[QUALITY_TYPES, Depends(ValidateQuality)],
+    stream_quality: Annotated[StreamQualityWithOptions, Depends(ValidateQuality)],
     session_id: Annotated[str, Query(description='セッション ID（クライアント側で適宜生成したランダム値を指定する）。')],
 ):
     """
@@ -194,8 +209,8 @@ async def VideoHLSBufferAPI(
     エンコードタスクが終了した場合は、接続を終了する。
     """
 
-    # 録画視聴セッションを取得
-    video_stream = VideoStream(session_id, recorded_program, quality)
+    # 品質とオプション指定に対応する録画視聴セッションを取得
+    video_stream = VideoStream(session_id, recorded_program, stream_quality.quality, stream_quality.encoding_options)
 
     # バッファ範囲の変更を監視し、変更があればバッファ範囲をイベントストリームとして出力する
     async def generator():
@@ -220,7 +235,7 @@ async def VideoHLSBufferAPI(
 
             # 以前の結果と異なっている場合のみレスポンスを返す
             if previous_buffer_range != buffer_range:
-                logging.info(f'[VideoHLSBufferAPI] Buffer range updated. [begin: {buffer_range[0]}, end: {buffer_range[1]}]')
+                logging.info(f'{video_stream.log_prefix} Buffer range updated. [begin: {buffer_range[0]}, end: {buffer_range[1]}]')
                 yield {
                     'event': 'buffer_range_update',  # buffer_range_update イベントを設定
                     'data': json.dumps({
@@ -246,7 +261,7 @@ async def VideoHLSBufferAPI(
 )
 async def VideoHLSKeepAliveAPI(
     recorded_program: Annotated[RecordedProgram, Depends(ValidateVideoID)],
-    quality: Annotated[QUALITY_TYPES, Depends(ValidateQuality)],
+    stream_quality: Annotated[StreamQualityWithOptions, Depends(ValidateQuality)],
     session_id: Annotated[str, Query(description='セッション ID（クライアント側で適宜生成したランダム値を指定する）。')],
 ):
     """
@@ -255,8 +270,8 @@ async def VideoHLSKeepAliveAPI(
     この API が定期的に呼び出されなくなった場合、一定時間後にストリーミング用 HLS セグメントの生成が停止され、メモリ上のデータが破棄される。
     """
 
-    # 録画視聴セッションを取得
-    video_stream = VideoStream(session_id, recorded_program, quality)
+    # 品質とオプション指定に対応する録画視聴セッションを取得
+    video_stream = VideoStream(session_id, recorded_program, stream_quality.quality, stream_quality.encoding_options)
 
     # セッションのアクティブ状態を維持する
     video_stream.keepAlive()
