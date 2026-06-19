@@ -27,6 +27,12 @@ class TSKeyFramePosition:
     source_start_dts: int
 
 
+class TSKeyFrameNotFoundError(RuntimeError):
+    """
+    指定時刻の近傍でセグメント開始に使えるキーフレームが見つからなかったことを表す例外
+    """
+
+
 @dataclass(slots=True)
 class TSStreamInfo:
     """
@@ -343,7 +349,7 @@ class TSKeyFrameSeeker:
                 pass
 
         if keyframe is None:
-            raise RuntimeError(f'Keyframe was not found near requested time: {path}')
+            raise TSKeyFrameNotFoundError(f'Keyframe was not found near requested time: {path}')
 
         return TSKeyFramePosition(
             source_file_position = keyframe.offset,

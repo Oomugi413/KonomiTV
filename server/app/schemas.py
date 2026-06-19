@@ -160,6 +160,13 @@ class RecordedVideo(PydanticModel):
     video_resolution_width: int
     video_resolution_height: int
     has_video_stream_changes: bool = False
+    # Backward-compatible API field for clients that still use this as the
+    # "metadata analysis completed" signal. Key frame data itself is no longer
+    # returned or preserved after segment_map migration.
+    @computed_field
+    @property
+    def has_key_frames(self) -> bool:
+        return self.status == 'Recorded'
     primary_audio_codec: Literal['AAC-LC']
     primary_audio_channel: Literal['Monaural', 'Stereo', '5.1ch']
     primary_audio_sampling_rate: int
