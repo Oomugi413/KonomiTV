@@ -233,7 +233,13 @@ export default defineComponent({
                 const video_id = this.$route.params.video_id;
                 if (!video_id) return;
 
-                const fetched_program = await Videos.fetchVideo(parseFloat(video_id as string));
+                let fetched_program: Awaited<ReturnType<typeof Videos.fetchVideo>>;
+                try {
+                    fetched_program = await Videos.fetchVideo(parseFloat(video_id as string));
+                } catch (error) {
+                    console.warn('[Series] Failed to fetch current recorded program. Skip series search.', error);
+                    return;
+                }
                 if (!fetched_program) return;
 
                 // playerStore に保存

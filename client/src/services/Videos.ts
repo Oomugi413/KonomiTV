@@ -256,7 +256,7 @@ class Videos {
     /**
      * 録画番組情報を取得する
      * @param video_id 録画番組の ID
-     * @returns 録画番組情報 or 録画番組情報の取得に失敗した場合は null
+     * @returns 録画番組情報 or 録画番組が存在しない場合は null
      */
     static async fetchVideo(video_id: number): Promise<IRecordedProgram | null> {
 
@@ -265,8 +265,13 @@ class Videos {
 
         // エラー処理
         if (response.type === 'error') {
+            // 視聴画面では null を 404 ページ遷移の合図として扱うため、404 以外の一時的なサーバーエラーは null に潰さない
+            // 502 などのリバースプロキシ/サーバー再起動中エラーで NotFound に飛ぶと、実在する録画番組が消えたように見えてしまう
             APIClient.showGenericError(response, '録画番組情報を取得できませんでした。');
-            return null;
+            if (response.status === 404) {
+                return null;
+            }
+            throw response.error;
         }
 
         return response.data;

@@ -67,7 +67,14 @@ export default defineComponent({
             }
 
             // 録画番組情報を更新する
-            const recorded_program = await Videos.fetchVideo(parseFloat(this.$route.params.video_id as string));
+            // 404 の場合のみ null が返る。502 など一時的なサーバーエラーは NotFound に飛ばさず、現在のページに留まる
+            let recorded_program: Awaited<ReturnType<typeof Videos.fetchVideo>>;
+            try {
+                recorded_program = await Videos.fetchVideo(parseFloat(this.$route.params.video_id as string));
+            } catch (error) {
+                console.warn('[Video-Watch] Failed to fetch recorded program. Keep current route.', error);
+                return;
+            }
             if (recorded_program === null) {
                 this.$router.push({path: '/not-found/'});
                 return;
