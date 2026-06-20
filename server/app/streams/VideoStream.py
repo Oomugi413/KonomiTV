@@ -29,11 +29,7 @@ from app.streams.VideoEncodingTask import VideoEncodingTask
 from app.streams.VideoSegmentPlanner import VideoSegmentPlanner
 from app.utils import SetTimeout
 from app.utils.MP4KeyFrameParser import MP4KeyFrameParser
-from app.utils.TSKeyFrameSeeker import (
-    TSKeyFrameNotFoundError,
-    TSKeyFrameSeeker,
-    TSStreamInfo,
-)
+from app.utils.TSKeyFrameSeeker import TSKeyFrameSeeker, TSStreamInfo
 
 
 @dataclass
@@ -101,11 +97,6 @@ class VideoStream:
     # 再生しながら見つけたキーフレーム位置を segment_map として保存する最小件数
     ## DB 書き込みを HLS セグメントごとに発生させず、再生済み範囲をある程度まとめて保存する
     SEGMENT_MAP_SAVE_BATCH_SIZE: ClassVar[int] = 16
-
-    # オンデマンド探索で採用できる直前キーフレームの最大古さ (HLS セグメント数)
-    ## 放送 TS は長めの GOP や局所的な PID/PCR 推定ズレで、1 セグメント分だけでは開始点を見つけられないことがある
-    ## ただし古すぎる開始位置はシーク位置を大きく戻すため、録画中の未到達区間や壊れた録画は HTTP エラーとして扱う
-    ON_DEMAND_KEYFRAME_MAX_AGE_SEGMENTS: ClassVar[int] = 5
 
     # 録画視聴セッションのインスタンスが入る、セッション ID をキーとした辞書
     # この辞書に録画視聴セッションに関する全てのデータが格納されている
@@ -543,30 +534,14 @@ class VideoStream:
                         self._ts_stream_info,
                     )
 
-                try:
-                    source_position = await asyncio.to_thread(
-                        TSKeyFrameSeeker.seek,
-                        file_path,
-                        self._ts_stream_info,
-                        segment.playlist_start_seconds,
-                        self._ts_source_base_dts,
-                        round(self._segment_duration_seconds * self.ON_DEMAND_KEYFRAME_MAX_AGE_SEGMENTS * ts.HZ),
-                    )
-                except TSKeyFrameNotFoundError as ex:
-                    # 録画中やコピー中の TS では、DB の duration 上は存在するセグメントでも実ファイル側にまだ安全な開始キーフレームがないことがある
-                    ## その場合に RuntimeError を 500 として上げるとスタックトレースがログを埋めるため、クライアントが再試行できる 503 へ落とす
-                    is_recording = recorded_video.status == 'Recording'
-                    logging.warning(
-                        f'{self.log_prefix}[Segment {segment_sequence}] '
-                        f'Keyframe was not found near requested time. '
-                        f'[playlist_start: {segment.playlist_start_seconds:.3f}s, '
-                        f'status: {recorded_video.status}]',
-                        exc_info=ex,
-                    )
-                    raise HTTPException(
-                        status_code = status.HTTP_503_SERVICE_UNAVAILABLE if is_recording is True else status.HTTP_422_UNPROCESSABLE_ENTITY,
-                        detail = 'Segment source position is not available yet' if is_recording is True else 'Segment source position could not be resolved',
-                    ) from ex
+                source_position = await asyncio.to_thread(
+                    TSKeyFrameSeeker.seek,
+                    file_path,
+                    self._ts_stream_info,
+                    segment.playlist_start_seconds,
+                    self._ts_source_base_dts,
+                    round(self._segment_duration_seconds * ts.HZ),
+                )
                 segment.source_file_position = source_position.source_file_position
                 segment.source_start_dts = source_position.source_start_dts
 
