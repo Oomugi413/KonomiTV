@@ -405,6 +405,47 @@ class TSKeyFrameSeeker:
 
 
     @staticmethod
+    def __findResyncOffset(
+        path: Path,
+        packet_size: int,
+        start_offset: int,
+        max_scan_bytes: int,
+    ) -> int | None:
+        """
+        指定位置以降で TS 同期バイトが連続するファイル位置を探す
+
+        Args:
+            path (Path): TS コンテナの録画ファイルパス
+            packet_size (int): ファイル上の TS パケットサイズ
+            start_offset (int): 探索を開始する概算ファイル位置
+            max_scan_bytes (int): 同期位置を探索する最大バイト数
+
+        Returns:
+            int | None: TS パケット境界とみなせるファイル位置、見つからない場合は None
+        """
+
+        file_size = path.stat().st_size
+        if file_size <= 0:
+            return None
+        start_offset = max(0, min(start_offset, max(file_size - 1, 0)))
+        max_scan_bytes = max(max_scan_bytes, packet_size * 5)
+
+        with path.open('rb') as file:
+            file.seek(start_offset)
+            data = file.read(max_scan_bytes)
+
+        max_offset = len(data) - packet_size * 4
+        if max_offset < 0:
+            return None
+        for offset in range(max_offset + 1):
+            # 任意 offset から切り出した TS では、ファイル先頭からの 188 バイト境界と実パケット境界がずれていることがある
+            ## 5 パケット連続で同期バイトが一致する位置だけを採用し、途中の payload 0x47 を誤検出しないようにする
+            if all(data[offset + packet_size * index] == ts.SYNC_BYTE[0] for index in range(5)) is True:
+                return start_offset + offset
+        return None
+
+
+    @staticmethod
     def __readFirstPCRNear(
         path: Path,
         stream_info: TSStreamInfo,
@@ -425,6 +466,15 @@ class TSKeyFrameSeeker:
         """
 
         aligned_offset = max(0, (start_offset // stream_info.packet_size) * stream_info.packet_size)
+        resync_offset = TSKeyFrameSeeker.__findResyncOffset(
+            path,
+            stream_info.packet_size,
+            aligned_offset,
+            min(max_scan_bytes, TSKeyFrameSeeker.PCR_SEARCH_WINDOW_BYTES),
+        )
+        if resync_offset is None:
+            return None
+        aligned_offset = resync_offset
         scanned_bytes = 0
         with path.open('rb') as file:
             file.seek(aligned_offset)
@@ -537,6 +587,15 @@ class TSKeyFrameSeeker:
         """
 
         aligned_start_offset = max(0, (start_offset // stream_info.packet_size) * stream_info.packet_size)
+        resync_offset = TSKeyFrameSeeker.__findResyncOffset(
+            path,
+            stream_info.packet_size,
+            aligned_start_offset,
+            min(max_scan_bytes, TSKeyFrameSeeker.PCR_SEARCH_WINDOW_BYTES),
+        )
+        if resync_offset is None:
+            return None
+        aligned_start_offset = resync_offset
         parser = TSKeyFrameSeeker.createPESParser(stream_info.codec)
         pending_pes_start: int | None = None
         last_keyframe_before: tuple[int, int] | None = None
