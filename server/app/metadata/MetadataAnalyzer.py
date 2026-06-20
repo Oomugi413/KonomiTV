@@ -317,32 +317,34 @@ class MetadataAnalyzer:
         full_probe_audio_streams = full_probe.getAudioStreams()
         sample_probe_video_streams = sample_probe.getVideoStreams()
         sample_probe_audio_streams = sample_probe.getAudioStreams()
-        if len(full_probe_video_streams) == 0:
-            logging.warning(f'{self.recorded_file_path}: No valid video streams found. (from full probe)')
-            return None
-        if len(full_probe_audio_streams) == 0:
-            logging.warning(f'{self.recorded_file_path}: No valid audio streams found. (from full probe)')
-            return None
-        if len(sample_probe_video_streams) == 0:
-            logging.warning(f'{self.recorded_file_path}: No valid video streams found. (from sample probe)')
-            return None
-        if len(sample_probe_audio_streams) == 0:
-            logging.warning(f'{self.recorded_file_path}: No valid audio streams found. (from sample probe)')
-            return None
 
         ## FFprobe の結果として "video" / "audio" の codec_type そのものは存在するが、
         ## 詳細が取得できず FFprobeOtherStream にフォールバックしているケース（スクランブルや不正 TS）を検出する
         has_video_codec_type = any(s.codec_type == 'video' for s in sample_probe.streams)
         has_audio_codec_type = any(s.codec_type == 'audio' for s in sample_probe.streams)
-        if len(sample_probe_video_streams) == 0 and has_video_codec_type is True:
-            logging.warning(f'{self.recorded_file_path}: Video stream details are missing. (Is the TS scrambled or unsupported?)')
+        if len(sample_probe_video_streams) == 0:
+            if has_video_codec_type is True:
+                logging.warning(f'{self.recorded_file_path}: Video stream details are missing. (Is the TS scrambled or unsupported?)')
+                return None
+            logging.warning(f'{self.recorded_file_path}: No valid video streams found. (from sample probe)')
             return None
-        if len(sample_probe_audio_streams) == 0 and has_audio_codec_type is True:
-            logging.warning(f'{self.recorded_file_path}: Audio stream details are missing. (Is the TS scrambled or unsupported?)')
+        if len(sample_probe_audio_streams) == 0:
+            if has_audio_codec_type is True:
+                logging.warning(f'{self.recorded_file_path}: Audio stream details are missing. (Is the TS scrambled or unsupported?)')
+                return None
+            logging.warning(f'{self.recorded_file_path}: No valid audio streams found. (from sample probe)')
             return None
-        if len(sample_probe_video_streams) == 0 and len(sample_probe_audio_streams) == 0:
-            logging.warning(f'{self.recorded_file_path}: No valid video or audio streams found.')
-            return None
+
+        # full probe はファイル先頭から解析するため、録画マージン先頭の乱れや PMT/ES 情報の欠落に引きずられて、
+        ## コンテナの duration は取れていてもストリーム詳細だけが取れないことがある
+        ## 再生可否の判定と映像・音声の代表情報は 25% 位置の sample probe を優先し、
+        ## full probe 側の欠落だけで再生可能な録画ファイルを捨てないようにする
+        if len(full_probe_video_streams) == 0:
+            logging.warning(f'{self.recorded_file_path}: No valid video streams found. (from full probe; using sample probe metadata)')
+            full_probe_video_streams = sample_probe_video_streams
+        if len(full_probe_audio_streams) == 0:
+            logging.warning(f'{self.recorded_file_path}: No valid audio streams found. (from full probe; using sample probe metadata)')
+            full_probe_audio_streams = sample_probe_audio_streams
 
         ## 再生時間
         if full_probe.format.duration is not None:

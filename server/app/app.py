@@ -293,5 +293,17 @@ async def Shutdown():
     await asyncio.sleep(0.5)
 
 # shutdown イベントが発火しない場合も想定し、アプリケーションの終了時に Shutdown() が確実に呼ばれるように
-# atexit は同期関数しか実行できないので、asyncio.run() でくるむ
-atexit.register(asyncio.run, Shutdown())
+# atexit は同期関数しか実行できないので、終了時に asyncio.run() でくるむ
+## asyncio.run(Shutdown()) を直接 register() に渡すと登録時点で coroutine オブジェクトが作られ、
+## ProcessPoolExecutor の fork 子プロセス終了時に未 await の coroutine として警告が出る
+def RunShutdownAtExit() -> None:
+    """
+    atexit からサーバー終了処理を実行する
+
+    Returns:
+        None
+    """
+
+    asyncio.run(Shutdown())
+
+atexit.register(RunShutdownAtExit)

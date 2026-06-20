@@ -1,6 +1,7 @@
 import asyncio
 import struct
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from io import BufferedReader, BytesIO
 from pathlib import Path
@@ -28,6 +29,18 @@ from app import logging, schemas
 from app.constants import JST
 from app.utils import ClosestMultiple, NormalizeToJSTDatetime
 from app.utils.TSInformation import TSInformation
+
+
+@dataclass(slots=True)
+class _EITProgramCandidate:
+    """
+    EIT[p/f] から復元した録画番組候補
+    """
+
+    recorded_program: schemas.RecordedProgram
+    seek_offset: int
+    section_number: int
+    completeness_score: int
 
 
 class TSInfoAnalyzer:
@@ -188,22 +201,16 @@ class TSInfoAnalyzer:
             return None
 
         # 録画番組情報のモデルを作成
-        ## EIT[p/f] のうち、現在と次の番組情報を両方取得した上で、録画マージンを考慮してどちらの番組を録画したかを判定する
-        recorded_program_present = self.__analyzeEITInformation(channel, is_following=False)
-        recorded_program_following = self.__analyzeEITInformation(channel, is_following=True)
-        ## 通常まず発生し得ないが、どちらかの番組情報が取得できなかった場合は正常に判定できないため None を返す
-        if recorded_program_present is None or recorded_program_following is None:
-            return None
+        ## EIT[p/f] は「その読み取り位置での現在/次の番組」なので、録画先頭マージン中の 0% 位置だけを見ると前番組を採用してしまう
+        ## 先に TS 内の TOT/PCR から録画時間帯を復元し、後段の EIT 候補選択で時間的に矛盾する番組を落とせるようにする
+        recording_time = self.analyzeRecordingTime()
+        if recording_time is not None:
+            self.recorded_video.recording_start_time = recording_time[0]
+            self.recorded_video.recording_end_time = recording_time[1]
 
-        # 録画開始時刻と次の番組の開始時刻を比較して、もし差が0〜1分以内なら次の番組情報を利用する
-        ## 録画ファイルのサイズ全体の 20% の位置にシークしてから番組情報を取得しているため、基本的には現在の番組情報を使うことになるはず
-        ## シークした位置が録画開始マージン範囲（=録画対象の番組の前番組）だった場合のみ、次の番組情報が利用される
-        ## 録画開始マージンは通常 5~10 秒程度で、長くても1分以内に収まるはず
-        if (self.recorded_video.recording_start_time is not None and
-            timedelta(minutes=0) <= (recorded_program_following.start_time - self.recorded_video.recording_start_time) <= timedelta(minutes=1)):
-            recorded_program = recorded_program_following
-        else:
-            recorded_program = recorded_program_present
+        recorded_program = self.__analyzeEITInformation(channel)
+        if recorded_program is None:
+            return None
 
         # 選択された番組情報の duration が 0 の場合は現在/次の両方とも正しい番組情報を取得できなかったことを意味するので、None を返す
         # このとき番組開始時刻・番組終了時刻は 1970-01-01 09:00:00 になっているはず
@@ -1220,27 +1227,161 @@ class TSInfoAnalyzer:
         return self.__collectAllChannels()
 
 
-    def __analyzeEITInformation(self, channel: schemas.Channel, is_following: bool = False) -> schemas.RecordedProgram | None:
+    def __analyzeEITInformation(self, channel: schemas.Channel) -> schemas.RecordedProgram | None:
         """
-        TS 内の EIT (Event Information Table) から番組情報を取得する
-        チャンネル情報（サービス ID も含まれる）が必須な理由は、CS など複数サービスを持つ TS で
-        意図しないチャンネルの番組情報が取得される問題を防ぐため
+        TS 内の EIT (Event Information Table) から録画対象の番組情報を取得する
 
         Args:
             channel (schemas.Channel): チャンネル情報を表すモデル
-            is_following (bool): 次の番組情報を取得するかどうか (デフォルト: 現在の番組情報)
 
         Returns:
             schemas.RecordedProgram | None: 録画番組情報を表すモデル、または取得に失敗した場合は None
         """
 
-        if is_following is True:
-            eit_section_number = 1
+        # EIT[p/f] は読み取り位置における「現在/次の番組」だけを示す
+        ## 録画先頭が前番組の終了間際に重なる場合があるため、複数位置から候補を集めて録画時間帯と照合する
+        candidates = self.__collectEITProgramCandidates(channel)
+        if len(candidates) == 0:
+            logging.warning(
+                f'{self.recorded_video.file_path}: Failed to parse EIT sections due to corrupted TS data. '
+                f'Falling back to filename-based metadata.'
+            )
+            return None
+
+        selected_candidate = self.__selectBestEITProgramCandidate(candidates)
+        if selected_candidate is None:
+            logging.warning(f'{self.recorded_video.file_path}: Program information not found.')
+            return None
+
+        recorded_program = selected_candidate.recorded_program
+        logging.info(
+            f'{self.recorded_video.file_path}: EIT program selected. '
+            f'[event_id: {recorded_program.event_id}, title: {recorded_program.title}, '
+            f'start_time: {recorded_program.start_time}, end_time: {recorded_program.end_time}, '
+            f'seek_offset: {selected_candidate.seek_offset}, section_number: {selected_candidate.section_number}]'
+        )
+        return recorded_program
+
+
+    def __collectEITProgramCandidates(self, channel: schemas.Channel) -> list[_EITProgramCandidate]:
+        """
+        複数位置の EIT[p/f] から録画番組候補を収集する
+
+        Args:
+            channel (schemas.Channel): チャンネル情報を表すモデル
+
+        Returns:
+            list[_EITProgramCandidate]: EIT から復元できた録画番組候補
+        """
+
+        # 破損した先頭領域や録画開始マージンを避けるため、既存の複数シーク位置をすべて候補収集に使う
+        if self.recorded_video.container_format == 'MPEG-TS':
+            seek_offsets = self.__getTSSectionSeekOffsets()
         else:
-            eit_section_number = 0
+            seek_offsets = [0]
+
+        candidates: list[_EITProgramCandidate] = []
+        seen_candidates: set[tuple[int | None, datetime, int]] = set()
+        corrupted_events = 0
+        total_sections = 0
+        matched_sections = 0
+
+        for seek_offset in seek_offsets:
+            section_count = 0
+            found_section_numbers: set[int] = set()
+            try:
+                for eit in self.__iterSectionsFromOffset(
+                    ActualStreamPresentFollowingEventInformationSection,
+                    seek_offset,
+                    allow_sanitized_fallback = True,
+                ):
+                    section_count += 1
+                    total_sections += 1
+                    if section_count > 2000:
+                        logging.warning(f'{self.recorded_video.file_path}: Analyzing EIT information timed out.')
+                        break
+
+                    # present/following 以外のセクションはここでは録画番組候補として使わない
+                    section_number = int(eit.section_number)
+                    if section_number not in (0, 1):
+                        continue
+
+                    # サービス ID / TSID / ONID が一致した EIT だけを候補にする
+                    ## CS など複数サービスを持つ TS で、別チャンネルの番組情報を採用することを防ぐ
+                    if eit.service_id != channel.service_id:
+                        continue
+                    if channel.transport_stream_id is not None and eit.transport_stream_id != channel.transport_stream_id:
+                        continue
+                    if channel.network_id is not None and eit.original_network_id != channel.network_id:
+                        continue
+
+                    matched_sections += 1
+                    found_section_numbers.add(section_number)
+                    for event_data in eit.events:
+                        try:
+                            candidate = self.__buildEITProgramCandidate(channel, eit, event_data, seek_offset)
+                        except (IndexError, ValueError, TypeError, AttributeError) as ex:
+                            corrupted_events += 1
+                            if corrupted_events <= 20:
+                                logging.debug(f'{self.recorded_video.file_path}: Skipped corrupted EIT event #{corrupted_events}:', exc_info=ex)
+                                continue
+                            logging.warning(f'{self.recorded_video.file_path}: Too many corrupted EIT events ({corrupted_events}).')
+                            break
+
+                        if candidate is None:
+                            continue
+
+                        candidate_key = (
+                            candidate.recorded_program.event_id,
+                            candidate.recorded_program.start_time,
+                            candidate.section_number,
+                        )
+                        if candidate_key in seen_candidates:
+                            continue
+                        seen_candidates.add(candidate_key)
+                        candidates.append(candidate)
+
+                    # 同じ offset から present/following を両方取れたら、同じ EIT の繰り返しを読み続けない
+                    if len(found_section_numbers) == 2:
+                        break
+            except (IndexError, ValueError, TypeError, AttributeError, struct.error) as ex:
+                logging.warning(
+                    f'{self.recorded_video.file_path}: Failed to parse EIT sections due to corrupted TS data.',
+                    exc_info=ex,
+                )
+                continue
+
+        logging.info(
+            f'{self.recorded_video.file_path}: EIT candidates collected. '
+            f'[candidates: {len(candidates)}, sections: {total_sections}, matched: {matched_sections}]'
+        )
+        return candidates
+
+
+    def __buildEITProgramCandidate(
+        self,
+        channel: schemas.Channel,
+        eit: Any,
+        event_data: Any,
+        seek_offset: int,
+    ) -> _EITProgramCandidate | None:
+        """
+        EIT の Event から録画番組候補を作成する
+
+        Args:
+            channel (schemas.Channel): チャンネル情報を表すモデル
+            eit (Any): ariblib の EIT セクション
+            event_data (Any): EIT 内のイベントデータ
+            seek_offset (int): この EIT を読み取ったファイルオフセット
+
+        Returns:
+            _EITProgramCandidate | None: 復元できた候補、または時刻情報が不足している場合は None
+        """
+
+        event: Any = ariblib.event.Event(eit, event_data)
 
         # 必要な情報を一旦変数として保持
-        event_id: int | None = None
+        event_id = int(event.event_id)
         title: str | None = None
         description: str | None = None
         detail: dict[str, str] | None = None
@@ -1253,253 +1394,104 @@ class TSInfoAnalyzer:
         primary_audio_language: str | None = None
         secondary_audio_type: str | None = None
         secondary_audio_language: str | None = None
+        completeness_score = 0
 
-        # TS から EIT (Event Information Table) を抽出
-        count: int = 0
-        corrupted_events: int = 0  # 破損したイベント数をカウント
-        total_sections: int = 0
-        matched_sections: int = 0
-        # 破損した先頭領域を回避するため、複数のシーク位置で EIT を試す
-        if self.recorded_video.container_format == 'MPEG-TS':
-            seek_offsets = self.__getTSSectionSeekOffsets()
-        else:
-            seek_offsets = [0]
-
-        for seek_offset in seek_offsets:
-            try:
-                for eit in self.__iterSectionsFromOffset(
-                    ActualStreamPresentFollowingEventInformationSection,
-                    seek_offset,
-                    allow_sanitized_fallback = True,
-                ):
-                    total_sections += 1
-
-                    # section_number と service_id が一致したときだけ
-                    # サービス ID が必要な理由は、CS などで同じトランスポートストリームに含まれる別チャンネルの番組情報になることを防ぐため
-                    if eit.section_number == eit_section_number and eit.service_id == channel.service_id:
-                        matched_sections += 1
-                        # TSID / ONID も一致する場合のみ採用する
-                        ## EIT は service_id だけでなく TSID / ONID も持つため、誤検出を避けるため一致条件に含める
-                        if channel.transport_stream_id is not None and eit.transport_stream_id != channel.transport_stream_id:
-                            continue
-                        if channel.network_id is not None and eit.original_network_id != channel.network_id:
-                            continue
-
-                        # EIT から得られる各種 Descriptor 内の情報を取得
-                        # ariblib.event が各種 Descriptor のラッパーになっていたのでそれを利用
-                        for event_data in eit.events:
-                            try:
-                                # EIT 内のイベントを取得
-                                event: Any = ariblib.event.Event(eit, event_data)
-                            except (IndexError, ValueError, TypeError, AttributeError) as ex:
-                                # 破損したイベントをスキップ
-                                corrupted_events += 1
-                                if corrupted_events <= 20:  # 20個までは許容
-                                    logging.debug(f'{self.recorded_video.file_path}: Skipped corrupted event #{corrupted_events}:', exc_info=ex)
-                                    continue
-                                else:
-                                    # 破損イベントが多すぎる場合は諦める
-                                    logging.warning(f'{self.recorded_video.file_path}: Too many corrupted events ({corrupted_events}), abandoning this position.')
-                                    return None
-
-                            # デフォルトで毎回設定されている情報
-                            ## イベント ID
-                            event_id = int(event.event_id)
-                            ## 番組開始時刻 (タイムゾーンを日本時間 (+9:00) に設定)
-                            ## 注意: present の duration が None (終了時間未定) の場合のみ、following の start_time が None になることがある
-                            if event.start_time is not None:
-                                start_time = NormalizeToJSTDatetime(cast(datetime, event.start_time))
-                            ## 番組長 (秒)
-                            ## 注意: 臨時ニュースなどで放送時間未定の場合は None になる
-                            if event.duration is not None:
-                                duration = cast(timedelta, event.duration).total_seconds()
-                            ## 番組終了時刻を start_time と duration から算出
-                            if start_time is not None and duration is not None:
-                                end_time = start_time + timedelta(seconds=duration)
-                            ## ARIB TR-B15 第三分冊 (https://vs1p.manualzilla.com/store/data/006629648.pdf)
-                            ## free_CA_mode が 1 のとき有料番組、0 のとき無料番組だそう
-                            ## bool に変換した後、真偽を反転させる
-                            is_free = not bool(event.free_CA_mode)
-
-                            # 番組名, 番組概要 (ShortEventDescriptor)
-                            if hasattr(event, 'title') and hasattr(event, 'desc'):
-                                ## 番組名
-                                title = TSInformation.formatString(event.title)
-                                ## 番組概要
-                                description = TSInformation.formatString(event.desc)
-
-                            # 番組詳細情報 (ExtendedEventDescriptor)
-                            if hasattr(event, 'detail'):
-                                detail = {}
-                                # 番組詳細テキストから取得した、見出しと本文の辞書ごとに
-                                for head, text in cast(dict[str, str], event.detail).items():
-                                    # 見出しと本文
-                                    ## 見出しのみ ariblib 側で意図的に重複防止のためのタブ文字付加が行われる場合があるため、
-                                    ## strip() では明示的に半角スペースと改行のみを指定している
-                                    head_hankaku = TSInformation.formatString(head).replace('◇', '').strip(' \r\n')  # ◇ を取り除く
-                                    ## ないとは思うが、万が一この状態で見出しが衝突しうる場合は、見出しの後ろにタブ文字を付加する
-                                    while head_hankaku in detail.keys():
-                                        head_hankaku += '\t'
-                                    ## 見出しが空の場合、固定で「番組内容」としておく
-                                    if head_hankaku == '':
-                                        head_hankaku = '番組内容'
-                                    text_hankaku = TSInformation.formatString(text).strip()
-                                    detail[head_hankaku] = text_hankaku
-                                    # 番組概要が空の場合、番組詳細の最初の本文を概要として使う
-                                    # 空でまったく情報がないよりかは良いはず
-                                    if description is not None and description.strip() == '':
-                                        description = text_hankaku
-
-                            ## ジャンル情報 (ContentDescriptor)
-                            if hasattr(event, 'genre') and hasattr(event, 'subgenre') and hasattr(event, 'user_genre'):
-                                genres = []
-                                for index, _ in enumerate(event.genre):  # ジャンルごとに
-                                    # major … 大分類
-                                    # middle … 中分類
-                                    genre_dict: schemas.Genre = {
-                                        'major': event.genre[index].replace('／', '・'),
-                                        'middle': event.subgenre[index].replace('／', '・'),
-                                    }
-                                    # BS/地上デジタル放送用番組付属情報がジャンルに含まれている場合、user_genre から拡張情報を取得する
-                                    # たとえば「中止の可能性あり」や「延長の可能性あり」といった情報が取れる
-                                    if genre_dict['major'] == '拡張':
-                                        if genre_dict['middle'] == 'BS/地上デジタル放送用番組付属情報':
-                                            genre_dict['middle'] = event.user_genre[index]
-                                        # 「拡張」はあるがBS/地上デジタル放送用番組付属情報でない場合はなんの値なのかわからないのでパス
-                                        else:
-                                            continue
-                                    # ジャンルを追加
-                                    genres.append(genre_dict)
-
-                            # 音声情報 (AudioComponentDescriptor)
-                            ## 主音声情報
-                            if hasattr(event, 'audio'):
-                                ## 主音声の種別
-                                primary_audio_type = str(event.audio)
-                            ## 副音声情報
-                            if hasattr(event, 'second_audio'):
-                                ## 副音声の種別
-                                secondary_audio_type = str(event.second_audio)
-                            ## 主音声・副音声の言語
-                            ## event クラスには用意されていないので自前で取得する
-                            for acd in event_data.descriptors.get(AudioComponentDescriptor, []):
-                                if bool(acd.main_component_flag) is True:
-                                    ## 主音声の言語
-                                    primary_audio_language = TSInformation.getISO639LanguageCodeName(acd.ISO_639_language_code)
-                                    ## デュアルモノのみ
-                                    if primary_audio_type == '1/0+1/0モード(デュアルモノ)':
-                                        if bool(acd.ES_multi_lingual_flag) is True:
-                                            primary_audio_language += '+' + \
-                                                TSInformation.getISO639LanguageCodeName(acd.ISO_639_language_code_2)
-                                        else:
-                                            primary_audio_language += '+副音声'  # 副音声で固定
-                                else:
-                                    ## 副音声の言語
-                                    secondary_audio_language = TSInformation.getISO639LanguageCodeName(acd.ISO_639_language_code)
-                                    ## デュアルモノのみ
-                                    if secondary_audio_type == '1/0+1/0モード(デュアルモノ)':
-                                        if bool(acd.ES_multi_lingual_flag) is True:
-                                            secondary_audio_language += '+' + \
-                                                TSInformation.getISO639LanguageCodeName(acd.ISO_639_language_code_2)
-                                        else:
-                                            secondary_audio_language += '+副音声'  # 副音声で固定
-
-                            # EIT から取得できるすべての情報を取得できたら抜ける
-                            ## 一回の EIT ですべての情報 (Descriptor) が降ってくるとは限らない
-                            ## 副音声情報は副音声がない番組では当然取得できないので、除外している
-                            if all([
-                                event_id is not None,
-                                title is not None,
-                                description is not None,
-                                detail is not None,
-                                start_time is not None,
-                                end_time is not None,
-                                duration is not None,
-                                is_free is not None,
-                                genres is not None,
-                                primary_audio_type is not None,
-                                primary_audio_language is not None,
-                            ]):
-                                break
-
-                        else: # 多重ループを抜けるトリック
-                            continue
-                        break
-
-                    # カウントを追加
-                    count += 1
-
-                    # ループが 100 回を超えたら、番組詳細とジャンルの初期値を設定する
-                    # 稀に番組詳細やジャンルが全く設定されていない番組があり、存在しない情報を探して延々とループするのを避けるため
-                    if count > 100:
-                        if detail is None:
-                            detail = {}
-                        if genres is None:
-                            genres = []
-
-                    # ループが 2000 回を超えたら (≒20回シークしても放送時間が確定しなかったら) 、タイムアウトでループを抜ける
-                    if count > 2000:
-                        p_or_f = 'following' if is_following is True else 'present'
-                        logging.warning(f'{self.recorded_video.file_path}: Analyzing EIT information ({p_or_f}) timed out.')
-                        break
-
-                # 取得できたら以降の解析は不要
-                if event_id is not None and title is not None and start_time is not None:
-                    break
-            except (IndexError, ValueError, TypeError, AttributeError, struct.error) as ex:
-                # TS ファイルの破損により EIT セクションのパース自体が失敗した場合
-                # この時点でループに入る前、または反復処理中に例外が発生しているため、個別のイベントエラーハンドリング（lines 782-791）は実行されない
-                # フォールバック処理（ファイル名ベースのメタデータ取得）に任せるため None を返す
-                p_or_f = 'following' if is_following is True else 'present'
-                logging.warning(
-                    f'{self.recorded_video.file_path}: Failed to parse EIT sections ({p_or_f}) due to corrupted TS data.',
-                    exc_info=ex
-                )
-                continue
-
-            # 取得できたら以降の解析は不要
-            if event_id is not None and title is not None and start_time is not None:
-                break
-
-        if event_id is None and title is None and start_time is None:
-            p_or_f = 'following' if is_following is True else 'present'
-            logging.warning(
-                f'{self.recorded_video.file_path}: Failed to parse EIT sections ({p_or_f}) due to corrupted TS data. '
-                f'Falling back to filename-based metadata.'
-            )
+        # 番組開始時刻と長さは、録画時間帯との照合に必須なので最初に復元する
+        if event.start_time is not None:
+            start_time = NormalizeToJSTDatetime(cast(datetime, event.start_time))
+        if event.duration is not None:
+            duration = cast(timedelta, event.duration).total_seconds()
+        if start_time is None or duration is None:
+            return None
+        end_time = start_time + timedelta(seconds=duration)
+        if duration <= 0:
             return None
 
-        logging.info(
-            f'{self.recorded_video.file_path}: EIT ({ "following" if is_following else "present" }) parsed '
-            f'(sections: {total_sections}, matched: {matched_sections}, event_id: {event_id}).'
-        )
+        # ARIB TR-B15 第三分冊によると free_CA_mode が 1 のとき有料番組、0 のとき無料番組
+        ## bool に変換した後、真偽を反転させる
+        is_free = not bool(event.free_CA_mode)
+        completeness_score += 1
 
-        # この時点でタイトルを取得できていない場合（タイムアウト発生時）、フォールバックとして拡張子を除いたファイル名をフォーマットした上でタイトルとして使用する
+        # 番組名, 番組概要 (ShortEventDescriptor)
+        if hasattr(event, 'title') and hasattr(event, 'desc'):
+            title = TSInformation.formatString(event.title)
+            description = TSInformation.formatString(event.desc)
+            completeness_score += 2
+
+        # 番組詳細情報 (ExtendedEventDescriptor)
+        if hasattr(event, 'detail'):
+            detail = {}
+            # 番組詳細テキストから取得した、見出しと本文の辞書ごとに
+            for head, text in cast(dict[str, str], event.detail).items():
+                # 見出しと本文
+                ## 見出しのみ ariblib 側で意図的に重複防止のためのタブ文字付加が行われる場合があるため、
+                ## strip() では明示的に半角スペースと改行のみを指定している
+                head_hankaku = TSInformation.formatString(head).replace('◇', '').strip(' \r\n')
+                ## ないとは思うが、万が一この状態で見出しが衝突しうる場合は、見出しの後ろにタブ文字を付加する
+                while head_hankaku in detail.keys():
+                    head_hankaku += '\t'
+                ## 見出しが空の場合、固定で「番組内容」としておく
+                if head_hankaku == '':
+                    head_hankaku = '番組内容'
+                text_hankaku = TSInformation.formatString(text).strip()
+                detail[head_hankaku] = text_hankaku
+                # 番組概要が空の場合、番組詳細の最初の本文を概要として使う
+                ## 空でまったく情報がないよりかは良いはず
+                if description is not None and description.strip() == '':
+                    description = text_hankaku
+            completeness_score += 1
+
+        # ジャンル情報 (ContentDescriptor)
+        if hasattr(event, 'genre') and hasattr(event, 'subgenre') and hasattr(event, 'user_genre'):
+            genres = []
+            for index, _ in enumerate(event.genre):
+                # major は大分類、middle は中分類
+                genre_dict: schemas.Genre = {
+                    'major': event.genre[index].replace('／', '・'),
+                    'middle': event.subgenre[index].replace('／', '・'),
+                }
+                # BS/地上デジタル放送用番組付属情報がジャンルに含まれている場合、user_genre から拡張情報を取得する
+                ## たとえば「中止の可能性あり」や「延長の可能性あり」といった情報が取れる
+                if genre_dict['major'] == '拡張':
+                    if genre_dict['middle'] == 'BS/地上デジタル放送用番組付属情報':
+                        genre_dict['middle'] = event.user_genre[index]
+                    # 「拡張」はあるがBS/地上デジタル放送用番組付属情報でない場合はなんの値なのかわからないのでパス
+                    else:
+                        continue
+                genres.append(genre_dict)
+            completeness_score += 1
+
+        # 音声情報 (AudioComponentDescriptor)
+        if hasattr(event, 'audio'):
+            primary_audio_type = str(event.audio)
+            completeness_score += 1
+        if hasattr(event, 'second_audio'):
+            secondary_audio_type = str(event.second_audio)
+            completeness_score += 1
+
+        # 主音声・副音声の言語
+        ## event クラスには用意されていないので自前で取得する
+        for acd in event_data.descriptors.get(AudioComponentDescriptor, []):
+            if bool(acd.main_component_flag) is True:
+                primary_audio_language = TSInformation.getISO639LanguageCodeName(acd.ISO_639_language_code)
+                if primary_audio_type == '1/0+1/0モード(デュアルモノ)':
+                    if bool(acd.ES_multi_lingual_flag) is True:
+                        primary_audio_language += '+' + TSInformation.getISO639LanguageCodeName(acd.ISO_639_language_code_2)
+                    else:
+                        primary_audio_language += '+副音声'
+                completeness_score += 1
+            else:
+                secondary_audio_language = TSInformation.getISO639LanguageCodeName(acd.ISO_639_language_code)
+                if secondary_audio_type == '1/0+1/0モード(デュアルモノ)':
+                    if bool(acd.ES_multi_lingual_flag) is True:
+                        secondary_audio_language += '+' + TSInformation.getISO639LanguageCodeName(acd.ISO_639_language_code_2)
+                    else:
+                        secondary_audio_language += '+副音声'
+                completeness_score += 1
+
+        # この時点でタイトルを取得できていない場合、拡張子を除いたファイル名をフォーマットした上でタイトルとして使用する
         if title is None:
             title = TSInformation.formatString(Path(self.recorded_video.file_path).stem)
-
-        # この時点で番組開始時刻・番組終了時刻を取得できていない場合、適当なダミー値を設定する
-        ## start_time が None になる組み合わせは「現在の番組の終了時間が未定」かつ「次の番組情報を取得しようとした」ときか、
-        ## 録画ファイルが短すぎて EIT のパースに失敗した場合のみ
-        ## 番組情報としては全く使い物にならないし、基本現在の番組情報を使わせるようにしたいので、後続の処理で使われないような値を設定する
-        if start_time is None and end_time is None:
-            start_time = datetime(1970, 1, 1, 9, tzinfo=JST)
-            end_time = datetime(1970, 1, 1, 9, tzinfo=JST)
-            duration = 0.0
-
-        # 番組開始時刻が取得できないが番組終了時刻のみ取得できる状況は仕様上発生し得ない
-        assert start_time is not None
-
-        # この時点で番組終了時刻のみを取得できていない場合、フォールバックとして録画終了時刻を利用する
-        ## さらにまずあり得ないとは思うが、もし録画終了時刻が取得できていない場合は、番組開始時刻 + 動画長を利用する
-        if end_time is None:
-            if self.recorded_video.recording_end_time is not None:
-                end_time = self.recorded_video.recording_end_time
-                duration = (end_time - start_time).total_seconds()
-            else:
-                end_time = start_time + timedelta(seconds=self.recorded_video.duration)
-                duration = self.recorded_video.duration
-        assert duration is not None
 
         # 録画番組情報を表すモデルを作成 (ここでは確実に値を設定できるフィールドのみ設定)
         recorded_program = schemas.RecordedProgram(
@@ -1519,7 +1511,6 @@ class TSInfoAnalyzer:
         )
 
         # 以下のフィールドは、対応するデータを取得できなかった場合に Pydantic モデルに設定されているデフォルト値が使われる
-        ## データが取得できなかったとしたら、そのデータが EIT に含まれていないが、タイムアウトした場合に限られるはず
         if description is not None:
             recorded_program.description = description
         if detail is not None:
@@ -1532,12 +1523,81 @@ class TSInfoAnalyzer:
             recorded_program.primary_audio_type = primary_audio_type
         if primary_audio_language is not None:
             recorded_program.primary_audio_language = primary_audio_language
-        if secondary_audio_type is not None:  # 音声多重放送のみ存在
+        if secondary_audio_type is not None:
             recorded_program.secondary_audio_type = secondary_audio_type
-        if secondary_audio_language is not None:  # 音声多重放送のみ存在
+        if secondary_audio_language is not None:
             recorded_program.secondary_audio_language = secondary_audio_language
 
-        return recorded_program
+        return _EITProgramCandidate(
+            recorded_program = recorded_program,
+            seek_offset = seek_offset,
+            section_number = int(eit.section_number),
+            completeness_score = completeness_score,
+        )
+
+
+    def __selectBestEITProgramCandidate(self, candidates: list[_EITProgramCandidate]) -> _EITProgramCandidate | None:
+        """
+        EIT 候補の中から録画時間帯に最も矛盾しない番組を選択する
+
+        Args:
+            candidates (list[_EITProgramCandidate]): EIT から復元できた録画番組候補
+
+        Returns:
+            _EITProgramCandidate | None: 選択された候補、または選択不能な場合は None
+        """
+
+        if len(candidates) == 0:
+            return None
+
+        recording_start_time = self.recorded_video.recording_start_time
+        recording_end_time = self.recorded_video.recording_end_time
+        if recording_start_time is not None and recording_end_time is not None:
+            recording_duration = max((recording_end_time - recording_start_time).total_seconds(), 0.0)
+            recording_mid_time = recording_start_time + timedelta(seconds=recording_duration / 2)
+
+            def ScoreByRecordingTime(candidate: _EITProgramCandidate) -> tuple[float, int, int, int, float]:
+                program = candidate.recorded_program
+                overlap_start_time = max(program.start_time, recording_start_time)
+                overlap_end_time = min(program.end_time, recording_end_time)
+                overlap_seconds = max((overlap_end_time - overlap_start_time).total_seconds(), 0.0)
+                contains_mid_time = int(program.start_time <= recording_mid_time < program.end_time)
+                contains_recording_start = int(program.start_time <= recording_start_time < program.end_time)
+                program_mid_time = program.start_time + timedelta(seconds=program.duration / 2)
+                center_distance_seconds = abs((program_mid_time - recording_mid_time).total_seconds())
+                return (
+                    overlap_seconds,
+                    contains_mid_time,
+                    contains_recording_start,
+                    candidate.completeness_score,
+                    -center_distance_seconds,
+                )
+
+            best_candidate = max(candidates, key=ScoreByRecordingTime)
+            best_overlap_seconds = ScoreByRecordingTime(best_candidate)[0]
+            if best_overlap_seconds > 0:
+                return best_candidate
+
+            logging.warning(
+                f'{self.recorded_video.file_path}: No EIT candidate overlaps with the recording time range. '
+                f'[recording_start_time: {recording_start_time}, recording_end_time: {recording_end_time}]'
+            )
+
+        # TOT を取得できなかった場合や、時刻の矛盾で全候補が落ちる場合は 20% 位置に最も近い present を優先する
+        ## 20% 位置は通常の録画開始マージンを十分抜けた本編側で、従来コメント上も期待されていた基準位置
+        effective_size = min(self.end_ts_offset, self.recorded_video.file_size)
+        preferred_offset = ClosestMultiple(int(effective_size * 0.2), ts.PACKET_SIZE) if effective_size > 0 else 0
+
+        def ScoreByProbePosition(candidate: _EITProgramCandidate) -> tuple[int, int, int]:
+            offset_distance = abs(candidate.seek_offset - preferred_offset)
+            is_present = int(candidate.section_number == 0)
+            return (
+                -offset_distance,
+                is_present,
+                candidate.completeness_score,
+            )
+
+        return max(candidates, key=ScoreByProbePosition)
 
 
     def __selectServiceIdByPidFrequency(

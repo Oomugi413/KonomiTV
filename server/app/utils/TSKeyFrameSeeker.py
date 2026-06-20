@@ -45,6 +45,12 @@ class TSStreamInfo:
     packet_size: int
 
 
+class TSKeyFrameNotFoundError(RuntimeError):
+    """
+    指定時刻付近で HLS セグメント開始に使えるキーフレームが見つからなかったことを表す例外
+    """
+
+
 class TSKeyFrameCollector:
     """
     連続して読み込まれる TS パケットから、入力ファイル側のキーフレーム位置を収集する
@@ -343,7 +349,7 @@ class TSKeyFrameSeeker:
                 pass
 
         if keyframe is None:
-            raise RuntimeError(f'Keyframe was not found near requested time: {path}')
+            raise TSKeyFrameNotFoundError(f'Keyframe was not found near requested time: {path}')
 
         return TSKeyFramePosition(
             source_file_position = keyframe.offset,

@@ -29,7 +29,11 @@ from app.streams.VideoEncodingTask import VideoEncodingTask
 from app.streams.VideoSegmentPlanner import VideoSegmentPlanner
 from app.utils import SetTimeout
 from app.utils.MP4KeyFrameParser import MP4KeyFrameParser
-from app.utils.TSKeyFrameSeeker import TSKeyFrameSeeker, TSStreamInfo
+from app.utils.TSKeyFrameSeeker import (
+    TSKeyFrameNotFoundError,
+    TSKeyFrameSeeker,
+    TSStreamInfo,
+)
 
 
 @dataclass
@@ -97,6 +101,10 @@ class VideoStream:
     # 再生しながら見つけたキーフレーム位置を segment_map として保存する最小件数
     ## DB 書き込みを HLS セグメントごとに発生させず、再生済み範囲をある程度まとめて保存する
     SEGMENT_MAP_SAVE_BATCH_SIZE: ClassVar[int] = 16
+
+    # オンデマンド探索で許容するキーフレームの最大古さ (HLS セグメント数)
+    ## 長い GOP や PCR 二分探索の推定ズレがある TS でも、実用上許容できる範囲では再生を継続させる
+    ON_DEMAND_KEYFRAME_MAX_AGE_SEGMENTS: ClassVar[int] = 5
 
     # 録画視聴セッションのインスタンスが入る、セッション ID をキーとした辞書
     # この辞書に録画視聴セッションに関する全てのデータが格納されている
@@ -534,14 +542,32 @@ class VideoStream:
                         self._ts_stream_info,
                     )
 
-                source_position = await asyncio.to_thread(
-                    TSKeyFrameSeeker.seek,
-                    file_path,
-                    self._ts_stream_info,
-                    segment.playlist_start_seconds,
-                    self._ts_source_base_dts,
-                    round(self._segment_duration_seconds * ts.HZ),
-                )
+                try:
+                    source_position = await asyncio.to_thread(
+                        TSKeyFrameSeeker.seek,
+                        file_path,
+                        self._ts_stream_info,
+                        segment.playlist_start_seconds,
+                        self._ts_source_base_dts,
+                        round(self._segment_duration_seconds * self.ON_DEMAND_KEYFRAME_MAX_AGE_SEGMENTS * ts.HZ),
+                    )
+                except TSKeyFrameNotFoundError as ex:
+                    # 録画中はまだファイル末尾付近の GOP が揃っていない可能性があるため、クライアントに再試行可能な失敗として伝える
+                    ## 録画済みファイルでは同じリクエストを繰り返しても改善しないため、セグメント生成不能として 422 にする
+                    status_code = (
+                        status.HTTP_503_SERVICE_UNAVAILABLE
+                        if recorded_video.status == 'Recording'
+                        else status.HTTP_422_UNPROCESSABLE_ENTITY
+                    )
+                    logging.warning(
+                        f'{self.log_prefix}[Segment {segment_sequence}] '
+                        f'Failed to resolve TS keyframe near requested time.',
+                        exc_info=ex,
+                    )
+                    raise HTTPException(
+                        status_code = status_code,
+                        detail = 'Keyframe was not found near requested time',
+                    ) from ex
                 segment.source_file_position = source_position.source_file_position
                 segment.source_start_dts = source_position.source_start_dts
 
