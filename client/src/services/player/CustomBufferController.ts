@@ -11,6 +11,10 @@ import Hls, { BufferController, FragmentTracker } from 'hls.js';
 // @ts-ignore
 class CustomBufferController extends BufferController {
 
+    // 録画中ファイルの末尾は、実際に HLS セグメントとして安定して読める位置より少し先に見えることがある。
+    // プレイヤー側では末尾 15 秒を追跡用の余白として扱い、早めに manifest を再読み込みする。
+    private static readonly RECORDING_CHASE_PLAYBACK_EDGE_BUFFER_SECONDS = 15;
+
     // バッファフラッシュ時のイベントハンドラー（独自）
     private onCustomBufferFlushingHandler: () => void;
 
@@ -135,7 +139,11 @@ class CustomBufferController extends BufferController {
 
         // 録画中の追っかけ再生では、既存プレイリスト上の末尾に近づいた時点で manifest を積極的に再読込する。
         // hls.js の EVENT playlist 更新だけに任せると、残り数秒の状態で次のセグメント出現を待つまで UI が止まりやすい。
-        if (this.isRecordingChasePlayback === true && Number.isFinite(duration) && duration - media.currentTime <= 10) {
+        if (
+            this.isRecordingChasePlayback === true &&
+            Number.isFinite(duration) &&
+            duration - media.currentTime <= CustomBufferController.RECORDING_CHASE_PLAYBACK_EDGE_BUFFER_SECONDS
+        ) {
             this.reloadManifest(hls, 1000);
         }
 

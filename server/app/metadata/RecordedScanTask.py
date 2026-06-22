@@ -96,6 +96,9 @@ class RecordedScanTask:
     # 録画バックエンドから取得した録画中ファイルパスのキャッシュ有効時間 (秒)
     ACTIVE_RECORDING_PATHS_CACHE_SECONDS: ClassVar[int] = 5
 
+    # 録画バックエンドが把握している録画中ファイルを同期する間隔 (秒)
+    ACTIVE_RECORDING_SYNC_INTERVAL_SECONDS: ClassVar[int] = 5
+
     # 録画中ファイルの最小データ長 (秒)
     MINIMUM_RECORDING_SECONDS: ClassVar[int] = 60
 
@@ -149,10 +152,17 @@ class RecordedScanTask:
         self._active_recording_paths_cache: ActiveRecordingFilePaths | None = None
         self._active_recording_paths_cache_updated_at: datetime | None = None
         self._active_recording_paths_lock = asyncio.Lock()
+        # 録画バックエンドが把握している録画中ファイルパスのログ出力重複を抑えるため、直前の状態を保持する。
+        ## 参照箇所: __syncActiveRecordingFiles()
+        ## 前提条件: 文字列化済みパスの集合だけを保持し、ファイル実体にはアクセスしない。
+        self._active_recording_paths_log_signature: tuple[bool, tuple[str, ...]] | None = None
 
         # タスクの状態管理
         self._is_running = False
         self._task: asyncio.Task[None] | None = None
+        # 録画バックエンドが把握している録画中ファイルだけを同期するタスクの状態管理
+        self._is_active_recording_sync_running = False
+        self._active_recording_sync_task: asyncio.Task[None] | None = None
 
         # 録画フォルダ以下の一括スキャンを実行中かどうか
         self._is_batch_scan_running = False
@@ -201,6 +211,118 @@ class RecordedScanTask:
             return self._active_recording_paths_cache
 
 
+    async def __syncActiveRecordingFiles(self) -> None:
+        """
+        録画バックエンドが把握している録画中ファイルだけを DB と同期する。
+        """
+
+        active_recording_file_paths = await self.__getActiveRecordingFilePaths()
+
+        # 録画バックエンドから信頼できる結果が得られない場合は、従来のファイル監視による推測に任せる。
+        if active_recording_file_paths.is_reliable is False:
+            return
+
+        # EPGStation / EDCB への問い合わせが動いていることを確認しやすいよう、
+        # active path の状態が変化したときだけ info レベルで要約を出力する。
+        current_signature = (
+            active_recording_file_paths.is_reliable,
+            tuple(sorted(active_recording_file_paths.paths)),
+        )
+        if current_signature != self._active_recording_paths_log_signature:
+            self._active_recording_paths_log_signature = current_signature
+            logging.info(
+                f'Active recording paths from {active_recording_file_paths.backend}: '
+                f'{len(active_recording_file_paths.paths)} candidate(s).'
+            )
+
+        # EPGStation は録画ファイル名だけを返す構成があるため、RecordingStatusProvider 側で recorded_folders 配下に展開済みの候補を総当たりする。
+        # 存在するファイルだけを処理対象にすることで、全録画フォルダのスキャンを避ける。
+        processed_paths: set[str] = set()
+        for active_path in sorted(active_recording_file_paths.paths):
+            file_path = anyio.Path(active_path)
+            if file_path.suffix.lower() not in self.SCAN_TARGET_EXTENSIONS:
+                continue
+            if str(file_path) in processed_paths:
+                continue
+            if await self.isFileExists(file_path) is False:
+                continue
+            processed_paths.add(str(file_path))
+
+            # active list に載っているファイルは録画中として管理対象に入れてから通常の単一ファイル処理へ渡す。
+            ## 既に DB が Recording なら processRecordedFile() 側で早期 return するため、5 秒間隔でも重い再解析は避けられる。
+            stat = await file_path.stat()
+            file_modified_at = datetime.fromtimestamp(stat.st_mtime, tz=JST)
+            self._recording_files[file_path] = FileRecordingInfo(
+                last_modified = file_modified_at,
+                last_checked = datetime.now(tz=JST),
+                file_size = stat.st_size,
+                mtime_continuous_start_at = file_modified_at,
+            )
+            await self.processRecordedFile(file_path)
+
+        # DB に残っている Recording レコードのうち、録画バックエンドの active list に存在しないものは録画完了候補として処理する。
+        ## 件数は通常ごく少数なので、全録画フォルダのスキャンよりはるかに軽い。
+        recording_video_rows = await RecordedVideo.filter(status='Recording').values('file_path')
+        for row in recording_video_rows:
+            file_path_str = row['file_path']
+            if IsActiveRecordingFilePath(file_path_str, active_recording_file_paths.paths) is True:
+                continue
+            file_path = anyio.Path(file_path_str)
+            self._recording_files.pop(file_path, None)
+            if await self.isFileExists(file_path) is True:
+                await self.processRecordedFile(file_path)
+
+
+    async def __syncActiveRecordingFilesLoop(self) -> None:
+        """
+        録画バックエンドが把握している録画中ファイルを定期的に同期し続ける。
+        """
+
+        while self._is_active_recording_sync_running:
+            try:
+                await self.__syncActiveRecordingFiles()
+            except asyncio.CancelledError:
+                raise
+            except Exception as ex:
+                logging.error('Error in active recording file sync:', exc_info=ex)
+
+            await asyncio.sleep(self.ACTIVE_RECORDING_SYNC_INTERVAL_SECONDS)
+
+
+    async def startActiveRecordingSync(self) -> None:
+        """
+        録画バックエンドが把握している録画中ファイルだけを同期するタスクを開始する。
+        """
+
+        # 既に実行中の場合は何もしない
+        if self._is_active_recording_sync_running:
+            return
+        self._is_active_recording_sync_running = True
+
+        # バックグラウンドタスクとして実行
+        self._active_recording_sync_task = asyncio.create_task(self.__syncActiveRecordingFilesLoop())
+
+
+    async def stopActiveRecordingSync(self) -> None:
+        """
+        録画バックエンドが把握している録画中ファイルだけを同期するタスクを停止する。
+        """
+
+        # 既に停止中の場合は何もしない
+        if not self._is_active_recording_sync_running:
+            return
+
+        # 実行中タスクを停止
+        self._is_active_recording_sync_running = False
+        if self._active_recording_sync_task is not None:
+            self._active_recording_sync_task.cancel()
+            try:
+                await self._active_recording_sync_task
+            except asyncio.CancelledError:
+                pass
+            self._active_recording_sync_task = None
+
+
     async def start(self) -> None:
         """
         録画フォルダの監視タスクを開始する
@@ -212,6 +334,10 @@ class RecordedScanTask:
             return
         self._is_running = True
 
+        # 全録画フォルダのスキャン・監視を使う通常構成でも、録画バックエンドの active list 同期は独立して起動する。
+        ## 呼び出し側が全録画フォルダのスキャン・監視を無効化したい場合は startActiveRecordingSync() だけを呼び出せばよい。
+        await self.startActiveRecordingSync()
+
         # バックグラウンドタスクとして実行
         self._task = asyncio.create_task(self.run())
 
@@ -221,6 +347,9 @@ class RecordedScanTask:
         録画フォルダの監視タスクを停止する
         このメソッドはサーバー終了時に app.py から自動的に呼ばれる
         """
+
+        # active recording sync は start() と独立して起動できるため、stop() からも必ず停止する。
+        await self.stopActiveRecordingSync()
 
         # 既に停止中の場合は何もしない
         if not self._is_running:

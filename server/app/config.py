@@ -194,11 +194,15 @@ class _ServerSettingsGeneral(BaseModel):
         return edcb_url
 
     @field_validator('epgstation_url')
-    def validate_epgstation_url(cls, epgstation_url: Url) -> Url:
+    def validate_epgstation_url(cls, epgstation_url: Url, info: ValidationInfo) -> Url:
         # URL を末尾のスラッシュありに統一
         epgstation_url = Url(str(epgstation_url).rstrip('/') + '/')
         # EPGStation は録画/予約状態を補完するバックエンドで、環境によっては常駐していないことがある。
         # 起動時の疎通確認で KonomiTV 全体を落とさないよう、ここでは URL 形式の検証と正規化だけ行う。
+        if not (type(info.context) is dict and info.context.get('bypass_validation') is True):
+            if info.data.get('backend') == 'EPGStation':
+                from app import logging
+                logging.info(f'Backend: EPGStation ({epgstation_url})')
         return epgstation_url
 
     @field_validator('mirakurun_url')
@@ -249,7 +253,10 @@ class _ServerSettingsGeneral(BaseModel):
                     f'{mirakurun_or_mirakc} の URL を間違えている可能性があります。'
                 )
             from app import logging
-            logging.info(f'Backend: {mirakurun_or_mirakc} {version_info} ({mirakurun_url})')
+            if info.data.get('backend') == 'Mirakurun':
+                logging.info(f'Backend: {mirakurun_or_mirakc} {version_info} ({mirakurun_url})')
+            else:
+                logging.info(f'Receive source: {mirakurun_or_mirakc} {version_info} ({mirakurun_url})')
             if info.data.get('always_receive_tv_from_mirakurun') is True:
                 logging.info(f'Always receive TV from {mirakurun_or_mirakc}.')
         return mirakurun_url

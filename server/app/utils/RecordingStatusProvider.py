@@ -5,12 +5,17 @@ from datetime import datetime, timedelta
 from pathlib import PurePath, PurePosixPath
 from typing import Any, Literal
 
+import httpx
+
 from app import logging
 from app.config import ServerSettings
 from app.constants import HTTPX_CLIENT, JST
 from app.utils import NormalizeToJSTDatetime
 from app.utils.edcb import ReserveDataRequired
 from app.utils.edcb.CtrlCmdUtil import CtrlCmdUtil
+
+
+EPGSTATION_API_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass(slots=True)
@@ -292,7 +297,15 @@ async def _GetActiveRecordingFilePathsFromEPGStation(config: ServerSettings) -> 
     async with HTTPX_CLIENT() as client:
         for endpoint_url in endpoint_urls:
             try:
-                response = await client.get(endpoint_url)
+                # 録画中判定は 5 秒間隔で繰り返す軽量同期なので、EPGStation 側が詰まった場合は短めに諦める。
+                # ここで長時間待つと、追いかけ再生用の状態同期そのものが詰まりやすくなる。
+                response = await client.get(endpoint_url, timeout=EPGSTATION_API_TIMEOUT_SECONDS)
+            except (httpx.NetworkError, httpx.TimeoutException) as ex:
+                logging.warning(
+                    f'[RecordingStatusProvider][EPGStation] Failed to request {endpoint_url}. '
+                    f'({type(ex).__name__}: {ex})'
+                )
+                continue
             except Exception as ex:
                 logging.warning(f'[RecordingStatusProvider][EPGStation] Failed to request {endpoint_url}.', exc_info=ex)
                 continue
@@ -314,7 +327,15 @@ async def _GetActiveRecordingFilePathsFromEPGStation(config: ServerSettings) -> 
             # 録画中一覧の詳細レスポンスだけに video file 情報が含まれる EPGStation 構成に備え、ID が取れる場合は詳細 API も確認する。
             for recording_id in _ExtractEPGStationRecordingIDs(payload):
                 try:
-                    detail_response = await client.get(f'{base_url}/api/recording/{recording_id}?isHalfWidth=false')
+                    detail_url = f'{base_url}/api/recording/{recording_id}?isHalfWidth=false'
+                    # 一覧 API と同じく短めの timeout に揃え、失敗時は次回同期に任せる。
+                    detail_response = await client.get(detail_url, timeout=EPGSTATION_API_TIMEOUT_SECONDS)
+                except (httpx.NetworkError, httpx.TimeoutException) as ex:
+                    logging.warning(
+                        f'[RecordingStatusProvider][EPGStation] Failed to request recording detail. '
+                        f'[recording_id: {recording_id}] ({type(ex).__name__}: {ex})'
+                    )
+                    continue
                 except Exception as ex:
                     logging.warning(f'[RecordingStatusProvider][EPGStation] Failed to request recording detail. [recording_id: {recording_id}]', exc_info=ex)
                     continue

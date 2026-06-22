@@ -241,6 +241,9 @@ async def Startup():
     ## 録画ファイルの量次第では録画ファイルの更新確認に時間がかかるため、非同期で実行する
     # ref: https://docs.astral.sh/ruff/rules/asyncio-dangling-task/
     recorded_scan_task = RecordedScanTask()
+    # EPGStation / EDCB が把握している録画中ファイルだけを同期する軽量タスクを開始する
+    ## 全録画フォルダの一括スキャンを無効化する構成でも、追いかけ再生用の Recording 状態はこのタスクで同期される
+    await recorded_scan_task.startActiveRecordingSync()
     await recorded_scan_task.start()
 
 # サーバー設定で指定された時間 (デフォルト: 15分) ごとに1回、チャンネル情報と番組情報を更新する
