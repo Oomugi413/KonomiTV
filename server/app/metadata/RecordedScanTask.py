@@ -1010,6 +1010,15 @@ class RecordedScanTask:
                     if force_update or active_recording_file_paths.is_reliable is True:
                         self._recording_files.pop(file_path, None)
 
+                # __saveRecordedMetadataToDB() は既存の RecordedVideo ORM インスタンスをそのまま更新する。
+                ## そのため保存後に existing_db_recorded_video_after_analyze.status を参照すると、
+                ## Recording → Recorded の遷移前ステータスが失われ、録画完了通知の判定に失敗する。
+                previous_recorded_video_status: Literal['Recording', 'Recorded', 'AnalysisFailed'] | None = (
+                    existing_db_recorded_video_after_analyze.status
+                    if existing_db_recorded_video_after_analyze is not None
+                    else None
+                )
+
                 # DB に永続化
                 # メタデータ解析後の最新のデータベース情報を使う
                 # ファイルパスはスキャン時に検出したパスをそのまま使用（シンボリックリンクを解決しない）
@@ -1034,7 +1043,7 @@ class RecordedScanTask:
                             len(self.config.notifications.services) > 0 and
                             (
                                 existing_db_recorded_video_after_analyze is None or
-                                (existing_db_recorded_video_after_analyze.status == 'Recording')
+                                previous_recorded_video_status == 'Recording'
                             )
                         )
                         task = asyncio.create_task(self.__runBackgroundAnalysis(recorded_program, should_notify))

@@ -254,6 +254,78 @@ class Videos {
 
 
     /**
+     * 指定した録画番組に関連する録画番組を取得する
+     * @param video_id 検索基準となる録画番組の ID
+     * @param mode 検索モード ('strict' or 'relaxed')
+     * @param include_other_channels 他チャンネルの録画番組も含めるか
+     * @param order ソート順序 ('desc' or 'asc')
+     * @param page ページ番号
+     * @returns 関連録画番組一覧情報 or 取得に失敗した場合は null
+     */
+    static async fetchRelatedVideos(
+        video_id: number,
+        mode: 'strict' | 'relaxed' = 'strict',
+        include_other_channels: boolean = false,
+        order: 'desc' | 'asc' = 'desc',
+        page: number = 1,
+    ): Promise<IRecordedPrograms | null> {
+
+        // API リクエストを実行
+        const response = await APIClient.get<IRecordedPrograms>('/videos/related', {
+            params: {
+                video_id,
+                mode,
+                include_other_channels,
+                order,
+                page,
+            },
+        });
+
+        // エラー処理
+        if (response.type === 'error') {
+            APIClient.showGenericError(response, '関連する録画番組を取得できませんでした。');
+            return null;
+        }
+
+        return response.data;
+    }
+
+
+    /**
+     * 指定したシリーズに属する録画番組を取得する
+     * @param series_id シリーズ ID
+     * @param series_broadcast_period_id シリーズ放送期間 ID
+     * @param order ソート順序 ('desc' or 'asc')
+     * @param page ページ番号
+     * @returns シリーズ別録画番組一覧情報 or 取得に失敗した場合は null
+     */
+    static async fetchVideosBySeries(
+        series_id: number,
+        series_broadcast_period_id: number | null = null,
+        order: 'desc' | 'asc' = 'desc',
+        page: number = 1,
+    ): Promise<IRecordedPrograms | null> {
+
+        // API リクエストを実行
+        const response = await APIClient.get<IRecordedPrograms>(`/videos/series/${series_id}`, {
+            params: {
+                series_broadcast_period_id,
+                order,
+                page,
+            },
+        });
+
+        // エラー処理
+        if (response.type === 'error') {
+            APIClient.showGenericError(response, 'シリーズの録画番組を取得できませんでした。');
+            return null;
+        }
+
+        return response.data;
+    }
+
+
+    /**
      * 録画番組情報を取得する
      * @param video_id 録画番組の ID
      * @returns 録画番組情報 or 録画番組が存在しない場合は null

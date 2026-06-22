@@ -21,6 +21,17 @@
                 color="primary"
                 class="series-controls__checkbox"
             ></v-checkbox>
+
+            <v-btn
+                v-if="current_series_path !== null"
+                :to="current_series_path"
+                size="small"
+                variant="text"
+                color="primary"
+                icon
+                class="series-controls__series-link">
+                <Icon icon="fluent:open-20-regular" width="18px" />
+            </v-btn>
         </div>
 
         <!-- 現在表示中の情報 -->
@@ -194,22 +205,16 @@ export default defineComponent({
             return this.filter_mode === 'strict' ? 70 : 50;
         },
 
+        // 現在の録画番組のシリーズページパス
+        current_series_path(): string | null {
+            const current_program = this.playerStore.recorded_program;
+            if (!current_program?.series_id) return null;
+            return `/videos/series/${current_program.series_id}`;
+        },
+
         // フィルタリング済みシリーズ番組
         filtered_series(): SeriesMatch[] {
-            const current_program = this.playerStore.recorded_program;
-            if (!current_program) return [];
-
-            return this.series_matches
-                .filter(match => match.score >= this.score_threshold)
-                // 自分自身は除外しない（吉祥物として表示）
-                .filter(match => {
-                    if (this.show_other_channels) return true;
-                    return match.program.channel?.id === current_program.channel?.id;
-                })
-                .sort((a, b) => {
-                    // 放送日時で降順ソート（新しい順）
-                    return dayjs(b.program.start_time).unix() - dayjs(a.program.start_time).unix();
-                });
+            return this.series_matches;
         },
 
     },
@@ -220,6 +225,16 @@ export default defineComponent({
                 this.searchSeriesPrograms();
             },
             immediate: true,
+        },
+        // フィルターモードが変わったら API 条件を変えて再検索
+        filter_mode() {
+            this.current_searching_program_id = null;
+            this.searchSeriesPrograms();
+        },
+        // 他チャンネル表示フラグが変わったら API 条件を変えて再検索
+        show_other_channels() {
+            this.current_searching_program_id = null;
+            this.searchSeriesPrograms();
         },
     },
     methods: {
@@ -253,17 +268,9 @@ export default defineComponent({
                 return;
             }
 
-            // 同じ番組で既に検索済みの場合はスキップ
+            // 同じ番組・同じ API 条件で既に検索済みの場合はスキップ
             if (this.current_searching_program_id === current_program.id && this.series_matches.length > 0) {
                 console.log('[Series] 既に検索済みのためスキップ');
-                return;
-            }
-
-            // 新しい番組が既存のリストに含まれている場合は再検索をスキップ
-            if (this.series_matches.some(match => match.program.id === current_program.id)) {
-                console.log('[Series] 新しい番組が既存リストに含まれているため再検索をスキップ');
-                this.current_searching_program_id = current_program.id;
-                this.needs_refresh = true; // 手動リフレッシュを有効化
                 return;
             }
 
@@ -276,26 +283,24 @@ export default defineComponent({
             this.has_more_api_data = true;
 
             try {
-                // 最初の2ページ（60件）を取得して評価
-                const initial_pages = 2;
-
-                for (let page = 1; page <= initial_pages; page++) {
-                    const result = await Videos.fetchVideos('desc', page);
-                    if (result && result.recorded_programs.length > 0) {
-                        this.all_programs.push(...result.recorded_programs);
-                        this.fetched_api_pages = page;
-                    } else {
-                        this.has_more_api_data = false;
-                        break;
-                    }
-                }
+                const result = await Videos.fetchRelatedVideos(
+                    current_program.id,
+                    this.filter_mode,
+                    this.show_other_channels,
+                    'desc',
+                    1,
+                );
+                const related_programs = result?.recorded_programs ?? [];
+                this.all_programs = related_programs;
+                this.fetched_api_pages = 1;
+                this.has_more_api_data = result !== null && related_programs.length < result.total;
 
                 console.log(`[Series] 現在の番組: ${current_program.title}`);
-                console.log(`[Series] 取得した番組数: ${this.all_programs.length}件`);
+                console.log(`[Series] 取得した番組数: ${related_programs.length}件`);
 
-                // 各番組をスコアリング（重複を除外）
+                // API 側で Series.vue と同等の条件でフィルタ済みの番組を表示用データへ変換する
                 const program_ids = new Set<number>();
-                this.series_matches = this.all_programs
+                this.series_matches = related_programs
                     .filter(program => {
                         if (program_ids.has(program.id)) {
                             return false; // 重複をスキップ
@@ -303,21 +308,18 @@ export default defineComponent({
                         program_ids.add(program.id);
                         return true;
                     })
-                    .map(program => this.calculateSeriesMatch(current_program, program))
-                    .filter(match => match.score > 0); // スコア0は除外
+                    .map(program => ({
+                        program,
+                        score: 0,
+                        breakdown: {
+                            title: 0,
+                            time: 0,
+                            channel: 0,
+                            metadata: 0,
+                        },
+                    }));
 
                 console.log(`[Series] マッチング結果: ${this.series_matches.length}件`);
-
-                // デバッグ: トップ10のスコアを表示
-                const top_matches = this.series_matches
-                    .sort((a, b) => b.score - a.score)
-                    .slice(0, 10);
-
-                console.log('[Series] Top 10 matches:');
-                top_matches.forEach((match, index) => {
-                    console.log(`${index + 1}. [${match.score}点] ${match.program.title}`);
-                    console.log(`   タイトル: ${match.breakdown.title}, 時間: ${match.breakdown.time}, CH: ${match.breakdown.channel}, Meta: ${match.breakdown.metadata}`);
-                });
 
             } catch (error) {
                 console.error('Failed to search series programs:', error);
@@ -345,7 +347,13 @@ export default defineComponent({
 
                 for (let i = 0; i < pages_to_load; i++) {
                     const page = start_page + i;
-                    const result = await Videos.fetchVideos('desc', page);
+                    const result = await Videos.fetchRelatedVideos(
+                        current_program.id,
+                        this.filter_mode,
+                        this.show_other_channels,
+                        'desc',
+                        page,
+                    );
 
                     if (result && result.recorded_programs.length > 0) {
                         // 重複しない番組のみ追加
@@ -358,15 +366,26 @@ export default defineComponent({
                             // 新しい番組IDを記録
                             new_programs.forEach(p => existing_program_ids.add(p.id));
 
-                            // 新しい番組をスコアリングして追加
-                            const new_matches = new_programs
-                                .map(program => this.calculateSeriesMatch(current_program, program))
-                                .filter(match => match.score > 0);
+                            // API 側でフィルタ済みの番組を表示用データへ変換して追加
+                            const new_matches = new_programs.map(program => ({
+                                program,
+                                score: 0,
+                                breakdown: {
+                                    title: 0,
+                                    time: 0,
+                                    channel: 0,
+                                    metadata: 0,
+                                },
+                            }));
 
                             this.series_matches.push(...new_matches);
                         }
 
                         this.fetched_api_pages = page;
+                        this.has_more_api_data = this.series_matches.length < result.total;
+                        if (!this.has_more_api_data) {
+                            break;
+                        }
                     } else {
                         // データがなくなったら終了
                         this.has_more_api_data = false;
@@ -727,6 +746,10 @@ export default defineComponent({
 
     &__checkbox {
         margin-left: auto;
+        flex-shrink: 0;
+    }
+
+    &__series-link {
         flex-shrink: 0;
     }
 }
