@@ -604,6 +604,8 @@ async def VideosAPI(
     order: Annotated[Literal['desc', 'asc', 'ids'], Query(description='ソート順序 (desc or asc or ids) 。ids を指定すると、ids パラメータで指定された順序を維持する。')] = 'desc',
     page: Annotated[int, Query(description='ページ番号。')] = 1,
     ids: Annotated[list[int] | None, Query(description='録画番組 ID のリスト。指定時は指定された ID の録画番組のみを返す。')] = None,
+    channel_id: Annotated[str | None, Query(description='チャンネル ID 。指定時は同一チャンネルの録画番組に絞り込む。')] = None,
+    genre: Annotated[str | None, Query(description='ジャンル名。指定時は genres に含まれる録画番組に絞り込む。')] = None,
 ):
     """
     すべての録画番組を一度に 30 件ずつ取得する。<br>
@@ -692,6 +694,16 @@ async def VideosAPI(
         LIMIT ? OFFSET ?
     """
 
+    filter_clauses: list[str] = []
+    filter_params: list[Any] = []
+    if channel_id is not None and channel_id != '':
+        filter_clauses.append('AND rp.channel_id = ?')
+        filter_params.append(channel_id)
+    if genre is not None and genre != '':
+        filter_clauses.append('AND rp.genres LIKE ?')
+        filter_params.append(f'%"{genre}"%')
+    filter_where_clause = '\n        '.join(filter_clauses)
+
     # ids が指定されている場合は、指定された ID の録画番組のみを返す
     target_ids: list[int] | None = None
     if ids is not None:
@@ -707,43 +719,53 @@ async def VideosAPI(
 
             # IN 句のプレースホルダーを生成
             placeholders = ','.join(['?' for _ in target_ids])
+            where_clause = f'AND rp.id IN ({placeholders})'
+            if filter_where_clause:
+                where_clause = f'{where_clause}\n        {filter_where_clause}'
             query = base_query.format(
-                where_clause = f'AND rp.id IN ({placeholders})',
+                where_clause = where_clause,
                 order = 'DESC'  # order は無視されるが、SQL の構文上必要
             )
-            params = [*target_ids, str(PAGE_SIZE), '0']  # OFFSET は 0 固定
+            params = [*target_ids, *filter_params, str(PAGE_SIZE), '0']  # OFFSET は 0 固定
 
             # 総数を取得
-            total_query = 'SELECT COUNT(*) as count FROM recorded_programs WHERE id IN ({})'.format(
-                ','.join(['?' for _ in ids])
+            total_query = 'SELECT COUNT(*) as count FROM recorded_programs rp WHERE rp.id IN ({}) {}'.format(
+                ','.join(['?' for _ in ids]),
+                filter_where_clause,
             )
-            total_params = ids
+            total_params = [*ids, *filter_params]
 
         else:
+            id_where_clause = f'AND rp.id IN ({",".join(["?" for _ in ids])})'
+            where_clause = id_where_clause
+            if filter_where_clause:
+                where_clause = f'{where_clause}\n        {filter_where_clause}'
             # 通常のソート順で取得
             query = base_query.format(
-                where_clause = f'AND rp.id IN ({",".join(["?" for _ in ids])})',
+                where_clause = where_clause,
                 order = 'DESC' if order == 'desc' else 'ASC'
             )
-            params = [*ids, str(PAGE_SIZE), str((page - 1) * PAGE_SIZE)]
+            params = [*ids, *filter_params, str(PAGE_SIZE), str((page - 1) * PAGE_SIZE)]
 
             # 総数を取得
-            total_query = 'SELECT COUNT(*) as count FROM recorded_programs WHERE id IN ({})'.format(
+            total_query = 'SELECT COUNT(*) as count FROM recorded_programs rp WHERE rp.id IN ({}) {}'.format(
                 ','.join(['?' for _ in ids])
+                ,
+                filter_where_clause,
             )
-            total_params = ids
+            total_params = [*ids, *filter_params]
 
     else:
         # すべての録画番組を返す
         query = base_query.format(
-            where_clause = '',
+            where_clause = filter_where_clause,
             order = 'DESC' if order == 'desc' else 'ASC'
         )
-        params = [str(PAGE_SIZE), str((page - 1) * PAGE_SIZE)]
+        params = [*filter_params, str(PAGE_SIZE), str((page - 1) * PAGE_SIZE)]
 
         # 総数を取得
-        total_query = 'SELECT COUNT(*) as count FROM recorded_programs'
-        total_params = []
+        total_query = f'SELECT COUNT(*) as count FROM recorded_programs rp WHERE 1=1 {filter_where_clause}'
+        total_params = filter_params
 
     try:
         # データベースから直接クエリを実行

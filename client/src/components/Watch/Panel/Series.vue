@@ -212,6 +212,11 @@ export default defineComponent({
             return `/videos/series/${current_program.series_id}`;
         },
 
+        // Series タブが実際に表示中かどうか
+        is_series_tab_active(): boolean {
+            return this.playerStore.video_panel_active_tab === 'Series';
+        },
+
         // フィルタリング済みシリーズ番組
         filtered_series(): SeriesMatch[] {
             return this.series_matches;
@@ -222,17 +227,29 @@ export default defineComponent({
         // 番組が変わったら再検索
         'playerStore.recorded_program': {
             handler() {
+                if (!this.is_series_tab_active) return;
+                this.current_searching_program_id = null;
+                this.searchSeriesPrograms();
+            },
+            immediate: false,
+        },
+        // Series タブを開いた時点で初めて検索する
+        'playerStore.video_panel_active_tab': {
+            handler(active_tab: string) {
+                if (active_tab !== 'Series') return;
                 this.searchSeriesPrograms();
             },
             immediate: true,
         },
         // フィルターモードが変わったら API 条件を変えて再検索
         filter_mode() {
+            if (!this.is_series_tab_active) return;
             this.current_searching_program_id = null;
             this.searchSeriesPrograms();
         },
         // 他チャンネル表示フラグが変わったら API 条件を変えて再検索
         show_other_channels() {
+            if (!this.is_series_tab_active) return;
             this.current_searching_program_id = null;
             this.searchSeriesPrograms();
         },
@@ -241,10 +258,14 @@ export default defineComponent({
 
         // シリーズ番組を検索
         async searchSeriesPrograms() {
+            // Series タブが非表示の間は何もしない。初期表示時に recorded_program がまだ未確定のまま
+            // /videos/related?video_id=-1 を叩くことを避け、タブを開いた時点で遅延ロードする。
+            if (!this.is_series_tab_active) return;
+
             let current_program = this.playerStore.recorded_program;
 
-            // playerStore に録画番組情報がない場合は URL から取得
-            if (!current_program) {
+            // playerStore に録画番組情報がない、または初期値のままの場合は URL から取得
+            if (!current_program || current_program.id < 0) {
                 const video_id = this.$route.params.video_id;
                 if (!video_id) return;
 
@@ -261,6 +282,7 @@ export default defineComponent({
                 this.playerStore.recorded_program = fetched_program;
                 current_program = fetched_program;
             }
+            if (current_program.id < 0) return;
 
             // 同じ番組で既に検索中の場合はスキップ
             if (this.is_loading && this.current_searching_program_id === current_program.id) {
