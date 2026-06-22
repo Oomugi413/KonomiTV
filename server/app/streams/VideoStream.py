@@ -108,8 +108,8 @@ class VideoStream:
     ON_DEMAND_KEYFRAME_MAX_AGE_SEGMENTS: ClassVar[int] = 5
 
     # 録画中ファイルの末尾は、PCR から再生可能そうに見えてもエンコーダー入力としてはまだ安定していないことがある。
-    ## 追いかけ再生ではこの秒数だけ playlist の末尾を隠し、半端に書き込み中の GOP / TS パケットへ hls.js が到達しないようにする。
-    RECORDING_PLAYLIST_EDGE_BUFFER_SECONDS: ClassVar[float] = 15.0
+    ## 追いかけ再生ではこの数だけ playlist の末尾セグメントを隠し、半端に書き込み中の GOP / TS パケットへ hls.js が到達しないようにする。
+    RECORDING_PLAYLIST_EDGE_BUFFER_SEGMENTS: ClassVar[int] = 2
 
     # 録画視聴セッションのインスタンスが入る、セッション ID をキーとした辞書
     # この辞書に録画視聴セッションに関する全てのデータが格納されている
@@ -509,9 +509,10 @@ class VideoStream:
             self._ts_source_base_dts = snapshot.source_base_dts
 
         # tracker の推定値は「末尾 PCR までは読めそう」という値であり、HLS セグメントとして安定して配れる境界とは限らない。
-        ## 追いかけ再生ではプレイヤー側と同じ 15 秒の余白を後端 playlist にも持たせ、書き込み中の末尾へ到達しないようにする。
+        ## 追いかけ再生では後端 playlist を常に 2 セグメント分遅らせ、書き込み中の末尾へ到達しないようにする。
         recording_playlist_duration_seconds = max(playlist_duration_seconds, snapshot.available_duration_seconds)
-        return max(recording_playlist_duration_seconds - self.RECORDING_PLAYLIST_EDGE_BUFFER_SECONDS, 0.001)
+        recording_playlist_edge_buffer_seconds = self._segment_duration_seconds * self.RECORDING_PLAYLIST_EDGE_BUFFER_SEGMENTS
+        return max(recording_playlist_duration_seconds - recording_playlist_edge_buffer_seconds, 0.001)
 
 
     async def __refreshRecordingSegments(self) -> None:

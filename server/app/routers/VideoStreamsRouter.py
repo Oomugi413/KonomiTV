@@ -37,39 +37,43 @@ async def ValidateVideoID(video_id: Annotated[int, Path(description='録画番�
             detail = 'Specified video_id was not found',
         )
 
-    # 被動検出: ファイルサイズの差異をチェックし、大きく変化している場合は自動的に再解析
-    # (例: HEVC 転码で 50% 以上ファイルサイズが縮小された場合など)
-    import anyio
+    # 録画中ファイルは再生中もファイルサイズが伸び続けるため、差分検出をそのまま適用すると
+    ## 追いかけ再生のセグメント要求ごとに自動再解析が走り、エンコード入力と同じ TS への I/O が競合してしまう。
+    ## 録画完了後だけ転码検出用の軽量チェックを行う。
+    if recorded_program.recorded_video.status != 'Recording':
+        # 被動検出: ファイルサイズの差異をチェックし、大きく変化している場合は自動的に再解析
+        # (例: HEVC 転码で 50% 以上ファイルサイズが縮小された場合など)
+        import anyio
 
-    from app.metadata.RecordedScanTask import RecordedScanTask
+        from app.metadata.RecordedScanTask import RecordedScanTask
 
-    file_path = anyio.Path(recorded_program.recorded_video.file_path)
-    try:
-        if await file_path.is_file():
-            actual_file_size = (await file_path.stat()).st_size
-            db_file_size = recorded_program.recorded_video.file_size
+        file_path = anyio.Path(recorded_program.recorded_video.file_path)
+        try:
+            if await file_path.is_file():
+                actual_file_size = (await file_path.stat()).st_size
+                db_file_size = recorded_program.recorded_video.file_size
 
-            # ファイルサイズの差異が 20% 以上の場合、転码された可能性が高い
-            if db_file_size > 0:
-                size_diff_ratio = abs(actual_file_size - db_file_size) / db_file_size
-                if size_diff_ratio > 0.20:  # 20% 以上の差異
-                    logging.info(
-                        f'[VideoStreamsRouter][ValidateVideoID] File size changed significantly '
-                        f'(DB: {db_file_size:,} bytes → Actual: {actual_file_size:,} bytes, '
-                        f'diff: {size_diff_ratio*100:.1f}%). Triggering automatic reanalysis...'
-                    )
-                    # バックグラウンドで再解析を実行（files_only=True でメタデータのみ更新）
-                    # 再生開始を遅延させないため await せずにバックグラウンドタスクとして実行
-                    import asyncio
-                    background_task = asyncio.create_task(RecordedScanTask().processRecordedFile(
-                        file_path = file_path,
-                        force_update = True,
-                        files_only = True,  # CM 解析・サムネイル生成はスキップ
-                    ))
-                    background_task.add_done_callback(lambda task: task.exception() if task.cancelled() is False else None)
-    except Exception as ex:
-        # ファイルサイズチェックに失敗しても再生は継続できるようエラーをログに出力するのみ
-        logging.warning(f'[VideoStreamsRouter][ValidateVideoID] Failed to check file size: {ex}')
+                # ファイルサイズの差異が 20% 以上の場合、転码された可能性が高い
+                if db_file_size > 0:
+                    size_diff_ratio = abs(actual_file_size - db_file_size) / db_file_size
+                    if size_diff_ratio > 0.20:  # 20% 以上の差異
+                        logging.info(
+                            f'[VideoStreamsRouter][ValidateVideoID] File size changed significantly '
+                            f'(DB: {db_file_size:,} bytes → Actual: {actual_file_size:,} bytes, '
+                            f'diff: {size_diff_ratio*100:.1f}%). Triggering automatic reanalysis...'
+                        )
+                        # バックグラウンドで再解析を実行（files_only=True でメタデータのみ更新）
+                        # 再生開始を遅延させないため await せずにバックグラウンドタスクとして実行
+                        import asyncio
+                        background_task = asyncio.create_task(RecordedScanTask().processRecordedFile(
+                            file_path = file_path,
+                            force_update = True,
+                            files_only = True,  # CM 解析・サムネイル生成はスキップ
+                        ))
+                        background_task.add_done_callback(lambda task: task.exception() if task.cancelled() is False else None)
+        except Exception as ex:
+            # ファイルサイズチェックに失敗しても再生は継続できるようエラーをログに出力するのみ
+            logging.warning(f'[VideoStreamsRouter][ValidateVideoID] Failed to check file size: {ex}')
 
     return recorded_program
 
