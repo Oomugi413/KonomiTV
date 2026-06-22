@@ -559,10 +559,14 @@ class MetadataAnalyzer:
                     recorded_video.recording_start_time = recording_time[0]
                     recorded_video.recording_end_time = recording_time[1]
             else:
-                # 取得失敗時、最終更新日時が現在時刻から30秒以内ならまだ録画中の可能性が高いので、None を返し DB には保存しない
+                # 取得失敗時でも、FFprobe で再生に必要な映像・音声情報が取れていればファイル名と時刻から仮レコードを作成する。
+                ## 録画中の追っかけ再生では SDT/EIT がまだ読めないタイミングでも再生開始できることが重要なため、
+                ## ここでは DB 保存を止めず、下のフォールバック RecordedProgram 生成へ進める。
                 if (now - recorded_video.file_modified_at).total_seconds() < 30:
-                    logging.warning(f'{self.recorded_file_path}: MPEG-TS SDT/EIT analysis failed. (still recording?)')
-                    return None
+                    logging.warning(
+                        f'{self.recorded_file_path}: MPEG-TS SDT/EIT analysis failed. '
+                        f'Creating fallback metadata for chase playback.'
+                    )
         else:
             # 何らかのメタ情報から番組情報・チャンネル情報を解析する
             analyzer = TSInfoAnalyzer(recorded_video, selected_service_id=self.selected_service_id)

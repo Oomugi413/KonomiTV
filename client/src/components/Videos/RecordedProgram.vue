@@ -1,6 +1,6 @@
 <template>
     <router-link v-ripple class="recorded-program"
-        :to="program.recorded_video.status === 'Recorded' ? `/videos/watch/${program.id}` : { path: '' }"
+        :to="program.recorded_video.status !== 'AnalysisFailed' ? `/videos/watch/${program.id}` : { path: '' }"
         :class="{
             'recorded-program--recording': program.recorded_video.status === 'Recording',
             'recorded-program--failed': program.recorded_video.status === 'AnalysisFailed',
@@ -973,7 +973,15 @@ onBeforeUnmount(() => {
         }
     }
 
-    &--recording, &--failed {
+    &--recording {
+        .recorded-program__thumbnail-image,
+        .recorded-program__thumbnail-duration,
+        .recorded-program__content {
+            opacity: 0.65;
+        }
+    }
+
+    &--failed {
         pointer-events: none;
         &:hover {
             background: rgb(var(--v-theme-background-lighten-1));
