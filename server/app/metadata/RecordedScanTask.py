@@ -705,7 +705,7 @@ class RecordedScanTask:
                         existing_recorded_video_summary.status == 'Recording'):
                         return
 
-                if is_file_system_recording:
+                if active_recording_file_paths.is_reliable is False and is_file_system_recording:
                     # まだ DB に登録されていない＆ファイルサイズが前回から変化していない場合
                     recording_info = self._recording_files[file_path]
                     last_size = recording_info.file_size

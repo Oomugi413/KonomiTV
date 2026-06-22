@@ -325,6 +325,7 @@ async def _GetActiveRecordingFilePathsFromEPGStation(config: ServerSettings) -> 
                 except Exception as ex:
                     logging.warning(f'[RecordingStatusProvider][EPGStation] Failed to parse recording detail. [recording_id: {recording_id}]', exc_info=ex)
 
+            logging.debug(f'[RecordingStatusProvider][EPGStation] Active recording paths: {len(active_paths)}')
             return ActiveRecordingFilePaths(
                 paths = _ExpandRecordingPathCandidatesSet(active_paths, config),
                 backend = 'EPGStation',
