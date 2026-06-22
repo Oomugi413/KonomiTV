@@ -696,7 +696,9 @@ class TSInformation:
     def parseFilenameInfo(cls, filename: str) -> dict[str, Any]:
         """
         录画文件名から開始時刻と番組名を解析する
-        対応フォーマット: 2025年09月23日01時40分00秒-劇場版「オーバーロード」聖王国編 [字].m2ts
+        対応フォーマット:
+        - 2025年09月23日01時40分00秒-劇場版「オーバーロード」聖王国編 [字].m2ts
+        - 20260622-211-011000_62f1e65b-b71d-4e8a-8b1c-16fa65f9d5d3.m2ts
 
         Args:
             filename (str): 拡張子を除いたファイル名
@@ -712,7 +714,7 @@ class TSInformation:
         from datetime import datetime
         from zoneinfo import ZoneInfo
 
-        result = {
+        result: dict[str, Any] = {
             'start_time': None,
             'program_title': None,
             'original_filename': filename
@@ -746,6 +748,24 @@ class TSInformation:
             except (ValueError, TypeError):
                 # 日時の解析に失敗した場合は None のまま
                 pass
+
+        # KonomiTV の一部録画ファイル名は「YYYYMMDD-service_id-HHMMSS_uuid」のように、
+        ## 番組名を含まず日時とサービス ID だけを持つ
+        ## EIT[p/f] の TOT 解析が壊れた録画ファイルでは、この日時だけでも番組境界の推定に使える
+        if result['start_time'] is None:
+            compact_datetime_pattern = r'^(\d{4})(\d{2})(\d{2})-\d+-(\d{2})(\d{2})(\d{2})(?:_|-|$)'
+            match = re.search(compact_datetime_pattern, filename)
+
+            if match:
+                try:
+                    year, month, day, hour, minute, second = map(int, match.groups())
+                    result['start_time'] = datetime(
+                        year, month, day, hour, minute, second,
+                        tzinfo=ZoneInfo('Asia/Tokyo')
+                    )
+                except (ValueError, TypeError):
+                    # 日時の解析に失敗した場合は None のまま
+                    pass
 
         return result
 

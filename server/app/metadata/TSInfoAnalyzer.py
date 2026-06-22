@@ -1550,19 +1550,31 @@ class TSInfoAnalyzer:
         if len(candidates) == 0:
             return None
 
-        recording_start_time = self.recorded_video.recording_start_time
-        recording_end_time = self.recorded_video.recording_end_time
-        if recording_start_time is not None and recording_end_time is not None:
-            recording_duration = max((recording_end_time - recording_start_time).total_seconds(), 0.0)
-            recording_mid_time = recording_start_time + timedelta(seconds=recording_duration / 2)
+        def SelectBestCandidateByRecordingTime(
+            candidate_recording_start_time: datetime,
+            candidate_recording_end_time: datetime,
+        ) -> tuple[_EITProgramCandidate | None, float]:
+            """
+            指定された録画時間帯と最も重なる EIT 候補を選択する
+
+            Args:
+                candidate_recording_start_time (datetime): 推定録画開始時刻
+                candidate_recording_end_time (datetime): 推定録画終了時刻
+
+            Returns:
+                tuple[_EITProgramCandidate | None, float]: 最良候補と重複秒数
+            """
+
+            recording_duration = max((candidate_recording_end_time - candidate_recording_start_time).total_seconds(), 0.0)
+            recording_mid_time = candidate_recording_start_time + timedelta(seconds=recording_duration / 2)
 
             def ScoreByRecordingTime(candidate: _EITProgramCandidate) -> tuple[float, int, int, int, float]:
                 program = candidate.recorded_program
-                overlap_start_time = max(program.start_time, recording_start_time)
-                overlap_end_time = min(program.end_time, recording_end_time)
+                overlap_start_time = max(program.start_time, candidate_recording_start_time)
+                overlap_end_time = min(program.end_time, candidate_recording_end_time)
                 overlap_seconds = max((overlap_end_time - overlap_start_time).total_seconds(), 0.0)
                 contains_mid_time = int(program.start_time <= recording_mid_time < program.end_time)
-                contains_recording_start = int(program.start_time <= recording_start_time < program.end_time)
+                contains_recording_start = int(program.start_time <= candidate_recording_start_time < program.end_time)
                 program_mid_time = program.start_time + timedelta(seconds=program.duration / 2)
                 center_distance_seconds = abs((program_mid_time - recording_mid_time).total_seconds())
                 return (
@@ -1575,12 +1587,63 @@ class TSInfoAnalyzer:
 
             best_candidate = max(candidates, key=ScoreByRecordingTime)
             best_overlap_seconds = ScoreByRecordingTime(best_candidate)[0]
+            return (best_candidate, best_overlap_seconds)
+
+        recording_time_ranges: list[tuple[str, datetime, datetime]] = []
+        filename_info = TSInformation.parseFilenameInfo(Path(self.recorded_video.file_path).stem)
+        filename_start_time = filename_info['start_time']
+
+        # まずは TOT/PCR から復元した録画時刻を最優先で使う
+        ## 実際の TS から取れた時刻なので、ファイル名やファイルシステム時刻より信頼できる
+        if self.recorded_video.recording_start_time is not None and self.recorded_video.recording_end_time is not None:
+            recording_time_ranges.append((
+                'TOT/PCR',
+                self.recorded_video.recording_start_time,
+                self.recorded_video.recording_end_time,
+            ))
+
+        # TOT/PCR が壊れている録画では、ファイル更新時刻を録画終了時刻とみなし、実動画尺から開始時刻を逆算する
+        ## コピー/移動で mtime が変わった場合は EIT 候補と重ならないため、後段の重複秒数チェックで採用されない
+        file_modified_at = self.recorded_video.file_modified_at
+        if file_modified_at.tzinfo is None:
+            file_modified_at = file_modified_at.replace(tzinfo=JST)
+        file_modified_recording_start_time = file_modified_at - timedelta(seconds=self.recorded_video.duration)
+        # ファイル名にも開始時刻がある場合、mtime 逆算値が大きくズレているならコピー後の mtime とみなして使わない
+        ## mtime が偶然別の EIT 候補に重なると誤採用になるため、2つの独立した時刻ヒントが矛盾しない場合だけ優先する
+        if (
+            not isinstance(filename_start_time, datetime) or
+            abs((file_modified_recording_start_time - filename_start_time).total_seconds()) <= max(self.recorded_video.duration, 900.0)
+        ):
+            recording_time_ranges.append((
+                'file modified time',
+                file_modified_recording_start_time,
+                file_modified_at,
+            ))
+
+        # 最後に、ファイル名に開始時刻が含まれる場合だけ補助情報として使う
+        ## ファイル名だけで決め打ちせず、EIT 候補と実際に重なる場合に限って採用する
+        if isinstance(filename_start_time, datetime):
+            recording_time_ranges.append((
+                'filename start time',
+                filename_start_time,
+                filename_start_time + timedelta(seconds=self.recorded_video.duration),
+            ))
+
+        for recording_time_source, recording_start_time, recording_end_time in recording_time_ranges:
+            best_candidate, best_overlap_seconds = SelectBestCandidateByRecordingTime(recording_start_time, recording_end_time)
             if best_overlap_seconds > 0:
+                logging.info(
+                    f'{self.recorded_video.file_path}: Selected EIT candidate by {recording_time_source}. '
+                    f'[recording_start_time: {recording_start_time}, recording_end_time: {recording_end_time}, '
+                    f'overlap_seconds: {best_overlap_seconds:.1f}]'
+                )
+                assert best_candidate is not None
                 return best_candidate
 
             logging.warning(
                 f'{self.recorded_video.file_path}: No EIT candidate overlaps with the recording time range. '
-                f'[recording_start_time: {recording_start_time}, recording_end_time: {recording_end_time}]'
+                f'[source: {recording_time_source}, recording_start_time: {recording_start_time}, '
+                f'recording_end_time: {recording_end_time}]'
             )
 
         # TOT を取得できなかった場合や、時刻の矛盾で全候補が落ちる場合は 20% 位置に最も近い present を優先する
