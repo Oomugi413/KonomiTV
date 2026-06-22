@@ -23,12 +23,12 @@
             <div class="settings__item">
                 <div class="settings__item-heading">利用するバックエンド</div>
                 <div class="settings__item-label">
-                    EDCB・Mirakurun のいずれかを選択してください。<br>
-                    バックエンドに Mirakurun が選択されているときは、録画予約機能は利用できません。<br>
+                    EDCB・Mirakurun・EPGStation のいずれかを選択してください。<br>
+                    バックエンドに Mirakurun または EPGStation が選択されているときは、EDCB 専用の録画予約機能は利用できません。<br>
                 </div>
                 <v-select class="settings__item-form" color="primary" variant="outlined" hide-details
                     :density="is_form_dense ? 'compact' : 'default'"
-                    :items="['EDCB', 'Mirakurun']" v-model="server_settings.general.backend">
+                    :items="['EDCB', 'Mirakurun', 'EPGStation']" v-model="server_settings.general.backend">
                 </v-select>
             </div>
             <div class="settings__item">
@@ -58,6 +58,16 @@
                 <v-text-field class="settings__item-form" color="primary" variant="outlined" hide-details
                     :density="is_form_dense ? 'compact' : 'default'"
                     v-model="server_settings.general.mirakurun_url">
+                </v-text-field>
+            </div>
+            <div class="settings__item">
+                <div class="settings__item-heading">EPGStation の HTTP API の URL</div>
+                <div class="settings__item-label">
+                    バックエンドに EPGStation が選択されているとき、録画中判定などに利用されます。<br>
+                </div>
+                <v-text-field class="settings__item-form" color="primary" variant="outlined" hide-details
+                    :density="is_form_dense ? 'compact' : 'default'"
+                    v-model="server_settings.general.epgstation_url">
                 </v-text-field>
             </div>
             <div class="settings__item">
@@ -152,13 +162,15 @@
                 <label class="settings__item-heading" for="always_receive_tv_from_mirakurun">常に Mirakurun / mirakc から放送波を受信する</label>
                 <label class="settings__item-label" for="always_receive_tv_from_mirakurun">
                     利用するバックエンドが EDCB のとき、常に Mirakurun / mirakc から放送波を受信するかを設定します。
-                    バックエンドに Mirakurun が選択されているときは効果がありません。<br>
+                    バックエンドに Mirakurun が選択されているときは効果がありません。
+                    バックエンドに EPGStation が選択されているときは常に有効になります。<br>
                 </label>
                 <label class="settings__item-label mt-1" for="always_receive_tv_from_mirakurun">
                     KonomiTV から EDCB と Mirakurun / mirakc 両方にアクセスできる必要があります。<br>
                     EDCB はチューナー起動やチャンネル切り替えに時間がかかるため、Mirakurun / mirakc が利用できる環境であれば、この設定を有効にするとより快適に使えます。<br>
                 </label>
                 <v-switch class="settings__item-switch" color="primary" id="always_receive_tv_from_mirakurun" hide-details
+                    :disabled="server_settings.general.backend === 'EPGStation'"
                     v-model="server_settings.general.always_receive_tv_from_mirakurun">
                 </v-switch>
             </div>
@@ -550,7 +562,7 @@
 </template>
 <script lang="ts" setup>
 
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 
 import AccountManageSettings from '@/components/Settings/AccountManageSettings.vue';
 import ServerLogDialog from '@/components/Settings/ServerLogDialog.vue';
@@ -640,8 +652,19 @@ Settings.fetchServerSettings().then((settings) => {
     }
 });
 
+watch(() => server_settings.value.general.backend, (backend) => {
+    if (backend === 'EPGStation') {
+        server_settings.value.general.always_receive_tv_from_mirakurun = true;
+    }
+});
+
 // サーバー設定を更新する関数
 async function updateServerSettings() {
+
+    // EPGStation バックエンドでは放送波受信を必ず Mirakurun / mirakc に委譲する
+    if (server_settings.value.general.backend === 'EPGStation') {
+        server_settings.value.general.always_receive_tv_from_mirakurun = true;
+    }
 
     // custom_https_certificate と custom_https_private_key が空文字列の場合は null に変換
     if (server_settings.value.server.custom_https_certificate === '') {
@@ -758,4 +781,3 @@ async function testNotification() {
 }
 
 </script>
-

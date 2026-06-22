@@ -16,7 +16,7 @@ from tortoise.models import Model as TortoiseModel
 from app import logging
 from app.config import Config
 from app.constants import HTTPX_CLIENT, JST
-from app.utils import GetMirakurunAPIEndpointURL
+from app.utils import GetBackendForChannelAndProgram, GetMirakurunAPIEndpointURL
 from app.utils.edcb import ChSet5Item
 from app.utils.edcb.CtrlCmdUtil import CtrlCmdUtil
 from app.utils.edcb.EDCBUtil import EDCBUtil
@@ -106,12 +106,12 @@ class Channel(TortoiseModel):
         logging.info('Channels updating...')
 
         try:
-            # Mirakurun バックエンド
-            if Config().general.backend == 'Mirakurun':
+            # Mirakurun / EPGStation バックエンド
+            if GetBackendForChannelAndProgram() == 'Mirakurun':
                 await cls.updateFromMirakurun()
 
             # EDCB バックエンド
-            elif Config().general.backend == 'EDCB':
+            elif GetBackendForChannelAndProgram() == 'EDCB':
                 await cls.updateFromEDCB()
         except Exception as ex:
             logging.error('Failed to update channels:', exc_info=ex)

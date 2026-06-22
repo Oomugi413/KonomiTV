@@ -110,10 +110,11 @@ export interface IClientSettings {
  */
 export interface IServerSettings {
     general: {
-        backend: 'EDCB' | 'Mirakurun';
+        backend: 'EDCB' | 'Mirakurun' | 'EPGStation';
         always_receive_tv_from_mirakurun: boolean;
         edcb_url: string;
         mirakurun_url: string;
+        epgstation_url: string;
         encoder: 'FFmpeg' | 'QSVEncC' | 'NVEncC' | 'VCEEncC' | 'rkmppenc';
         program_update_interval: number;
         debug: boolean;
@@ -159,6 +160,7 @@ export const IServerSettingsDefault: IServerSettings = {
         always_receive_tv_from_mirakurun: false,
         edcb_url: 'tcp://127.0.0.1:4510/',
         mirakurun_url: 'http://127.0.0.1:40772/',
+        epgstation_url: 'http://127.0.0.1:8888/',
         encoder: 'FFmpeg',
         program_update_interval: 5.0,
         debug: false,

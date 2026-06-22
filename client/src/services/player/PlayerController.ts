@@ -312,6 +312,12 @@ class PlayerController {
         const is_show_superimpose = this.playback_mode === 'Live' ?
             settings_store.settings.tv_show_superimpose : settings_store.settings.video_show_superimpose;
 
+        // 録画中の録画番組を再生しているかどうか
+        // 通常の録画番組と同じ Video モードで再生するが、HLS プレイリストは録画ファイルの伸長に合わせて更新される。
+        // 末尾でループ再生すると 0 秒へ戻ってしまうため、追っかけ再生中だけはループ機能を強制的に無効化する。
+        const is_recording_chase_playback = this.playback_mode === 'Video' &&
+            player_store.recorded_program.recorded_video.status === 'Recording';
+
         // シーク秒数が指定されていない（初回ロード時）は、視聴履歴があればその位置から再生を開始する
         // なければ録画開始マージン + 2秒シークする
         // 2秒プラスしているのは、実際の放送波では EPG (EIT[p/f]) の変更より2〜4秒後に実際に番組が切り替わる場合が多いため
@@ -389,7 +395,7 @@ class PlayerController {
             // ライブモードで同期する際の最小バッファサイズ
             liveSyncMinBufferSize: this.live_playback_buffer_seconds - 0.1,
             // ループ再生 (ライブ視聴では無効)
-            loop: this.playback_mode === 'Live' ? false : true,
+            loop: (this.playback_mode === 'Live' || is_recording_chase_playback === true) ? false : true,
             // 自動再生
             autoplay: true,
             // AirPlay 機能 (うまく動かないため無効化)
@@ -484,7 +490,8 @@ class PlayerController {
                         const session_id = crypto.randomUUID().split('-')[0];
                         // HEVC の場合は 1080p-hevc、H.264 の場合は 1080p
                         const quality_path = this.is_offline_hevc ? '1080p-hevc' : '1080p';
-                        const playlist_url = `${streaming_api_base_url}/${quality_path}/playlist?session_id=${session_id}`;
+                        const playlist_url = `${streaming_api_base_url}/${quality_path}/playlist?session_id=${session_id}` +
+                            `${is_recording_chase_playback === true ? '&recording=1' : ''}`;
                         qualities.push({
                             name: '1080p',
                             type: 'hls',
@@ -498,7 +505,8 @@ class PlayerController {
                             const session_id = crypto.randomUUID().split('-')[0];
 
                             // playlist URL を構築
-                            const playlist_url = `${streaming_api_base_url}/${build_api_quality(quality_name)}/playlist?session_id=${session_id}`;
+                            const playlist_url = `${streaming_api_base_url}/${build_api_quality(quality_name)}/playlist?session_id=${session_id}` +
+                                `${is_recording_chase_playback === true ? '&recording=1' : ''}`;
 
                             // 画質設定を追加
                             qualities.push({
@@ -698,6 +706,11 @@ class PlayerController {
                     // startPosition に視聴履歴などから求めた再生位置を渡し、ロード開始時点で正しい Media Sequence を選択させる
                     // これを指定しないと manifest 解析後に sequence=0 からフラグメント取得が始まってしまう
                     startPosition: seek_seconds,
+                    // 追っかけ再生中は録画ファイルの末尾が伸びるため、通常の VOD より短い間隔でライブ端を追う。
+                    // 実際の manifest 再読込は hls.js の live playlist 更新と CustomBufferController の末尾監視で行う。
+                    liveSyncDurationCount: is_recording_chase_playback === true ? 1 : Hls.DefaultConfig.liveSyncDurationCount,
+                    liveMaxLatencyDurationCount: is_recording_chase_playback === true ? 2 : Hls.DefaultConfig.liveMaxLatencyDurationCount,
+                    maxLiveSyncPlaybackRate: is_recording_chase_playback === true ? 1.1 : Hls.DefaultConfig.maxLiveSyncPlaybackRate,
                     // カスタムバッファコントローラーを設定
                     // @ts-ignore
                     bufferController: CustomBufferController,
@@ -833,6 +846,23 @@ class PlayerController {
 
         // デバッグ用にプレイヤーインスタンスも window 直下に入れる
         (window as any).player = this.player;
+
+        // 録画中の追っかけ再生では、DPlayer の永続化された loop 設定も含めて強制的に無効化する。
+        // DPlayer は options.loop より localStorage の dplayer-loop を優先するため、ここで UI と内部状態を明示的に揃える。
+        if (is_recording_chase_playback === true) {
+            const dplayer_internal = this.player as unknown as {
+                setting: { loop: boolean };
+                user: { set: (key: 'loop', value: number) => void };
+                template: {
+                    loop: HTMLElement;
+                    loopToggle: HTMLInputElement;
+                };
+            };
+            dplayer_internal.setting.loop = false;
+            dplayer_internal.user.set('loop', 0);
+            dplayer_internal.template.loopToggle.checked = false;
+            dplayer_internal.template.loop.style.display = 'none';
+        }
 
         // この時点で DPlayer のコンテナ要素に dplayer-mobile クラスが付与されている場合、
         // DPlayer は音量コントロールがないスマホ向けの UI になっている

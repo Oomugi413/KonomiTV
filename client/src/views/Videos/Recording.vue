@@ -3,25 +3,27 @@
         <HeaderBar />
         <main>
             <Navigation />
-            <div class="recorded-programs-container-wrapper">
+            <div class="recording-programs-container-wrapper">
                 <SPHeaderBar />
-                <div class="recorded-programs-container">
+                <div class="recording-programs-container">
                     <Breadcrumbs :crumbs="[
                         { name: 'ホーム', path: '/' },
                         { name: 'ビデオをみる', path: '/videos/' },
-                        { name: '録画済み', path: '/videos/programs', disabled: true },
+                        { name: '追いかけ再生', path: '/videos/recording', disabled: true },
                     ]" />
                     <RecordedProgramList
-                        title="録画済み"
+                        title="追いかけ再生"
                         :programs="programs"
                         :total="total_programs"
                         :page="current_page"
-                        :sortOrder="sort_order"
+                        :hideSort="true"
                         :isLoading="is_loading"
                         :showBackButton="true"
                         :showEmptyMessage="!is_loading"
-                        @update:page="updatePage"
-                        @update:sortOrder="updateSortOrder($event as SortOrder)" />
+                        :emptyIcon="'fluent:video-clip-20-regular'"
+                        :emptyMessage="'現在録画中の番組はありません。'"
+                        :emptySubMessage="'録画中の番組はここから追いかけ再生できます。'"
+                        @update:page="updatePage" />
                 </div>
             </div>
         </main>
@@ -37,15 +39,14 @@ import HeaderBar from '@/components/HeaderBar.vue';
 import Navigation from '@/components/Navigation.vue';
 import SPHeaderBar from '@/components/SPHeaderBar.vue';
 import RecordedProgramList from '@/components/Videos/RecordedProgramList.vue';
-import { IRecordedProgram, SortOrder } from '@/services/Videos';
+import { IRecordedProgram } from '@/services/Videos';
 import Videos from '@/services/Videos';
 import useUserStore from '@/stores/UserStore';
 
-// ルーター
 const route = useRoute();
 const router = useRouter();
 
-// 録画番組のリスト
+// 追いかけ再生できる録画中番組のリスト
 const programs = ref<IRecordedProgram[]>([]);
 const total_programs = ref(0);
 const is_loading = ref(true);
@@ -53,26 +54,21 @@ const is_loading = ref(true);
 // 現在のページ番号
 const current_page = ref(1);
 
-// 並び順
-const sort_order = ref<'desc' | 'asc'>('desc');
-
-// 録画済み番組を取得
+// 追いかけ再生できる録画中番組を取得
 const fetchPrograms = async () => {
-    // /videos API は混合一覧を返すため、追いかけ再生と録画済みをフロントエンド側で分離する。
-    // 録画番組数はローカルアプリ用途として現実的な件数に収まる想定なので、必要ページをまとめて取得してから絞り込む。
-    const first_page = await Videos.fetchVideos(sort_order.value, 1);
+    const first_page = await Videos.fetchVideos('desc', 1);
     if (first_page) {
         const all_programs = [...first_page.recorded_programs];
         const total_pages = Math.ceil(first_page.total / 30);
         for (let page = 2; page <= total_pages; page++) {
-            const result = await Videos.fetchVideos(sort_order.value, page);
+            const result = await Videos.fetchVideos('desc', page);
             if (result) {
                 all_programs.push(...result.recorded_programs);
             }
         }
-        const recorded_programs = all_programs.filter(program => program.recorded_video.status === 'Recorded');
-        programs.value = recorded_programs.slice((current_page.value - 1) * 30, current_page.value * 30);
-        total_programs.value = recorded_programs.length;
+        const recording_programs = all_programs.filter(program => program.recorded_video.status === 'Recording');
+        programs.value = recording_programs.slice((current_page.value - 1) * 30, current_page.value * 30);
+        total_programs.value = recording_programs.length;
     }
     is_loading.value = false;
 };
@@ -89,62 +85,37 @@ const updatePage = async (page: number) => {
     });
 };
 
-// 並び順を更新
-const updateSortOrder = async (order: 'desc' | 'asc') => {
-    sort_order.value = order;
-    current_page.value = 1;  // ページを1に戻す
-    is_loading.value = true;
-    await router.replace({
-        query: {
-            ...route.query,
-            order,
-            page: '1',
-        },
-    });
-};
-
-// クエリパラメータが変更されたら録画番組を再取得
+// クエリパラメータが変更されたら録画中番組を再取得
 watch(() => route.query, async (newQuery) => {
-    // ページ番号を同期
     if (newQuery.page) {
         current_page.value = parseInt(newQuery.page as string);
-    }
-    // ソート順を同期
-    if (newQuery.order) {
-        sort_order.value = newQuery.order as 'desc' | 'asc';
     }
     await fetchPrograms();
 }, { deep: true });
 
 // 開始時に実行
 onMounted(async () => {
-    // 事前にログイン状態を同期（トークンがあればユーザー情報を取得）
     const userStore = useUserStore();
     await userStore.fetchUser();
 
-    // クエリパラメータから初期値を設定
     if (route.query.page) {
         current_page.value = parseInt(route.query.page as string);
     }
-    if (route.query.order) {
-        sort_order.value = route.query.order as 'desc' | 'asc';
-    }
 
-    // 録画番組を取得
     await fetchPrograms();
 });
 
 </script>
 <style lang="scss" scoped>
 
-.recorded-programs-container-wrapper {
+.recording-programs-container-wrapper {
     display: flex;
     flex-direction: column;
     width: 100%;
     min-width: 0;  // サイドナビゲーション横のフレックス子要素を親幅内で縮め、タブレット縦画面でのはみ出しを防ぐ
 }
 
-.recorded-programs-container {
+.recording-programs-container {
     display: flex;
     flex-direction: column;
     width: 100%;
@@ -160,8 +131,10 @@ onMounted(async () => {
         padding: 16px 16px !important;
     }
     @include smartphone-vertical {
-        padding: 16px 8px !important;
         padding-top: 8px !important;
+        padding-left: 8px !important;
+        padding-right: 8px !important;
+        padding-bottom: 20px !important;
     }
 }
 

@@ -776,5 +776,5 @@ class VersionInformation(BaseModel):
     version: str
     latest_version: str | None
     environment: Literal['Windows', 'Linux', 'Linux-Docker', 'Linux-ARM']
-    backend: Literal['EDCB', 'Mirakurun']
+    backend: Literal['EDCB', 'Mirakurun', 'EPGStation']
     encoder: Literal['FFmpeg', 'QSVEncC', 'NVEncC', 'VCEEncC', 'rkmppenc']

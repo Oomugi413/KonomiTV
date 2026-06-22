@@ -6,7 +6,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Annotated, Any, Literal, cast
+from typing import Annotated, Any, Literal, Self, cast
 
 import httpx
 import psutil
@@ -23,6 +23,7 @@ from pydantic import (
     ValidationInfo,
     confloat,
     field_validator,
+    model_validator,
 )
 from pydantic_core import Url
 
@@ -139,14 +140,23 @@ class ClientSettings(BaseModel):
 # config.yaml のバリデーションは設定データをこの Pydantic モデルに通すことで行う
 
 class _ServerSettingsGeneral(BaseModel):
-    backend: Literal['EDCB', 'Mirakurun'] = 'EDCB'
+    backend: Literal['EDCB', 'Mirakurun', 'EPGStation'] = 'EDCB'
     always_receive_tv_from_mirakurun: bool = False
     edcb_url: Annotated[Url, UrlConstraints(allowed_schemes=['tcp'])] = Url('tcp://127.0.0.1:4510/')
     mirakurun_url: Annotated[Url, UrlConstraints(allowed_schemes=['http', 'https'])] = Url('http://127.0.0.1:40772/')
+    epgstation_url: Annotated[Url, UrlConstraints(allowed_schemes=['http', 'https'])] = Url('http://127.0.0.1:8888/')
     encoder: Literal['FFmpeg', 'QSVEncC', 'NVEncC', 'VCEEncC', 'rkmppenc'] = 'FFmpeg'
     program_update_interval: Annotated[float, confloat(ge=0.1)] = 5.0
     debug: bool = False
     debug_encoder: bool = False
+
+    @model_validator(mode='after')
+    def force_mirakurun_receive_for_epgstation(self) -> Self:
+        # EPGStation は放送波の直接受信 API を提供しないため、視聴・チャンネル・番組表更新は Mirakurun / mirakc に透過的に委譲する。
+        # その前提を設定値にも反映し、UI や後続処理から常に一貫した値として扱えるようにする。
+        if self.backend == 'EPGStation':
+            self.always_receive_tv_from_mirakurun = True
+        return self
 
     @field_validator('edcb_url')
     def validate_edcb_url(cls, edcb_url: Url, info: ValidationInfo) -> Url:
@@ -183,6 +193,14 @@ class _ServerSettingsGeneral(BaseModel):
             logging.info(f'Backend: EDCB ({edcb_url}) Status: {result}')
         return edcb_url
 
+    @field_validator('epgstation_url')
+    def validate_epgstation_url(cls, epgstation_url: Url) -> Url:
+        # URL を末尾のスラッシュありに統一
+        epgstation_url = Url(str(epgstation_url).rstrip('/') + '/')
+        # EPGStation は録画/予約状態を補完するバックエンドで、環境によっては常駐していないことがある。
+        # 起動時の疎通確認で KonomiTV 全体を落とさないよう、ここでは URL 形式の検証と正規化だけ行う。
+        return epgstation_url
+
     @field_validator('mirakurun_url')
     def validate_mirakurun_url(cls, mirakurun_url: Url, info: ValidationInfo) -> Url:
         # URL を末尾のスラッシュありに統一
@@ -193,7 +211,7 @@ class _ServerSettingsGeneral(BaseModel):
         if type(info.context) is dict and info.context.get('bypass_validation') is True:
             return mirakurun_url
         # Mirakurun バックエンドの接続確認
-        if info.data.get('backend') == 'Mirakurun' or info.data.get('always_receive_tv_from_mirakurun') is True:
+        if info.data.get('backend') in ['Mirakurun', 'EPGStation'] or info.data.get('always_receive_tv_from_mirakurun') is True:
             # 試しにリクエストを送り、200 (OK) が返ってきたときだけ有効な URL とみなす
             try:
                 response = httpx.get(

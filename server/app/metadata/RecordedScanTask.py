@@ -28,6 +28,11 @@ from app.utils import ShutdownProcessPoolExecutor
 from app.utils.DriveIOLimiter import DriveIOLimiter
 from app.utils.NotificationService import NotificationManager
 from app.utils.ProcessLimiter import ProcessLimiter
+from app.utils.RecordingStatusProvider import (
+    ActiveRecordingFilePaths,
+    GetActiveRecordingFilePaths,
+    IsActiveRecordingFilePath,
+)
 from app.utils.TSInformation import TSInformation
 
 
@@ -88,6 +93,9 @@ class RecordedScanTask:
     # 録画中と判断する最大の経過時間 (秒)
     RECORDING_MAX_AGE_SECONDS: ClassVar[int] = 300  # 5分
 
+    # 録画バックエンドから取得した録画中ファイルパスのキャッシュ有効時間 (秒)
+    ACTIVE_RECORDING_PATHS_CACHE_SECONDS: ClassVar[int] = 5
+
     # 録画中ファイルの最小データ長 (秒)
     MINIMUM_RECORDING_SECONDS: ClassVar[int] = 60
 
@@ -136,6 +144,11 @@ class RecordedScanTask:
 
         # 録画中ファイルの状態管理
         self._recording_files: dict[anyio.Path, FileRecordingInfo] = {}
+        # 録画バックエンドが把握している録画中ファイルパスの短時間キャッシュ
+        ## ファイル変更イベントや一括スキャンで同じ情報を何度も参照するため、バックエンドへの問い合わせを数秒単位でまとめる。
+        self._active_recording_paths_cache: ActiveRecordingFilePaths | None = None
+        self._active_recording_paths_cache_updated_at: datetime | None = None
+        self._active_recording_paths_lock = asyncio.Lock()
 
         # タスクの状態管理
         self._is_running = False
@@ -164,6 +177,28 @@ class RecordedScanTask:
 
         # 初期化済みフラグをセット
         self._initialized = True
+
+
+    async def __getActiveRecordingFilePaths(self) -> ActiveRecordingFilePaths:
+        """
+        録画バックエンドが把握している録画中ファイルパス一覧を取得する。
+
+        Returns:
+            ActiveRecordingFilePaths: 録画中ファイルパス一覧
+        """
+
+        # ファイル変更イベントや一括スキャンでは短時間に同じ問い合わせが連続するため、
+        # バックエンドへの問い合わせ結果を数秒間だけ共有する。
+        async with self._active_recording_paths_lock:
+            now = datetime.now(tz=JST)
+            if (self._active_recording_paths_cache is not None and
+                self._active_recording_paths_cache_updated_at is not None and
+                (now - self._active_recording_paths_cache_updated_at).total_seconds() < self.ACTIVE_RECORDING_PATHS_CACHE_SECONDS):
+                return self._active_recording_paths_cache
+
+            self._active_recording_paths_cache = await GetActiveRecordingFilePaths(self.config)
+            self._active_recording_paths_cache_updated_at = now
+            return self._active_recording_paths_cache
 
 
     async def start(self) -> None:
@@ -597,6 +632,14 @@ class RecordedScanTask:
                     logging.warning(f'{file_path}: File size is 0. ignored.')
                     return
 
+                # 録画バックエンドが現在録画中のファイルパス一覧を返せる場合は、それを Recording 判定の主情報源にする。
+                # EPGStation / EDCB が正常に応答している間は、ファイル更新時刻だけによる推測よりもこの結果を優先する。
+                active_recording_file_paths = await self.__getActiveRecordingFilePaths()
+                is_backend_recording = (
+                    active_recording_file_paths.is_reliable is True and
+                    IsActiveRecordingFilePath(file_path_str, active_recording_file_paths.paths) is True
+                )
+
                 # 同じファイルパスの既存レコードのサマリーがあれば取り出す
                 if existing_db_recorded_videos is not None:
                     existing_recorded_video_summary = existing_db_recorded_videos.pop(file_path, None)
@@ -645,17 +688,24 @@ class RecordedScanTask:
                     existing_recorded_video_summary.status == 'Recorded'):
                     if (existing_recorded_video_summary.file_created_at == file_created_at and
                         existing_recorded_video_summary.file_modified_at == file_modified_at and
-                        existing_recorded_video_summary.file_size == file_size):
+                        existing_recorded_video_summary.file_size == file_size and
+                        is_backend_recording is False):
                         # logging.debug(f'{file_path}: File metadata unchanged, skipping...')
                         return
 
                 # 現在録画中とマークされているファイルの処理
-                is_recording = file_path in self._recording_files
+                is_file_system_recording = file_path in self._recording_files
+                is_recording = is_backend_recording or (
+                    active_recording_file_paths.is_reliable is False and
+                    is_file_system_recording is True
+                )
                 if is_recording:
                     # 既に DB に登録済みで録画中の場合は再解析しない
                     if (existing_recorded_video_summary is not None and
                         existing_recorded_video_summary.status == 'Recording'):
                         return
+
+                if is_file_system_recording:
                     # まだ DB に登録されていない＆ファイルサイズが前回から変化していない場合
                     recording_info = self._recording_files[file_path]
                     last_size = recording_info.file_size
@@ -804,7 +854,14 @@ class RecordedScanTask:
                 ## 他ドライブからファイルコピー中のファイルも、実際の録画処理より高速に書き込まれるだけで随時書き込まれることに変わりはないので、
                 ## 録画中として判断されることがある（その場合、ファイルコピーが完了した段階で「録画完了」扱いとなる）
                 ## force_update (手動スキャン) の場合は _recording_files の状態を無視し、ファイルの更新時刻のみで判定
-                if (not force_update and is_recording) or (not force_update and (now - file_modified_at).total_seconds() < self.RECORDING_COMPLETE_SECONDS):
+                if (
+                    (not force_update and is_recording) or
+                    (
+                        not force_update and
+                        active_recording_file_paths.is_reliable is False and
+                        (now - file_modified_at).total_seconds() < self.RECORDING_COMPLETE_SECONDS
+                    )
+                ):
                     # status を Recording に設定
                     recorded_program.recorded_video.status = 'Recording'
                     # 状態を更新
@@ -820,7 +877,8 @@ class RecordedScanTask:
                     # MetadataAnalyzer 側で既に Recorded に設定されているが、念のため
                     recorded_program.recorded_video.status = 'Recorded'
                     # 手動スキャンの場合、_recording_files から削除して録画完了状態をクリアする
-                    if force_update:
+                    # 録画バックエンドから信頼できる「現在録画中ではない」結果が得られた場合も、ローカル推測状態をクリアする。
+                    if force_update or active_recording_file_paths.is_reliable is True:
                         self._recording_files.pop(file_path, None)
 
                 # DB に永続化

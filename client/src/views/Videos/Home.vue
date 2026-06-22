@@ -11,11 +11,24 @@
                         { name: 'ビデオをみる', path: '/videos/', disabled: true },
                     ]" />
                     <RecordedProgramList
+                        v-if="recording_programs.length > 0 || is_loading"
+                        class="videos-home-container__recording-programs"
+                        :class="{'videos-home-container__recording-programs--loading': recording_programs.length === 0 && is_loading}"
+                        title="追いかけ再生"
+                        :programs="recording_programs"
+                        :total="total_recording_programs"
+                        :hideSort="true"
+                        :hidePagination="true"
+                        :showMoreButton="true"
+                        :isLoading="is_loading"
+                        :showEmptyMessage="false"
+                        @more="$router.push('/videos/recording')" />
+                    <RecordedProgramList
                         class="videos-home-container__recent-programs"
-                        :class="{'videos-home-container__recent-programs--loading': recent_programs.length === 0 && is_loading}"
-                        title="新着の録画番組"
-                        :programs="recent_programs"
-                        :total="total_programs"
+                        :class="{'videos-home-container__recent-programs--loading': recorded_programs.length === 0 && is_loading}"
+                        title="録画済み"
+                        :programs="recorded_programs"
+                        :total="total_recorded_programs"
                         :hideSort="true"
                         :hidePagination="true"
                         :showMoreButton="true"
@@ -70,9 +83,13 @@ import Videos from '@/services/Videos';
 import useSettingsStore from '@/stores/SettingsStore';
 import useUserStore from '@/stores/UserStore';
 
-// 最近録画された番組のリスト
-const recent_programs = ref<IRecordedProgram[]>([]);
-const total_programs = ref(0);
+// 追いかけ再生できる録画中番組のリスト
+const recording_programs = ref<IRecordedProgram[]>([]);
+const total_recording_programs = ref(0);
+
+// 録画済み番組のリスト
+const recorded_programs = ref<IRecordedProgram[]>([]);
+const total_recorded_programs = ref(0);
 
 // マイリストの録画番組のリスト
 const mylist_programs = ref<IRecordedProgram[]>([]);
@@ -101,12 +118,20 @@ watch(() => settingsStore.settings.watched_history, async () => {
     await fetchWatchedPrograms();
 }, { deep: true });
 
-// 最近録画された番組を取得
-const fetchRecentPrograms = async () => {
+// 録画中・録画済み番組を取得
+const fetchVideoPrograms = async () => {
     const result = await Videos.fetchVideos('desc', 1);
     if (result) {
-        recent_programs.value = result.recorded_programs.slice(0, 10);  // 最新10件のみ表示
-        total_programs.value = result.total;
+        // 録画中の番組は常に最新側に並ぶため、先頭ページだけで十分に拾える。
+        // 録画済みは追いかけ再生と分離して表示し、/videos/programs でも録画済みのみを扱う。
+        recording_programs.value = result.recorded_programs
+            .filter(program => program.recorded_video.status === 'Recording')
+            .slice(0, 10);
+        total_recording_programs.value = recording_programs.value.length;
+        recorded_programs.value = result.recorded_programs
+            .filter(program => program.recorded_video.status === 'Recorded')
+            .slice(0, 10);
+        total_recorded_programs.value = recorded_programs.value.length;
     }
 };
 
@@ -157,7 +182,7 @@ const fetchWatchedPrograms = async () => {
 
 // 各セクションの更新関数を管理するオブジェクト
 const sectionUpdaters = {
-    recentPrograms: fetchRecentPrograms,
+    videoPrograms: fetchVideoPrograms,
     mylistPrograms: fetchMylistPrograms,
     watchedPrograms: fetchWatchedPrograms,
 } as const;
@@ -246,6 +271,7 @@ onUnmounted(() => {
         }
     }
 
+    &__recording-programs.videos-home-container__recording-programs--loading,
     &__recent-programs.videos-home-container__recent-programs--loading {
         // ローディング中にちらつかないように
         :deep(.recorded-program-list__grid) {

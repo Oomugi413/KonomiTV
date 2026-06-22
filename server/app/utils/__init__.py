@@ -81,6 +81,42 @@ def GetMirakurunAPIEndpointURL(endpoint: str) -> str:
     return str(Config().general.mirakurun_url).rstrip('/') + endpoint
 
 
+def GetBackendForChannelAndProgram() -> Literal['EDCB', 'Mirakurun']:
+    """
+    チャンネル情報・番組情報の取得に利用するバックエンド種別を返す。
+
+    Returns:
+        Literal['EDCB', 'Mirakurun']: チャンネル情報・番組情報取得に利用するバックエンド種別
+    """
+
+    from app.config import Config
+
+    # EPGStation は Mirakurun / mirakc を入力ソースとして利用する構成が一般的で、KonomiTV 側も
+    # チャンネル・番組表更新では Mirakurun / mirakc API をそのまま利用する。
+    backend = Config().general.backend
+    if backend == 'EPGStation':
+        return 'Mirakurun'
+    return backend
+
+
+def GetBackendForReceiving() -> Literal['EDCB', 'Mirakurun']:
+    """
+    ライブ視聴の放送波受信に利用するバックエンド種別を返す。
+
+    Returns:
+        Literal['EDCB', 'Mirakurun']: 放送波受信に利用するバックエンド種別
+    """
+
+    from app.config import Config
+
+    # always_receive_tv_from_mirakurun が True の場合は、バックエンド種別に関わらず Mirakurun / mirakc から受信する。
+    # EPGStation は放送波の直接受信 API を提供しないため、設定値が古くても Mirakurun / mirakc にフォールバックする。
+    backend = Config().general.backend
+    if Config().general.always_receive_tv_from_mirakurun is True or backend == 'EPGStation':
+        return 'Mirakurun'
+    return backend
+
+
 def GetPlatformEnvironment() -> Literal['Windows', 'Linux', 'Linux-Docker', 'Linux-ARM'] | None:
     """
     サーバーが稼働している動作環境を取得する
