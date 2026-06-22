@@ -107,6 +107,10 @@ class VideoStream:
     ## 長い GOP や PCR 二分探索の推定ズレがある TS でも、実用上許容できる範囲では再生を継続させる
     ON_DEMAND_KEYFRAME_MAX_AGE_SEGMENTS: ClassVar[int] = 5
 
+    # 録画中ファイルの末尾は、PCR から再生可能そうに見えてもエンコーダー入力としてはまだ安定していないことがある。
+    ## 追いかけ再生ではこの秒数だけ playlist の末尾を隠し、半端に書き込み中の GOP / TS パケットへ hls.js が到達しないようにする。
+    RECORDING_PLAYLIST_EDGE_BUFFER_SECONDS: ClassVar[float] = 15.0
+
     # 録画視聴セッションのインスタンスが入る、セッション ID をキーとした辞書
     # この辞書に録画視聴セッションに関する全てのデータが格納されている
     __instances: ClassVar[dict[str, VideoStream]] = {}
@@ -433,16 +437,25 @@ class VideoStream:
             return (0, 0)
 
 
-    def __ensureVirtualSegments(self, duration_seconds: float) -> None:
+    def __ensureVirtualSegments(self, duration_seconds: float, *, is_recording: bool = False) -> None:
         """
         指定された再生時間まで HLS 仮想セグメントを作成・更新する
 
         Args:
             duration_seconds (float): プレイリストに含める再生時間 (秒)
+            is_recording (bool): 録画中ファイル向けの追いかけ再生 playlist として作るかどうか
         """
 
         duration_seconds = max(duration_seconds, 0.001)
-        segment_count = max(1, math.ceil(duration_seconds / self._segment_duration_seconds))
+
+        # 録画中は末尾セグメントが次回 playlist 更新で伸び続けると、同じ sequence の EXTINF と実データ長がずれて
+        ## hls.js 側では「TS が繋がっていない」ような周期的な停止に見えやすい。
+        ## そのため、追いかけ再生では基本的に完全に閉じた固定長セグメントだけを playlist へ出す。
+        if is_recording is True and duration_seconds >= self._segment_duration_seconds:
+            segment_count = max(1, math.floor(duration_seconds / self._segment_duration_seconds))
+            duration_seconds = segment_count * self._segment_duration_seconds
+        else:
+            segment_count = max(1, math.ceil(duration_seconds / self._segment_duration_seconds))
         previous_segment_count = len(self._segments)
 
         # 既存セグメントの長さも更新する。
@@ -495,7 +508,10 @@ class VideoStream:
         if self._ts_source_base_dts is None and snapshot.source_base_dts is not None:
             self._ts_source_base_dts = snapshot.source_base_dts
 
-        return max(playlist_duration_seconds, snapshot.available_duration_seconds)
+        # tracker の推定値は「末尾 PCR までは読めそう」という値であり、HLS セグメントとして安定して配れる境界とは限らない。
+        ## 追いかけ再生ではプレイヤー側と同じ 15 秒の余白を後端 playlist にも持たせ、書き込み中の末尾へ到達しないようにする。
+        recording_playlist_duration_seconds = max(playlist_duration_seconds, snapshot.available_duration_seconds)
+        return max(recording_playlist_duration_seconds - self.RECORDING_PLAYLIST_EDGE_BUFFER_SECONDS, 0.001)
 
 
     async def __refreshRecordingSegments(self) -> None:
@@ -506,7 +522,7 @@ class VideoStream:
         if self.recorded_program.recorded_video.status != 'Recording':
             return
         playlist_duration_seconds = await self.__getPlaylistDuration()
-        self.__ensureVirtualSegments(playlist_duration_seconds)
+        self.__ensureVirtualSegments(playlist_duration_seconds, is_recording = True)
 
 
     async def getVirtualPlaylist(self, cache_key: str | None = None) -> str:
@@ -526,7 +542,10 @@ class VideoStream:
 
         # 録画済みは DB の duration から固定長プレイリストを作り、録画中は tracker が推定した可読範囲まで随時伸ばす。
         playlist_duration_seconds = await self.__getPlaylistDuration()
-        self.__ensureVirtualSegments(playlist_duration_seconds)
+        self.__ensureVirtualSegments(
+            playlist_duration_seconds,
+            is_recording = self.recorded_program.recorded_video.status == 'Recording',
+        )
 
         # キャッシュキーが指定されていない場合は UUID の - で区切って一番左側のみを使う
         if cache_key is None:
