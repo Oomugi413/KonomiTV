@@ -92,6 +92,11 @@ class VideoStream:
     # 一度でも読み取られた HLS セグメントの最大保持数
     MAX_READED_SEGMENTS: ClassVar[int] = 10
 
+    # 同一視聴セッションで同時に処理するセグメントリクエストの最大数
+    ## hls.js は manifest 更新直後に現在セグメントと次セグメント、さらに再試行分を並行して投げることがある。
+    ## 2 本では追いかけ再生の末尾更新時に 429 が出やすいため、エンコーダー再起動の暴発を防ぐ範囲で少し余裕を持たせる。
+    MAX_ACTIVE_SEGMENT_REQUESTS: ClassVar[int] = 4
+
     # QSVEncC でエンコードを開始する際、入力 DTS が 33bit ラップアラウンド直前だと時刻補正でフレーム間隔がズレる問題を回避するための余裕
     DTS_WRAP_AVOIDANCE_SECONDS: ClassVar[int] = 60
 
@@ -907,8 +912,8 @@ class VideoStream:
             else:
                 return None
 
-        # 同時リクエスト数をチェック（最大2つまで）
-        if self._active_segment_requests >= 2:
+        # 同時リクエスト数をチェック
+        if self._active_segment_requests >= self.MAX_ACTIVE_SEGMENT_REQUESTS:
             logging.warning(f'{self.log_prefix}[Segment {segment_sequence}] Too many concurrent requests (current: {self._active_segment_requests}), rejecting.')
             raise HTTPException(
                 status_code = status.HTTP_429_TOO_MANY_REQUESTS,

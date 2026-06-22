@@ -706,11 +706,15 @@ class PlayerController {
                     // startPosition に視聴履歴などから求めた再生位置を渡し、ロード開始時点で正しい Media Sequence を選択させる
                     // これを指定しないと manifest 解析後に sequence=0 からフラグメント取得が始まってしまう
                     startPosition: seek_seconds,
-                    // 追っかけ再生中は録画ファイルの末尾が伸びるため、通常の VOD より短い間隔でライブ端を追う。
-                    // 実際の manifest 再読込は hls.js の live playlist 更新と CustomBufferController の末尾監視で行う。
-                    liveSyncDurationCount: is_recording_chase_playback === true ? 1 : Hls.DefaultConfig.liveSyncDurationCount,
-                    liveMaxLatencyDurationCount: is_recording_chase_playback === true ? 2 : Hls.DefaultConfig.liveMaxLatencyDurationCount,
-                    maxLiveSyncPlaybackRate: is_recording_chase_playback === true ? 1.1 : Hls.DefaultConfig.maxLiveSyncPlaybackRate,
+                    // 追っかけ再生は EVENT playlist を使うが、視聴位置はユーザーの再生位置・視聴履歴を優先する。
+                    // liveSyncDurationCount / liveMaxLatencyDurationCount を低遅延ライブ向けに詰めると、
+                    // manifest 更新時に hls.js が「大きく遅延している」と判定し、現在位置から録画末尾へ飛んでしまう。
+                    // そのため追っかけ再生中は明示的に live edge への自動追跡を無効化し、末尾付近の manifest 再読込だけ CustomBufferController に任せる。
+                    liveSyncDurationCount: Hls.DefaultConfig.liveSyncDurationCount,
+                    liveMaxLatencyDurationCount: is_recording_chase_playback === true ?
+                        Number.POSITIVE_INFINITY : Hls.DefaultConfig.liveMaxLatencyDurationCount,
+                    maxLiveSyncPlaybackRate: is_recording_chase_playback === true ?
+                        1 : Hls.DefaultConfig.maxLiveSyncPlaybackRate,
                     // カスタムバッファコントローラーを設定
                     // @ts-ignore
                     bufferController: CustomBufferController,
