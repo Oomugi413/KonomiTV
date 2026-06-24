@@ -5,7 +5,7 @@ import asyncio
 import concurrent.futures
 import pathlib
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import ClassVar, Literal, cast
 
 import anyio
@@ -30,6 +30,7 @@ from app.utils.NotificationService import NotificationManager
 from app.utils.ProcessLimiter import ProcessLimiter
 from app.utils.RecordingStatusProvider import (
     ActiveRecordingFilePaths,
+    GetEPGStationRecentRecordedFilePaths,
     GetActiveRecordingFilePaths,
     IsActiveRecordingFilePath,
 )
@@ -99,6 +100,9 @@ class RecordedScanTask:
     # 録画バックエンドが把握している録画中ファイルを同期する間隔 (秒)
     ACTIVE_RECORDING_SYNC_INTERVAL_SECONDS: ClassVar[int] = 5
 
+    # EPGStation が把握している直近録画済み一覧を同期する間隔 (秒)
+    EPGSTATION_RECENT_RECORDED_SYNC_INTERVAL_SECONDS: ClassVar[int] = 60
+
     # 録画中ファイルの最小データ長 (秒)
     MINIMUM_RECORDING_SECONDS: ClassVar[int] = 60
 
@@ -156,6 +160,14 @@ class RecordedScanTask:
         ## 参照箇所: __syncActiveRecordingFiles()
         ## 前提条件: 文字列化済みパスの集合だけを保持し、ファイル実体にはアクセスしない。
         self._active_recording_paths_log_signature: tuple[bool, tuple[str, ...]] | None = None
+        # EPGStation の直近録画済み一覧で一度実体を確認したファイルパスを保持する。
+        ## 参照箇所: __syncEPGStationRecentRecordedFiles()
+        ## 前提条件: 直近20ページの範囲外へ押し出された録画を削除扱いしないため、実在を確認できたパスだけを削除追跡対象にする。
+        self._epgstation_tracked_recorded_paths: set[str] = set()
+        # EPGStation の直近録画済み一覧同期のログ出力重複を抑えるため、直前の状態を保持する。
+        ## 参照箇所: __syncEPGStationRecentRecordedFiles()
+        ## 前提条件: 件数とページ数だけを保持し、ファイル実体にはアクセスしない。
+        self._epgstation_recent_recorded_log_signature: tuple[int, int, int] | None = None
 
         # タスクの状態管理
         self._is_running = False
@@ -273,14 +285,87 @@ class RecordedScanTask:
                 await self.processRecordedFile(file_path)
 
 
+    async def __syncEPGStationRecentRecordedFiles(self) -> None:
+        """
+        EPGStation が把握している直近の録画済みファイルを DB と同期する。
+        """
+
+        # EDCB / Mirakurun / ファイル監視だけの構成では EPGStation の録画済み一覧を参照しない。
+        if self.config.general.backend != 'EPGStation':
+            return
+
+        recent_recorded_file_paths = await GetEPGStationRecentRecordedFilePaths(self.config)
+
+        # EPGStation が落ちている/応答できない場合は、次回の定期同期で必ず再試行する。
+        ## ここで既存の追跡状態を消すと、一時的な EPGStation 障害を削除扱いしてしまうため何もしない。
+        if recent_recorded_file_paths.is_reliable is False:
+            return
+
+        # EPGStation への録画済み一覧問い合わせが動いていることを確認しやすいよう、
+        # 取得件数・ページ数・総件数が変化したときだけ info レベルで要約を出力する。
+        current_signature = (
+            len(recent_recorded_file_paths.paths),
+            recent_recorded_file_paths.requested_pages,
+            recent_recorded_file_paths.total,
+        )
+        if current_signature != self._epgstation_recent_recorded_log_signature:
+            self._epgstation_recent_recorded_log_signature = current_signature
+            logging.info(
+                f'Recent recorded paths from EPGStation: '
+                f'{len(recent_recorded_file_paths.paths)} candidate(s), '
+                f'{recent_recorded_file_paths.requested_pages} page(s), '
+                f'total: {recent_recorded_file_paths.total}.'
+            )
+
+        # EPGStation の録画済み一覧にはファイル名だけが含まれる構成があるため、RecordingStatusProvider 側で
+        # recorded_folders 配下に展開済みの候補を総当たりする。実在するファイルだけを処理対象にすることで、
+        # 全録画フォルダのスキャンを避けつつ、録画完了後に watchfiles イベントを取り逃したケースを補完する。
+        processed_paths: set[str] = set()
+        for recorded_path in sorted(recent_recorded_file_paths.paths):
+            file_path = anyio.Path(recorded_path)
+            if file_path.suffix.lower() not in self.SCAN_TARGET_EXTENSIONS:
+                continue
+            if str(file_path) in processed_paths:
+                continue
+            if await self.isFileExists(file_path) is False:
+                continue
+            processed_paths.add(str(file_path))
+            self._epgstation_tracked_recorded_paths.add(str(file_path))
+            await self.processRecordedFile(file_path)
+
+        # EPGStation の直近一覧で一度実体確認できたファイルについて、後からファイル実体が消えた場合は
+        # EPGStation 側で削除された可能性が高い。直近20ページから押し出されただけの古い録画を誤削除しないよう、
+        # 「過去に実在確認済み」かつ「現在ファイルが存在しない」パスだけを DB から削除する。
+        tracked_recorded_paths = list(self._epgstation_tracked_recorded_paths)
+        for offset in range(0, len(tracked_recorded_paths), 100):
+            tracked_recorded_path_chunk = tracked_recorded_paths[offset:offset + 100]
+            db_recorded_video_rows = await RecordedVideo.filter(
+                file_path__in = tracked_recorded_path_chunk,
+            ).values('file_path', 'recorded_program_id')
+            for row in db_recorded_video_rows:
+                file_path = anyio.Path(row['file_path'])
+                if await self.isFileExists(file_path) is True:
+                    continue
+                await RecordedProgram.filter(id=row['recorded_program_id']).delete()
+                self._epgstation_tracked_recorded_paths.discard(row['file_path'])
+                logging.info(f'{file_path}: Deleted EPGStation-tracked record for non-existent file.')
+
+
     async def __syncActiveRecordingFilesLoop(self) -> None:
         """
         録画バックエンドが把握している録画中ファイルを定期的に同期し続ける。
         """
 
+        next_recent_recorded_sync_at = datetime.now(tz=JST)
         while self._is_active_recording_sync_running:
             try:
                 await self.__syncActiveRecordingFiles()
+                now = datetime.now(tz=JST)
+                if now >= next_recent_recorded_sync_at:
+                    await self.__syncEPGStationRecentRecordedFiles()
+                    next_recent_recorded_sync_at = now + timedelta(
+                        seconds = self.EPGSTATION_RECENT_RECORDED_SYNC_INTERVAL_SECONDS,
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception as ex:
