@@ -23,6 +23,19 @@ import useSettingsStore, { LiveStreamingQuality, LIVE_STREAMING_QUALITIES, Video
 import Utils, { dayjs, PlayerUtils } from '@/utils';
 
 
+type VideoFrameRequestMetadataLike = {
+    mediaTime: number;
+    presentedFrames: number;
+};
+
+type VideoFrameRequestCallbackLike = (now: number, metadata: VideoFrameRequestMetadataLike) => void;
+
+type HTMLVideoElementWithFrameCallback = HTMLVideoElement & {
+    requestVideoFrameCallback?: (callback: VideoFrameRequestCallbackLike) => number;
+    cancelVideoFrameCallback?: (handle: number) => void;
+};
+
+
 /**
  * 動画プレイヤーである DPlayer に関連するロジックを丸ごとラップするクラスで、再生系ロジックの中核を担う
  * DPlayer の初期化後は DPlayer が発行するイベントなどに合わせ、各イベントハンドラーや PlayerManager を管理する
@@ -63,6 +76,16 @@ class PlayerController {
 
     // ライブ視聴: mpegts.js のバッファ詰まり対策で定期的に強制シークするインターバルをキャンセルする関数
     private live_force_seek_interval_timer_cancel: (() => void) | null = null;
+
+    // mpegts.js の MSE in Worker を有効化するかどうか
+    private enable_worker_for_mse: boolean = true;
+
+    // Safari の readyState/currentTime が信用できない場合に、実際のフレーム提示有無を追跡するための情報
+    private video_frame_callback_handle: number | null = null;
+    private video_frame_callback_source: HTMLVideoElementWithFrameCallback | null = null;
+    private last_video_frame_callback_at: number | null = null;
+    private last_video_frame_media_time: number | null = null;
+    private last_video_frame_presented_frames: number | null = null;
 
     // ビデオ視聴: ビデオストリームのアクティブ状態を維持するために Keep-Alive API にリクエストを送るインターバルのキャンセルする関数
     private video_keep_alive_interval_timer_cancel: (() => void) | null = null;
@@ -242,6 +265,21 @@ class PlayerController {
         // ブラウザが MSE in Worker での H.265 / HEVC 再生に対応しているかどうか
         const is_hevc_video_supported_in_worker = await mpegts.supportWorkerForMSEH265Playback();
 
+        // Safari のライブ MPEG-TS 再生では MSE in Worker 経路で、buffered は伸びるのに
+        // readyState が HAVE_METADATA のまま止まるケースがあるため main thread MSE 経路に倒す
+        this.enable_worker_for_mse = (Utils.isSafari() === true && this.playback_mode === 'Live') ?
+            false : (is_hevc_playback === true && is_hevc_video_supported_in_worker === false) ? false : true;
+
+        console.log('\u001b[31m[PlayerController] MPEG-TS playback configuration:', {
+            playback_mode: this.playback_mode,
+            is_safari: Utils.isSafari(),
+            is_hevc_playback: is_hevc_playback,
+            is_hevc_10bit_playback: is_hevc_10bit_playback,
+            is_hevc_video_supported_in_worker: is_hevc_video_supported_in_worker,
+            enable_worker_for_mse: this.enable_worker_for_mse,
+            live_playback_buffer_seconds: this.live_playback_buffer_seconds,
+        });
+
         // 文字スーパーの表示設定
         // ライブ視聴とビデオ視聴で設定キーが異なる
         const is_show_superimpose = this.playback_mode === 'Live' ?
@@ -323,6 +361,8 @@ class PlayerController {
             live: this.playback_mode === 'Live' ? true : false,
             // ライブモードで同期する際の最小バッファサイズ
             liveSyncMinBufferSize: this.live_playback_buffer_seconds - 0.1,
+            // Safari の MSE + MPEG-TS Live では起動直後の direct currentTime seek がスタールを誘発しうるため無効化する
+            syncWhenPlayingLive: Utils.isSafari() === true ? false : true,
             // ループ再生 (ライブ視聴では無効)
             loop: this.playback_mode === 'Live' ? false : true,
             // 自動再生
@@ -578,7 +618,7 @@ class PlayerController {
                         // メインスレッドから再生処理を分離することで、低スペック端末で DOM 描画の遅延が影響して映像再生が詰まる問題が解消される
                         // MSE in Worker が使えない環境では自動的に mpegts.js 側でフォールバックされるため、基本的に true を設定する
                         // ただし Windows 版 Microsoft Edge では MSE in Worker 有効時のみ H.265 / HEVC 再生が動作しないため、この場合のみ無効化する
-                        enableWorkerForMSE: (is_hevc_playback === true && is_hevc_video_supported_in_worker === false) ? false : true,
+                        enableWorkerForMSE: this.enable_worker_for_mse,
                         // 再生開始まで 2048KB のバッファを貯める (?)
                         // あまり大きくしすぎてもどうも効果がないようだが、小さくしたり無効化すると特に Safari で不安定になる
                         enableStashBuffer: true,
@@ -1013,13 +1053,269 @@ class PlayerController {
         if (this.playback_mode === 'Live') {
             try {
                 const buffered_range_count = this.player.video.buffered.length;
-                const buffer_remain = this.player.video.buffered.end(buffered_range_count - 1) - this.player.video.currentTime;
+                if (buffered_range_count === 0) return 0;
+                const current_time = Number.isFinite(this.player.video.currentTime) ?
+                    this.player.video.currentTime : this.player.video.buffered.start(0);
+                const buffer_remain = this.player.video.buffered.end(buffered_range_count - 1) - current_time;
+                if (Number.isFinite(buffer_remain) === false) return 0;
                 return Utils.mathFloor(buffer_remain, 3);
             } catch (error) {
                 return 0;
             }
         } else {
             return 0;
+        }
+    }
+
+
+    /**
+     * HTMLMediaElement の buffered range をログ出力しやすい配列に変換する
+     * TimeRanges は読み出し時に例外を投げうるため、診断ログ側で安全に扱う
+     */
+    private getBufferedRangesForLog(video: HTMLMediaElement): Array<[number, number]> {
+        const ranges: Array<[number, number]> = [];
+        for (let index = 0; index < video.buffered.length; index++) {
+            try {
+                ranges.push([
+                    Utils.mathFloor(video.buffered.start(index), 3),
+                    Utils.mathFloor(video.buffered.end(index), 3),
+                ]);
+            } catch (error) {
+                console.warn('\u001b[31m[PlayerController] Failed to read buffered range for diagnostics:', error);
+            }
+        }
+        return ranges;
+    }
+
+
+    /**
+     * requestVideoFrameCallback() の監視を停止し、直近フレーム提示情報をリセットする
+     */
+    private resetVideoFrameDiagnostics(): void {
+        if (this.video_frame_callback_source !== null &&
+            this.video_frame_callback_handle !== null &&
+            typeof this.video_frame_callback_source.cancelVideoFrameCallback === 'function') {
+            this.video_frame_callback_source.cancelVideoFrameCallback(this.video_frame_callback_handle);
+        }
+        this.video_frame_callback_handle = null;
+        this.video_frame_callback_source = null;
+        this.last_video_frame_callback_at = null;
+        this.last_video_frame_media_time = null;
+        this.last_video_frame_presented_frames = null;
+    }
+
+
+    /**
+     * HTMLVideoElement が実際にフレームを提示しているかを追跡する
+     * Safari では readyState/currentTime が止まっていても映像が出ることがあるため、UI 判定の補助に使う
+     */
+    private startVideoFrameDiagnostics(): void {
+        if (this.player === null) return;
+
+        this.resetVideoFrameDiagnostics();
+
+        const video = this.player.video as HTMLVideoElementWithFrameCallback;
+        if (typeof video.requestVideoFrameCallback !== 'function') {
+            console.warn('\u001b[31m[PlayerController] requestVideoFrameCallback() is not available.', this.getVideoPlaybackStateForLog({
+                video_frame_callback_supported: false,
+            }));
+            return;
+        }
+
+        this.video_frame_callback_source = video;
+        const on_video_frame: VideoFrameRequestCallbackLike = (now, metadata) => {
+            if (this.destroyed === true || this.player === null || this.player.video !== video) {
+                return;
+            }
+            this.last_video_frame_callback_at = now;
+            this.last_video_frame_media_time = metadata.mediaTime;
+            this.last_video_frame_presented_frames = metadata.presentedFrames;
+            this.video_frame_callback_handle = video.requestVideoFrameCallback!(on_video_frame);
+        };
+
+        this.video_frame_callback_handle = video.requestVideoFrameCallback(on_video_frame);
+        console.log('\u001b[31m[PlayerController] Video frame diagnostics started.', this.getVideoPlaybackStateForLog({
+            video_frame_callback_supported: true,
+        }));
+    }
+
+
+    /**
+     * 直近で実フレームが提示されていれば true を返す
+     */
+    private hasRecentlyPresentedVideoFrame(max_age_milliseconds = 2000): boolean {
+        if (this.last_video_frame_callback_at === null) return false;
+        return performance.now() - this.last_video_frame_callback_at <= max_age_milliseconds;
+    }
+
+
+    /**
+     * Safari で readyState が低いままでも、起動処理へ進めるだけのバッファがあるかどうか
+     */
+    private hasEnoughBufferedDataForSafariStartup(): boolean {
+        if (Utils.isSafari() === false) return false;
+        if (this.player === null) return false;
+        if (this.playback_mode !== 'Live') return false;
+
+        const video = this.player.video;
+        if (video.error !== null) return false;
+        if (video.buffered.length === 0) return false;
+
+        return this.getPlaybackBufferSeconds() >= this.live_playback_buffer_seconds;
+    }
+
+
+    /**
+     * Safari で起動処理後に実フレームが提示されたか確認する
+     * buffered / dimensions だけでは可視再生中か判定できないため、requestVideoFrameCallback() を優先する
+     */
+    private async waitForSafariStartupFramePresentation(context: string, timeout_milliseconds = 2500): Promise<boolean> {
+        if (Utils.isSafari() === false) return true;
+        if (this.player === null) return false;
+        if (this.playback_mode !== 'Live') return true;
+
+        const video = this.player.video as HTMLVideoElementWithFrameCallback;
+        if (typeof video.requestVideoFrameCallback !== 'function') {
+            console.warn('\u001b[31m[PlayerController] Safari startup frame verification skipped because requestVideoFrameCallback() is not available.', this.getVideoPlaybackStateForLog({
+                context: context,
+            }));
+            return true;
+        }
+
+        const started_at = performance.now();
+        while (performance.now() - started_at < timeout_milliseconds) {
+            if (this.destroyed === true || this.player === null || this.player.video !== video) return false;
+            if (this.hasRecentlyPresentedVideoFrame(3000) === true) return true;
+            if (video.readyState >= 3 && Number.isFinite(video.currentTime) === true) return true;
+            await Utils.sleep(0.1);
+        }
+
+        console.warn('\u001b[31m[PlayerController] Safari did not present video frames after startup handler.', this.getVideoPlaybackStateForLog({
+            context: context,
+            playback_buffer_seconds: this.getPlaybackBufferSeconds(),
+            startup_frame_verification_timeout_milliseconds: timeout_milliseconds,
+        }));
+
+        await this.recoverStartupStall(`${context} frame verification`);
+        await Utils.sleep(1);
+
+        if (this.destroyed === true || this.player === null || this.player.video !== video) return false;
+        if (this.hasRecentlyPresentedVideoFrame(3000) === true) return true;
+        if (video.readyState >= 3 && Number.isFinite(video.currentTime) === true) return true;
+
+        console.warn('\u001b[31m[PlayerController] Safari startup frame verification failed after recovery.', this.getVideoPlaybackStateForLog({
+            context: context,
+            playback_buffer_seconds: this.getPlaybackBufferSeconds(),
+        }));
+        return false;
+    }
+
+
+    /**
+     * Safari の MSE 起動時スタール調査に必要な HTMLMediaElement の状態をまとめる
+     */
+    private getVideoPlaybackStateForLog(extra: {[key: string]: any} = {}): {[key: string]: any} {
+        if (this.player === null) {
+            return {
+                player_exists: false,
+                ...extra,
+            };
+        }
+
+        const video = this.player.video;
+        const quality_index = this.player.qualityIndex ?? null;
+        const selected_quality = this.player.options.video.quality && typeof quality_index === 'number' ?
+            this.player.options.video.quality[quality_index] ?? null : null;
+        return {
+            player_exists: true,
+            playback_mode: this.playback_mode,
+            qualityIndex: quality_index,
+            selectedQuality: selected_quality,
+            syncWhenPlayingLive: (this.player.options as any).syncWhenPlayingLive ?? null,
+            readyState: video.readyState,
+            networkState: video.networkState,
+            paused: video.paused,
+            muted: video.muted,
+            playbackRate: video.playbackRate,
+            currentTime: video.currentTime,
+            currentTimeFinite: Number.isFinite(video.currentTime),
+            duration: video.duration,
+            durationFinite: Number.isFinite(video.duration),
+            videoWidth: video.videoWidth,
+            videoHeight: video.videoHeight,
+            bufferedLength: video.buffered.length,
+            buffered: this.getBufferedRangesForLog(video),
+            playbackBufferSeconds: this.getPlaybackBufferSeconds(),
+            seekableLength: video.seekable.length,
+            ended: video.ended,
+            error: video.error !== null ? {
+                code: video.error.code,
+                message: video.error.message,
+            } : null,
+            currentSrc: video.currentSrc || null,
+            src: video.getAttribute('src'),
+            documentVisibility: document.visibilityState,
+            videoFrameCallbackSupported: typeof (video as HTMLVideoElementWithFrameCallback).requestVideoFrameCallback === 'function',
+            lastVideoFrameCallbackAt: this.last_video_frame_callback_at,
+            lastVideoFrameCallbackAge: this.last_video_frame_callback_at !== null ?
+                Utils.mathFloor((performance.now() - this.last_video_frame_callback_at) / 1000, 3) : null,
+            lastVideoFrameMediaTime: this.last_video_frame_media_time,
+            lastVideoFramePresentedFrames: this.last_video_frame_presented_frames,
+            hasRecentVideoFrame: this.hasRecentlyPresentedVideoFrame(),
+            ...extra,
+        };
+    }
+
+
+    /**
+     * Safari の起動直後に、buffered はあるのに readyState が HAVE_METADATA のまま止まる状態から復旧を試みる
+     */
+    private async recoverStartupStall(context: string): Promise<boolean> {
+        if (this.player === null) return false;
+        if (this.playback_mode !== 'Live') return false;
+
+        const video = this.player.video;
+        if (video.buffered.length === 0) return false;
+
+        try {
+            const first_buffered_position = video.buffered.start(0);
+            const current_time = video.currentTime;
+            const should_recover =
+                video.readyState < 2 &&
+                (Number.isFinite(current_time) === false || current_time < first_buffered_position);
+
+            if (should_recover === false) return false;
+
+            const seek_target = Utils.isSafari() === true ?
+                Math.max(first_buffered_position + 0.1, 0.1) : Math.max(first_buffered_position, 0) + 0.001;
+            console.warn('\u001b[31m[PlayerController] Startup playback stall detected. Seeking to first buffered range.', this.getVideoPlaybackStateForLog({
+                context: context,
+                first_buffered_position: first_buffered_position,
+                seek_target: seek_target,
+            }));
+
+            // mpegts.js プラグインがある場合は、HTMLVideoElement 直叩きより mpegts.js 側の seek 経路を優先する
+            if (this.player.plugins.mpegts) {
+                this.player.plugins.mpegts.currentTime = seek_target;
+            } else {
+                video.currentTime = seek_target;
+            }
+
+            // Safari の autoplay 制約を避けるため、復旧時も一旦 muted のまま再生を試みる
+            video.muted = true;
+            await video.play();
+
+            console.warn('\u001b[31m[PlayerController] Startup playback stall recovery attempted.', this.getVideoPlaybackStateForLog({
+                context: context,
+                seek_target: seek_target,
+            }));
+            return true;
+
+        } catch (error) {
+            console.warn('\u001b[31m[PlayerController] Startup playback stall recovery failed:', error, this.getVideoPlaybackStateForLog({
+                context: context,
+            }));
+            return false;
         }
     }
 
@@ -1036,10 +1332,21 @@ class PlayerController {
         // 1 秒待つ
         await Utils.sleep(1);
 
+        // Safari では readyState が HAVE_METADATA のままでも実フレームが提示されることがある
+        // 直近フレームが確認できる場合は、バッファリング誤判定として UI 状態だけ解除する
+        if (player_store.is_video_buffering === true &&
+            Utils.isSafari() === true &&
+            this.hasRecentlyPresentedVideoFrame() === true) {
+            console.warn('\u001b[31m[PlayerController] Safari reports low readyState, but video frames are being presented. Clearing buffering state.', this.getVideoPlaybackStateForLog());
+            player_store.is_video_buffering = false;
+            player_store.is_loading = false;
+            return;
+        }
+
         // この時点で映像が停止していて、かつ readyState が HAVE_FUTURE_DATA な場合、復旧を試みる
         // Safari ではタイミングによっては this.player.video が null になる場合があるらしいので ? を付ける
         if (player_store.is_video_buffering === true && this.player?.video?.readyState < 3) {
-            console.warn('\u001b[31m[PlayerController] Video still buffering. (HTMLVideoElement.readyState < HAVE_FUTURE_DATA) Trying to recover.');
+            console.warn('\u001b[31m[PlayerController] Video still buffering. (HTMLVideoElement.readyState < HAVE_FUTURE_DATA) Trying to recover.', this.getVideoPlaybackStateForLog());
 
             // 一旦停止して、0.25 秒間を置く
             this.player.video.pause();
@@ -1057,8 +1364,16 @@ class PlayerController {
 
             // さらに 0.5 秒待った時点で映像が停止している場合、復旧を試みる
             await Utils.sleep(0.5);
+            if (player_store.is_video_buffering === true &&
+                Utils.isSafari() === true &&
+                this.hasRecentlyPresentedVideoFrame() === true) {
+                console.warn('\u001b[31m[PlayerController] Safari recovered after play retry and video frames are being presented. Clearing buffering state.', this.getVideoPlaybackStateForLog());
+                player_store.is_video_buffering = false;
+                player_store.is_loading = false;
+                return;
+            }
             if (player_store.is_video_buffering === true && this.player?.video?.readyState < 3) {
-                console.warn('\u001b[31m[PlayerController] Video still buffering. (HTMLVideoElement.readyState < HAVE_FUTURE_DATA) Trying to recover.');
+                console.warn('\u001b[31m[PlayerController] Video still buffering. (HTMLVideoElement.readyState < HAVE_FUTURE_DATA) Trying to recover.', this.getVideoPlaybackStateForLog());
 
                 // 一旦停止して、0.25 秒間を置く
                 this.player.video.pause();
@@ -1235,6 +1550,15 @@ class PlayerController {
                 this.is_live_startup_temporary_muted = this.player.video.muted === false;
                 this.player.video.muted = true;
 
+                // Safari の readyState/currentTime が信頼できないケースに備え、実フレーム提示を追跡する
+                this.startVideoFrameDiagnostics();
+
+                console.log('\u001b[31m[PlayerController] Initial live playback state:', this.getVideoPlaybackStateForLog({
+                    enable_worker_for_mse: this.enable_worker_for_mse,
+                    live_playback_buffer_seconds: this.live_playback_buffer_seconds,
+                    sync_when_playing_live: (this.player.options as any).syncWhenPlayingLive ?? null,
+                }));
+
                 // この時点で HTMLVideoElement.paused が true のとき、再生できるようになるまで 0.05 秒間を開けて 5 回試す
                 if (this.player.video.paused === true) {
                     let attempts = 0;
@@ -1242,14 +1566,18 @@ class PlayerController {
                     const attemptInterval = 0.05;  // 試行間隔 (秒)
                     const attemptPlay = async (): Promise<void> => {
                         if (attempts >= maxAttempts) {
-                            console.warn(`\u001b[31m[PlayerController] Failed to start playback after ${maxAttempts} attempts.`);
+                            console.warn(`\u001b[31m[PlayerController] Failed to start playback after ${maxAttempts} attempts.`, this.getVideoPlaybackStateForLog());
                             return;
                         }
                         try {
                             await this.player?.video.play();
-                            console.log('\u001b[31m[PlayerController] Playback started successfully.');
+                            console.log('\u001b[31m[PlayerController] Playback started successfully.', this.getVideoPlaybackStateForLog({
+                                attempt: attempts + 1,
+                            }));
                         } catch (error) {
-                            console.warn(`\u001b[31m[PlayerController] Attempt ${attempts + 1} to start playback failed:`, error);
+                            console.warn(`\u001b[31m[PlayerController] Attempt ${attempts + 1} to start playback failed:`, error, this.getVideoPlaybackStateForLog({
+                                attempt: attempts + 1,
+                            }));
                             attempts++;
                             await Utils.sleep(attemptInterval);
                             await attemptPlay();
@@ -1268,10 +1596,15 @@ class PlayerController {
                     this.player.video.oncanplay = null;
                     this.player.video.oncanplaythrough = null;
                     on_canplay_called = true;
+                    console.log('\u001b[31m[PlayerController] canplay handler invoked.', this.getVideoPlaybackStateForLog({
+                        playback_buffer_seconds: this.getPlaybackBufferSeconds(),
+                    }));
 
                     // 再生バッファ調整のため、一旦停止させる
                     // this.player.video.pause() を使うとプレイヤーの UI アイコンが停止してしまうので、代わりに playbackRate を使う
-                    console.log('\u001b[31m[PlayerController] Buffering...');
+                    console.log('\u001b[31m[PlayerController] Buffering...', this.getVideoPlaybackStateForLog({
+                        playback_buffer_seconds: this.getPlaybackBufferSeconds(),
+                    }));
                     this.player.video.playbackRate = 0;
 
                     // 再生バッファが live_playback_buffer_seconds を超えるまで 0.1 秒おきに再生バッファをチェックする
@@ -1287,7 +1620,27 @@ class PlayerController {
 
                     // 再生バッファ調整のため一旦停止していた再生を再び開始
                     this.player.video.playbackRate = 1;
-                    console.log('\u001b[31m[PlayerController] Buffering completed.');
+                    console.log('\u001b[31m[PlayerController] Buffering completed.', this.getVideoPlaybackStateForLog({
+                        playback_buffer_seconds: current_playback_buffer_sec,
+                    }));
+
+                    // Safari では buffered / dimensions があっても実フレームが出ていないケースがあるため、UI 解除前に確認する
+                    const is_safari_frame_presented = await this.waitForSafariStartupFramePresentation('on_canplay');
+                    if (is_safari_frame_presented === false) {
+                        if (this.player === null) return;
+                        console.warn('\u001b[31m[PlayerController] Safari startup completed without visible frame presentation. Keeping loading UI and restarting if ONAir.', this.getVideoPlaybackStateForLog({
+                            playback_buffer_seconds: current_playback_buffer_sec,
+                        }));
+                        player_store.is_loading = true;
+                        player_store.is_video_buffering = true;
+                        player_store.is_background_display = true;
+                        if (player_store.live_stream_status === 'ONAir') {
+                            player_store.event_emitter.emit('PlayerRestartRequired', {
+                                message: 'Safari で映像フレームの表示を確認できません。プレイヤーを再起動しています…',
+                            });
+                        }
+                        return;
+                    }
 
                     // ローディング状態を解除し、映像を表示する
                     player_store.is_loading = false;
@@ -1337,7 +1690,7 @@ class PlayerController {
                 // 特に Safari 18 以降では MSE の canplay(through) が場合によっては発火しなかったり、発火が異常に遅かったりする…
                 // Safari 18 以降、MSE において canplay(through) の発火タイミングと readyState の値は信頼できない
                 this.player.plugins.mpegts?.on(mpegts.Events.MEDIA_INFO, async (info: {[key: string]: any}) => {
-                    console.log('\u001b[31m[PlayerController] mpegts.js media info:', info);
+                    console.log('\u001b[31m[PlayerController] mpegts.js media info:', info, this.getVideoPlaybackStateForLog());
                     // 一応ブラウザネイティブの canplay(through) を優先したいので、0.25 秒待ってから再生開始を試みる
                     // 既に再生開始処理を実行済みの場合は実行しない
                     await Utils.sleep(0.25);
@@ -1350,9 +1703,45 @@ class PlayerController {
                 // 万が一 canplay(through) が発火しなかった場合のために (ほぼ Safari 向け) 、
                 // 非同期で 0.05 秒おきに直接 readyState === HAVE_ENOUGH_DATA かどうかを確認する
                 // ほとんどのケースでは 先に上記 mpegts.js の MEDIA_INFO イベントが発火するため、この処理は実行されない
+                let startup_stall_recovery_attempts = 0;
+                let startup_stall_diagnostics_count = 0;
                 (async () => {
                     let have_future_data_count = 0;
                     while (this.player !== null && this.player.video.readyState < 4) {
+                        const has_recent_video_frame = this.hasRecentlyPresentedVideoFrame();
+                        if (Utils.isSafari() === true && has_recent_video_frame === true) {
+                            console.warn('\u001b[31m[PlayerController] Safari readyState is still low, but video frames are being presented.', this.getVideoPlaybackStateForLog({
+                                startup_stall_diagnostics_count: startup_stall_diagnostics_count,
+                            }));
+                            break;
+                        }
+
+                        if (this.player.video.readyState < 2 &&
+                            this.player.video.buffered.length > 0 &&
+                            has_recent_video_frame === false) {
+                            if (startup_stall_diagnostics_count % 20 === 0) {
+                                console.warn('\u001b[31m[PlayerController] Video has buffered ranges but is still not ready.', this.getVideoPlaybackStateForLog({
+                                    startup_stall_diagnostics_count: startup_stall_diagnostics_count,
+                                }));
+                            }
+                            startup_stall_diagnostics_count++;
+
+                            if (startup_stall_recovery_attempts < 3) {
+                                startup_stall_recovery_attempts++;
+                                await this.recoverStartupStall(`readyState polling #${startup_stall_recovery_attempts}`);
+                                if (this.player === null) return;
+                            }
+                        }
+
+                        if (this.hasEnoughBufferedDataForSafariStartup() === true) {
+                            console.warn('\u001b[31m[PlayerController] Safari has enough buffered data while readyState is low. Running startup handler anyway.', this.getVideoPlaybackStateForLog({
+                                playback_buffer_seconds: this.getPlaybackBufferSeconds(),
+                                startup_stall_recovery_attempts: startup_stall_recovery_attempts,
+                                startup_stall_diagnostics_count: startup_stall_diagnostics_count,
+                            }));
+                            break;
+                        }
+
                         // プレイヤーが充分と判断する基準はまちまちでブラウザによっては HAVE_FUTURE_DATA のままタイムアウトするので
                         // HAVE_FUTURE_DATA がおおむね 5 秒つづけば HAVE_ENOUGH_DATA 扱いする
                         if (this.player.video.readyState < 3) {
@@ -1366,7 +1755,7 @@ class PlayerController {
                     // 既に再生開始処理を実行済みの場合は実行しない
                     await Utils.sleep(0.1);
                     if (on_canplay_called === false) {
-                        console.warn('\u001b[31m[PlayerController] canplay(through) event not fired. Trying to manually start playback.');
+                        console.warn('\u001b[31m[PlayerController] canplay(through) event not fired. Trying to manually start playback.', this.getVideoPlaybackStateForLog());
                         on_canplay();
                     }
                 })();
@@ -1375,7 +1764,27 @@ class PlayerController {
                 // ロードに失敗したとみなし PlayerController の再起動を要求する
                 await Utils.sleep(15);
                 if (this.destroyed === true || this.player === null) return;
-                if (player_store.live_stream_status === 'ONAir' && player_store.is_video_buffering === true && on_canplay_called === false) {
+                if (player_store.live_stream_status === 'ONAir' &&
+                    on_canplay_called === false &&
+                    (player_store.is_loading === true || player_store.is_video_buffering === true)) {
+                    if (Utils.isSafari() === true && this.hasRecentlyPresentedVideoFrame() === true) {
+                        console.warn('\u001b[31m[PlayerController] Startup timeout reached, but Safari is presenting video frames. Starting playback without restart.', this.getVideoPlaybackStateForLog({
+                            startup_stall_recovery_attempts: startup_stall_recovery_attempts,
+                            startup_stall_diagnostics_count: startup_stall_diagnostics_count,
+                            is_loading: player_store.is_loading,
+                            is_video_buffering: player_store.is_video_buffering,
+                        }));
+                        await on_canplay();
+                        return;
+                    }
+                    console.warn('\u001b[31m[PlayerController] Startup timed out while the live stream is ONAir.', this.getVideoPlaybackStateForLog({
+                        startup_stall_recovery_attempts: startup_stall_recovery_attempts,
+                        startup_stall_diagnostics_count: startup_stall_diagnostics_count,
+                        is_loading: player_store.is_loading,
+                        is_video_buffering: player_store.is_video_buffering,
+                        on_canplay_called: on_canplay_called,
+                        has_recent_video_frame: this.hasRecentlyPresentedVideoFrame(),
+                    }));
                     player_store.event_emitter.emit('PlayerRestartRequired', {
                         message: '再生開始までに時間が掛かっています。プレイヤーを再起動しています…',
                     });
@@ -2133,6 +2542,7 @@ class PlayerController {
             this.video_keep_alive_interval_timer_cancel();
             this.video_keep_alive_interval_timer_cancel = null;
         }
+        this.resetVideoFrameDiagnostics();
         window.clearTimeout(this.watched_history_threshold_timer_id);
         window.clearTimeout(this.player_control_ui_hide_timer_id);
 
