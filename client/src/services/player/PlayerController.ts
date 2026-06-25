@@ -382,6 +382,9 @@ class PlayerController {
         (window as any).mpegts = mpegts;
         (window as any).Hls = Hls;
 
+        // BS4K の TLV/MMT を変換せずに再生する特殊な画質の表示名
+        const passthrough_quality_name = 'TLV パススルー';
+
         // DPlayer は内蔵の mpegts.js 連携では MediaDataSource.type を常に 'mpegts' として作成する。
         // Raw MMTS では mpegts.js 側の MMTSDemuxer を明示的に選ばせる必要があるため、
         // DPlayer の customType 経由で MediaDataSource.type='mmts' の mpegts.js Player を直接作成する。
@@ -517,7 +520,7 @@ class PlayerController {
                         // Raw MMTS は設定画面のデフォルト画質とは独立したライブ視聴時専用の画質として扱う
                         if (is_bs4k_channel === true) {
                             qualities.push({
-                                name: 'Raw MMTS',
+                                name: passthrough_quality_name,
                                 type: 'mmts',
                                 url: `${streaming_api_base_url}/raw-mmts/mpegts`,
                             });
@@ -534,14 +537,18 @@ class PlayerController {
                     }
                     // デフォルトの画質
                     // BS4K チャンネルでは設定画面のデフォルト画質に関わらず Raw MMTS を初期選択にする
-                    let default_quality: string = is_bs4k_channel === true ? 'Raw MMTS' : this.quality_profile.tv_streaming_quality;
+                    let default_quality: string = is_bs4k_channel === true ? passthrough_quality_name : this.quality_profile.tv_streaming_quality;
                     if (options.default_quality !== null) {
                         // PlayerController.init() のオプションでデフォルト画質が指定されている場合は
                         // 画質プロファイルに記載の画質ではなく、指定された（前回再生時の）画質を使ってレジュームする
                         default_quality = options.default_quality;
                     }
+                    // 旧バージョンの表示名がレジューム情報として残っている場合は、新しい表示名へ正規化する
+                    if (default_quality === 'Raw MMTS') {
+                        default_quality = passthrough_quality_name;
+                    }
                     // Raw MMTS は BS4K 以外では使えないため、チャンネル切り替えなどで持ち越された場合は 1080p に戻す
-                    if (default_quality === 'Raw MMTS' && is_bs4k_channel === false) {
+                    if (default_quality === passthrough_quality_name && is_bs4k_channel === false) {
                         default_quality = '1080p';
                     }
                     // ラジオチャンネルのみ常に 48KHz/192kbps に固定する
