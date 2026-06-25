@@ -28,7 +28,7 @@
         "floating-vue": "^5.2.2",
         "hls.js": "^1.6.9",
         "mitt": "^3.0.1",
-        "mpegts.js": "github:makeding/mmts.js#cf5302319db4d6fe05b5fbdfd3b2f873e0b4be8f",
+        "mpegts.js": "github:makeding/mmts.js#02d84df8b0a629b14d26b691f04fd024a9a8f86a",
         "nanoid": "^5.0.9",
         "ohash": "^1.1.3",
         "piexifjs": "^2.0.0-beta.9",
