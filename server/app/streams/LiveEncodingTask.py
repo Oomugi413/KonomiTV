@@ -19,7 +19,7 @@ from aiofiles.threadpool.text import AsyncTextIOWrapper
 from biim.mpeg2ts import ts
 
 from app import logging
-from app.config import Config
+from app.config import Config, ServerSettings
 from app.constants import (
     API_REQUEST_HEADERS,
     HTTPX_CLIENT,
@@ -36,6 +36,7 @@ from app.utils.edcb.PipeStreamReader import PipeStreamReader
 
 
 if TYPE_CHECKING:
+    from app.models.Program import Program
     from app.streams.LiveStream import LiveStream
 
 
@@ -529,6 +530,230 @@ class LiveEncodingTask:
         return False
 
 
+    async def runRawMMTSStream(
+        self,
+        config: ServerSettings,
+        channel: Channel,
+        program_present: Program | None,
+    ) -> None:
+        """
+        BS4K の MMTS を Mirakurun からデコードなしで受信し、そのままライブストリームへ配信する。
+
+        Args:
+            config (ServerSettings): サーバー設定
+            channel (Channel): 視聴対象のチャンネル
+            program_present (Program | None): 現在放送中の番組情報
+
+        Returns:
+            None
+        """
+
+        # エンコードを行わないため、通常の LiveEncodingTask.run() と異なり tsreadex / エンコーダーは起動しない
+        ## Raw MMTS は Mirakurun の BS4K 専用経路であり、Mirakurun 側のデコーダーを decode=0 で明示的に無効化する
+        logging.info(f'{self.live_stream.log_prefix} Raw MMTS passthrough is enabled.')
+
+        # チューナーを確保できるまで待機する
+        ## 確保できなかった場合でも共聴で受信できる可能性があるので、戻り値は無視する
+        self.live_stream.setStatus('Standby', 'チューナーを確保しています…')
+        await self.acquireMirakurunTuner(channel.type)
+
+        # Mirakurun 形式のサービス ID
+        # NID と SID を 5 桁でゼロ埋めした上で int に変換する
+        mirakurun_service_id = int(str(channel.network_id).zfill(5) + str(channel.service_id).zfill(5))
+
+        # Mirakurun の Service Stream API へ HTTP リクエストを開始
+        ## decode=0 により Mirakurun 側の dantto4k / mmtsDecoder 相当の変換を通さず、MMTS をそのまま受け取る
+        self.live_stream.setStatus('Standby', 'チューナーを起動しています…')
+        response: aiohttp.ClientResponse | None = None
+        session = aiohttp.ClientSession()
+        try:
+            response = await session.get(
+                url = GetMirakurunAPIEndpointURL(f'/api/services/{mirakurun_service_id}/stream'),
+                params = {'decode': '0'},
+                headers = {**API_REQUEST_HEADERS, 'X-Mirakurun-Priority': '0'},
+                timeout = aiohttp.ClientTimeout(connect=15, sock_connect=15, sock_read=15)
+            )
+        except (TimeoutError, aiohttp.ClientConnectorError):
+
+            # 番組名に「放送休止」などが入っていれば停波によるものとみなし、そうでないならチューナーへの接続に失敗したものとする
+            if program_present is None or program_present.isOffTheAirProgram():
+                self.live_stream.setStatus('Offline', 'この時間は放送を休止しています。(E-01M)')
+            else:
+                self.live_stream.setStatus('Offline', 'チューナーへの接続に失敗しました。チューナー側に何らかの問題があるかもしれません。(E-01M)')
+
+            # すべての視聴中クライアントのライブストリームへの接続を切断する
+            self.live_stream.disconnectAll()
+
+            # エンコードタスクを停止する
+            await session.close()
+            return
+
+        assert response is not None
+
+        # Mirakurun の Service Stream API からエラーが返された場合
+        if response.status != 200:
+            # レスポンスヘッダーの server が mirakc であれば mirakc と判定できる
+            if ('server' in response.headers) and ('mirakc' in response.headers['server']):
+                mirakurun_or_mirakc = 'mirakc'
+            else:
+                mirakurun_or_mirakc = 'Mirakurun'
+
+            # Offline にしてエンコードタスクを停止する
+            ## mirakc はなぜかチューナー不足時に 503 ではなく 404 を返すことがある (バグ?)
+            if response.status == 503 or (response.status == 404 and mirakurun_or_mirakc == 'mirakc'):
+                self.live_stream.setStatus('Offline', 'チューナーの起動に失敗しました。空きチューナーが不足している可能性があります。(E-12M)')
+            elif response.status == 404:
+                self.live_stream.setStatus('Offline', f'現在このチャンネルは受信できません。{mirakurun_or_mirakc} 側に問題があるかもしれません。(HTTP Error {response.status}) (E-12M)')
+            else:
+                self.live_stream.setStatus('Offline', f'チューナーで不明なエラーが発生しました。{mirakurun_or_mirakc} 側に問題があるかもしれません。(HTTP Error {response.status}) (E-12M)')
+
+            response.close()
+            await session.close()
+            self.live_stream.disconnectAll()
+            return
+
+        # エンコードタスクが稼働中かどうか
+        is_running: bool = True
+
+        # チューナーからの MMTS の最終読み取り時刻 (単調増加時間)
+        ## 単に時刻を比較する用途でしか使わないので、time.monotonic() から取得した単調増加時間が入る
+        tuner_ts_read_at: float = time.monotonic()
+        tuner_ts_read_at_lock = asyncio.Lock()
+
+        # 実行中の非同期実行タスクへの参照を保持しておく
+        ## runRawMMTSStream() の実行が完了するまで、ガベージコレクタにより非同期実行タスクが勝手に破棄されることを防ぐ
+        background_tasks: set[asyncio.Task[None]] = set()
+
+        try:
+
+            async def RawReader() -> None:
+                nonlocal tuner_ts_read_at
+
+                while True:
+                    try:
+                        # MMTS/TLV は 188 bytes 固定の MPEG-TS パケットではないため、通常の Writer と異なり任意サイズのチャンクとして扱う
+                        chunk = await response.content.read(65536)
+                    except (aiohttp.ClientError, TimeoutError):
+                        break
+
+                    # 空のデータが返ってきたら、Mirakurun とのストリーミング接続が終了したものと判断する
+                    if len(chunk) == 0:
+                        break
+
+                    # チューナーからの MMTS の最終読み取り時刻を更新
+                    async with tuner_ts_read_at_lock:
+                        tuner_ts_read_at = time.monotonic()
+
+                    # 最初のチャンクが届いた時点で ONAir にする
+                    ## エンコーダーのログがない Raw MMTS 経路では、実データ到達を起動完了の基準にする
+                    if self.live_stream.getStatus().status == 'Standby':
+                        self.live_stream.setStatus('ONAir', 'ライブストリームは ONAir です。')
+
+                    # Mirakurun から受け取った MMTS をそのままライブストリームの Queue に書き込む
+                    self.live_stream.writeStreamData(chunk)
+
+                    # エンコードタスクが終了しているか、ステータスが終了系に変わっていたらタスクを終了
+                    live_stream_status = self.live_stream.getStatus()
+                    if is_running is False or live_stream_status.status == 'Offline' or live_stream_status.status == 'Restart':
+                        break
+
+            async def RawController() -> None:
+                nonlocal program_present
+
+                while True:
+
+                    # ライブストリームのステータスを取得
+                    live_stream_status = self.live_stream.getStatus()
+
+                    # 現在放送中の番組が終了した際に program_present に保存している現在の番組情報を新しいものに更新する
+                    if program_present is not None and time.time() > program_present.end_time.timestamp():
+
+                        # 新しい現在放送中の番組情報を取得する
+                        program_following = (await channel.getCurrentAndNextProgram())[0]
+                        if program_following is not None:
+                            logging.info(f'{self.live_stream.log_prefix} Title: {program_following.title}')
+
+                        program_present = program_following
+                        del program_following
+
+                    # 現在 ONAir でかつクライアント数が 0 なら Idling（アイドリング状態）に移行
+                    if live_stream_status.status == 'ONAir' and live_stream_status.client_count == 0:
+                        self.live_stream.setStatus('Idling', 'ライブストリームは Idling です。')
+
+                    # 現在 Idling でかつ最終更新から max_alive_time 秒以上経っていたら Offline 状態に移行
+                    if ((live_stream_status.status == 'Idling') and
+                        (time.time() - live_stream_status.updated_at > config.tv.max_alive_time)):
+                        self.live_stream.setStatus('Offline', 'ライブストリームは Offline です。')
+
+                    # 前回チューナーからの MMTS を読み取ってから TUNER_TS_READ_TIMEOUT 秒以上経過していたら、
+                    # 停波中もしくはチューナーからの MMTS の送信が停止したと判断して Offline に移行
+                    async with tuner_ts_read_at_lock:
+                        if (time.monotonic() - tuner_ts_read_at) > self.TUNER_TS_READ_TIMEOUT:
+
+                            # 番組名に「放送休止」などが入っていれば停波の可能性が高い
+                            if program_present is None or program_present.isOffTheAirProgram():
+                                self.live_stream.setStatus('Offline', 'この時間は放送を休止しています。(E-11)')
+
+                            # それ以外は受信エラーとする
+                            else:
+                                self.live_stream.setStatus('Offline', 'チューナーからの放送波の受信がタイムアウトしました。チューナー側に何らかの問題があるかもしれません。(E-11)')
+
+                    # Mirakurun との接続が切断された場合
+                    if response.closed is True:
+                        self.live_stream.setStatus('Restart', 'チューナーとの接続が切断されました。エンコードタスクを再起動しています… (ER-05)')
+
+                    # この時点で最新のライブストリームのステータスが Offline か Restart に変更されていたら、終了処理に移る
+                    live_stream_status = self.live_stream.getStatus()
+                    if live_stream_status.status == 'Offline' or live_stream_status.status == 'Restart':
+                        break
+
+                    # ビジーにならないように 0.1 秒待機
+                    await asyncio.sleep(0.1)
+
+            # タスクを非同期で実行し、Raw MMTS 経路全体を制御する
+            background_tasks.add(asyncio.create_task(RawReader()))
+            await RawController()
+
+        except asyncio.CancelledError:
+            # チャンネル切り替え時に LiveStream.connect() からこのタスクがキャンセルされる場合がある
+            logging.debug(f'{self.live_stream.log_prefix} Raw MMTS task was cancelled by channel switch.')
+
+        # ***** Raw MMTS タスクの終了処理 *****
+
+        # 稼働中フラグをオフにし、RawReader を終了させる
+        is_running = False
+
+        # Mirakurun の Service Stream API とのストリーミング接続を閉じる
+        response.close()
+        await session.close()
+
+        # すべての視聴中クライアントのライブストリームへの接続を切断する
+        self.live_stream.disconnectAll()
+
+        # エンコードタスクを再起動する（受信タスクの再起動が必要な場合）
+        if self.live_stream.getStatus().status == 'Restart':
+
+            # 再起動回数が最大再起動回数に達していなければ、再起動する
+            if self._retry_count < self.MAX_RETRY_COUNT:
+                self._retry_count += 1  # カウントを増やす
+                await asyncio.sleep(0.1)  # 少し待つ
+                background_tasks.add(asyncio.create_task(self.run()))  # 新しいタスクを立ち上げる
+
+            # 最大再起動回数を使い果たしたので、Offline にする
+            else:
+
+                # Offline に設定
+                if program_present is None or program_present.is_free is True:
+                    # 無料番組
+                    self.live_stream.setStatus('Offline', 'ライブストリームの再起動に失敗しました。(E-17)')
+                else:
+                    # 有料番組（契約されていないことが原因の可能性が高いため、そのように表示する）
+                    self.live_stream.setStatus('Offline', 'ライブストリームの再起動に失敗しました。契約されていないため視聴できません。(E-17)')
+
+        # 強制的にガベージコレクションを実行する
+        gc.collect()
+
+
     async def run(self) -> None:
         """
         エンコードタスクを実行する
@@ -557,6 +782,26 @@ class LiveEncodingTask:
             logging.info(f'{self.live_stream.log_prefix} Title: {program_present.title}')
         else:
             logging.info(f'{self.live_stream.log_prefix} Title: 番組情報がありません')
+
+        # BS4K Raw MMTS は Mirakurun から decode=0 で受け取った MMTS をそのまま配信する
+        ## tsreadex / エンコーダーは MPEG-TS 前提の経路なので、Raw MMTS ではここで専用タスクへ分岐する
+        if self.live_stream.quality == 'raw-mmts':
+            if (
+                BACKEND_TYPE == 'Mirakurun' and
+                channel.type == 'BS4K' and
+                channel.is_radiochannel is False and
+                CONFIG.tv.debug_mode_ts_path is None
+            ):
+                await self.runRawMMTSStream(CONFIG, channel, program_present)
+                return
+
+            # Raw MMTS が利用できない環境では、視聴継続を優先して従来の 1080p エンコード経路へフォールバックする
+            ## live_stream_id は raw-mmts のままだが、配信内容としては通常の 1080p MPEG-TS になる
+            logging.warning(
+                f'{self.live_stream.log_prefix} Raw MMTS is unavailable in this environment. '
+                'Fallback to 1080p MPEG-TS.'
+            )
+            self.live_stream.quality = '1080p'
 
         # PSI/SI データアーカイバーを初期化
         ## psisiarc は API リクエストがある度に都度起動される

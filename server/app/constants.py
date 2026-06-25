@@ -224,6 +224,29 @@ QUALITY_TYPES = Literal[
     '240p-hevc',
 ]
 
+# ライブストリーミング専用の品質の種類 (型定義)
+## raw-mmts は BS4K の MMTS を Mirakurun から decode=0 で受け取り、そのままブラウザへ配信する特殊な品質。
+## エンコードを行わないため QUALITY には含めず、ライブストリーム側だけで扱う。
+LIVE_QUALITY_TYPES = Literal[
+    '1080p-60fps',
+    '1080p-60fps-hevc',
+    '1080p',
+    '1080p-hevc',
+    '810p',
+    '810p-hevc',
+    '720p',
+    '720p-hevc',
+    '540p',
+    '540p-hevc',
+    '480p',
+    '480p-hevc',
+    '360p',
+    '360p-hevc',
+    '240p',
+    '240p-hevc',
+    'raw-mmts',
+]
+
 # 映像と音声の品質
 QUALITY: dict[QUALITY_TYPES, Quality] = {
     '1080p-60fps': Quality(

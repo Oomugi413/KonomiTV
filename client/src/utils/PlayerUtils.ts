@@ -33,7 +33,8 @@ type LiveAPIVideoQuality = (
     APIBaseVideoQuality |
     `${APIBaseVideoQuality}-10bit` |
     `${APIBaseVideoQuality}-24fps` |
-    `${APIBaseVideoQuality}-10bit-24fps`
+    `${APIBaseVideoQuality}-10bit-24fps` |
+    'raw-mmts'
 );
 
 /**

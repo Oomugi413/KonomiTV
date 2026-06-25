@@ -13,8 +13,8 @@ from app import logging, schemas
 from app.models.Channel import Channel
 from app.streams.LiveStream import LiveStream, LiveStreamStatus
 from app.streams.StreamEncodingOptions import (
-    SplitQualityAndEncodingOptions,
-    StreamQualityWithOptions,
+    LiveStreamQualityWithOptions,
+    SplitLiveQualityAndEncodingOptions,
 )
 
 
@@ -39,12 +39,13 @@ async def ValidateChannelID(display_channel_id: Annotated[str, Path(description=
     return display_channel_id
 
 
-async def ValidateQuality(quality: Annotated[str, Path(description='映像の品質。ex: 1080p')]) -> StreamQualityWithOptions:
+async def ValidateQuality(quality: Annotated[str, Path(description='映像の品質。ex: 1080p')]) -> LiveStreamQualityWithOptions:
     """ 映像の品質のバリデーション """
 
     # 指定された品質が存在するか確認
     ## 品質の指定に -10bit や -24fps が付いていれば分解する
-    stream_quality = SplitQualityAndEncodingOptions(quality)
+    ## ライブストリームでは BS4K Raw MMTS 専用の raw-mmts も受け付ける
+    stream_quality = SplitLiveQualityAndEncodingOptions(quality)
     if stream_quality is None:
         logging.error(f'[LiveStreamsRouter][ValidateQuality] Specified quality was not found. [quality: {quality}]')
         raise HTTPException(
@@ -93,7 +94,7 @@ async def LiveStreamsAPI():
 )
 async def LiveStreamAPI(
     display_channel_id: Annotated[str, Depends(ValidateChannelID)],
-    stream_quality: Annotated[StreamQualityWithOptions, Depends(ValidateQuality)],
+    stream_quality: Annotated[LiveStreamQualityWithOptions, Depends(ValidateQuality)],
 ):
     """
     ライブストリームの状態を取得する。<br>
@@ -121,7 +122,7 @@ async def LiveStreamAPI(
 )
 async def LiveStreamEventAPI(
     display_channel_id: Annotated[str, Depends(ValidateChannelID)],
-    stream_quality: Annotated[StreamQualityWithOptions, Depends(ValidateQuality)],
+    stream_quality: Annotated[LiveStreamQualityWithOptions, Depends(ValidateQuality)],
 ):
     """
     ライブストリームのイベントを Server-Sent Events で随時配信する。
@@ -216,7 +217,7 @@ async def LiveStreamEventAPI(
 async def LivePSIArchivedDataAPI(
     request: Request,
     display_channel_id: Annotated[str, Depends(ValidateChannelID)],
-    stream_quality: Annotated[StreamQualityWithOptions, Depends(ValidateQuality)],
+    stream_quality: Annotated[LiveStreamQualityWithOptions, Depends(ValidateQuality)],
 ):
     """
     ライブ PSI/SI アーカイブデータストリームを配信する。
@@ -282,7 +283,7 @@ async def LivePSIArchivedDataAPI(
 async def LiveMPEGTSStreamAPI(
     request: Request,
     display_channel_id: Annotated[str, Depends(ValidateChannelID)],
-    stream_quality: Annotated[StreamQualityWithOptions, Depends(ValidateQuality)],
+    stream_quality: Annotated[LiveStreamQualityWithOptions, Depends(ValidateQuality)],
 ):
     """
     ライブ MPEG-TS ストリームを配信する。
