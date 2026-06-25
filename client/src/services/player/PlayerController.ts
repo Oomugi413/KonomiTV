@@ -382,6 +382,63 @@ class PlayerController {
         (window as any).mpegts = mpegts;
         (window as any).Hls = Hls;
 
+        // DPlayer は内蔵の mpegts.js 連携では MediaDataSource.type を常に 'mpegts' として作成する。
+        // Raw MMTS では mpegts.js 側の MMTSDemuxer を明示的に選ばせる必要があるため、
+        // DPlayer の customType 経由で MediaDataSource.type='mmts' の mpegts.js Player を直接作成する。
+        const initializeMMTSPlayer = (video: HTMLVideoElement, dplayer: DPlayer): void => {
+            // mpegts.js が利用できない環境では Raw MMTS も再生できないため、ここでは何も初期化しない
+            if (mpegts.isSupported() !== true) {
+                console.warn('\u001b[31m[PlayerController] mpegts.js is not supported. Raw MMTS playback is unavailable.');
+                return;
+            }
+
+            // DPlayer 内蔵の mpegts.js 初期化処理を通らないため、字幕/文字スーパーの Renderer も明示的に破棄する
+            if (dplayer.plugins.aribb24Caption) {
+                dplayer.plugins.aribb24Caption.dispose();
+                delete dplayer.plugins.aribb24Caption;
+            }
+            if (dplayer.plugins.aribb24Superimpose) {
+                dplayer.plugins.aribb24Superimpose.dispose();
+                delete dplayer.plugins.aribb24Superimpose;
+            }
+
+            // 画質切り替え時に既存の mpegts.js Player が残っている場合は、DPlayer 内蔵処理と同じ順序で破棄する
+            if (dplayer.plugins.mpegts) {
+                dplayer.plugins.mpegts.unload();
+                dplayer.plugins.mpegts.detachMediaElement();
+                dplayer.plugins.mpegts.destroy();
+                delete dplayer.plugins.mpegts;
+            }
+
+            // pluginOptions.mpegts は通常の MPEG-TS 再生と同じ設定を共有する
+            if (dplayer.options.pluginOptions.mpegts === undefined) {
+                dplayer.options.pluginOptions.mpegts = {};
+            }
+            const mpegtsPlayer = mpegts.createPlayer(
+                Object.assign(dplayer.options.pluginOptions.mpegts.mediaDataSource || {}, {
+                    type: 'mmts',
+                    isLive: dplayer.options.live,
+                    url: video.src,
+                }),
+                dplayer.options.pluginOptions.mpegts.config,
+            );
+            dplayer.plugins.mpegts = mpegtsPlayer;
+            mpegtsPlayer.attachMediaElement(video);
+            mpegtsPlayer.load();
+
+            // プレイヤー破棄時にも mpegts.js Player を確実に閉じる
+            dplayer.on('destroy', () => {
+                // 画質切り替え後は別の mpegts.js Player が入っている可能性があるため、現在のインスタンスだけを破棄する
+                if (dplayer.plugins.mpegts !== mpegtsPlayer) {
+                    return;
+                }
+                mpegtsPlayer.unload();
+                mpegtsPlayer.detachMediaElement();
+                mpegtsPlayer.destroy();
+                delete dplayer.plugins.mpegts;
+            });
+        };
+
         // DPlayer を初期化
         this.player = new DPlayer({
             // DPlayer を配置する要素
@@ -454,14 +511,14 @@ class PlayerController {
                             type: 'mpegts',
                             url: `${streaming_api_base_url}/1080p/mpegts`,
                         });
-                    // 通常のチャンネルの場合
+                        // 通常のチャンネルの場合
                     } else {
                         // BS4K チャンネルでは Raw MMTS を最優先の選択肢として追加する
                         // Raw MMTS は設定画面のデフォルト画質とは独立したライブ視聴時専用の画質として扱う
                         if (is_bs4k_channel === true) {
                             qualities.push({
                                 name: 'Raw MMTS',
-                                type: 'mpegts',
+                                type: 'mmts',
                                 url: `${streaming_api_base_url}/raw-mmts/mpegts`,
                             });
                         }
@@ -494,9 +551,12 @@ class PlayerController {
                     return {
                         quality: qualities,
                         defaultQuality: default_quality,
+                        customType: {
+                            mmts: initializeMMTSPlayer,
+                        },
                     };
 
-                // ビデオ視聴: 録画番組情報がセットされているはず
+                    // ビデオ視聴: 録画番組情報がセットされているはず
                 } else {
                     // ビデオストリーミング API のベース URL
                     const streaming_api_base_url = `${Utils.api_base_url}/streams/video/${player_store.recorded_program.id}`;
@@ -551,6 +611,9 @@ class PlayerController {
                     return {
                         quality: qualities,
                         defaultQuality: default_quality,
+                        customType: {
+                            mmts: initializeMMTSPlayer,
+                        },
                         thumbnails: tile_info !== null ? {
                             url: offline_thumbnail_url || `${Utils.api_base_url}/videos/${player_store.recorded_program.id}/thumbnail/tiled`,
                             interval: tile_info.interval_sec,
