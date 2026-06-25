@@ -568,8 +568,7 @@ class LiveEncodingTask:
         session = aiohttp.ClientSession()
         try:
             response = await session.get(
-                url = GetMirakurunAPIEndpointURL(f'/api/services/{mirakurun_service_id}/stream'),
-                params = {'decode': '0'},
+                url = GetMirakurunAPIEndpointURL(f'/api/services/{mirakurun_service_id}/stream?decode=0'),
                 headers = {**API_REQUEST_HEADERS, 'X-Mirakurun-Priority': '0'},
                 timeout = aiohttp.ClientTimeout(connect=15, sock_connect=15, sock_read=15)
             )
