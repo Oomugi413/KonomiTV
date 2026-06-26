@@ -85,6 +85,10 @@ class RecordedScanTask:
     # スキャン対象の拡張子
     SCAN_TARGET_EXTENSIONS: ClassVar[list[str]] = ['.ts', '.m2t', '.m2ts', '.mts', '.mp4']
 
+    # MetadataAnalyzer がファイルハッシュ計算に必要とする最小ファイルサイズ (3 * 1MiB)
+    # これ未満の録画ファイルは解析しても必ず ValueError になるため、直近 EPGStation 同期では入口でスキップする。
+    MINIMUM_ANALYZABLE_FILE_SIZE_BYTES: ClassVar[int] = 3 * 1024 * 1024
+
     # 録画中ファイルの更新イベントを間引く間隔 (ログ出力用) (秒)
     UPDATE_THROTTLE_SECONDS: ClassVar[int] = 30
 
@@ -102,10 +106,6 @@ class RecordedScanTask:
 
     # EPGStation が把握している直近録画済み一覧を同期する間隔 (秒)
     EPGSTATION_RECENT_RECORDED_SYNC_INTERVAL_SECONDS: ClassVar[int] = 60
-
-    # EPGStation の直近録画済み一覧から 1 ファイルを同期するときの最大待機時間 (秒)
-    # 破損ファイルや極端に重いファイルでキュー全体が止まらないよう、ファイル単位で打ち切る
-    EPGSTATION_RECENT_RECORDED_FILE_SYNC_TIMEOUT_SECONDS: ClassVar[int] = 120
 
     # 録画中ファイルの最小データ長 (秒)
     MINIMUM_RECORDING_SECONDS: ClassVar[int] = 60
@@ -172,6 +172,11 @@ class RecordedScanTask:
         ## 参照箇所: __syncEPGStationRecentRecordedFiles()
         ## 前提条件: 件数とページ数だけを保持し、ファイル実体にはアクセスしない。
         self._epgstation_recent_recorded_log_signature: tuple[int, int, int] | None = None
+        # EPGStation の直近録画済み一覧で解析に失敗したファイルの状態を保持する。
+        ## 参照箇所: __syncEPGStationRecentRecordedFiles()
+        ## 前提条件: 同じ file_path / file_size / file_modified_at のままなら、次回以降も同じ解析失敗になる可能性が高い。
+        ## そのため未変更の失敗ファイルは再解析せず、以降の正常ファイルの同期を塞がないようにする。
+        self._epgstation_failed_recorded_file_signatures: dict[str, tuple[int, datetime]] = {}
 
         # タスクの状態管理
         self._is_running = False
@@ -321,37 +326,223 @@ class RecordedScanTask:
                 f'total: {recent_recorded_file_paths.total}.'
             )
 
+        # 人力調査用に、EPGStation 側から取得できた候補パスをそのままログに出す。
+        # この一覧と後続の DB 照合ログを突き合わせることで、「EPGStation にはあるが HonomiTV に入っていない」ファイルを特定できる。
+        epgstation_candidate_paths = sorted(recent_recorded_file_paths.paths)
+        if len(epgstation_candidate_paths) > 0:
+            logging.info(
+                '[RecordedScanTask][EPGStation] Recent recorded candidate paths:\n' +
+                '\n'.join([f'  - {path}' for path in epgstation_candidate_paths])
+            )
+
         # EPGStation の録画済み一覧にはファイル名だけが含まれる構成があるため、RecordingStatusProvider 側で
         # recorded_folders 配下に展開済みの候補を総当たりする。実在するファイルだけを処理対象にすることで、
         # 全録画フォルダのスキャンを避けつつ、録画完了後に watchfiles イベントを取り逃したケースを補完する。
         processed_paths: set[str] = set()
-        for recorded_path in sorted(recent_recorded_file_paths.paths):
+        processed_basenames: set[str] = set()
+        local_missing_paths: list[str] = []
+        too_small_paths: list[str] = []
+        db_saved_paths: list[str] = []
+        db_missing_paths: list[str] = []
+        unchanged_failed_paths: list[str] = []
+        basename_resolved_paths: list[str] = []
+        basename_resolved_path_cache: dict[str, anyio.Path | None] = {}
+
+        async def resolveEPGStationRecordedPath(recorded_path: str) -> anyio.Path | None:
+            """
+            EPGStation の録画済み候補パスから、KonomiTV 側で実在する録画ファイルパスを解決する。
+
+            Args:
+                recorded_path (str): EPGStation から取得した録画ファイル候補パス。
+
+            Returns:
+                anyio.Path | None: 実在する録画ファイルパス。見つからない、または複数候補があり一意に決められない場合は None。
+            """
+
+            file_path = anyio.Path(recorded_path)
+            if await self.isFileExists(file_path) is True:
+                return file_path
+
+            # EPGStation の /api/recorded は videoFiles[].filename としてファイル名だけを返し、DB 内部の相対ディレクトリを API に出さない。
+            # そのため recorded_folders 直下だけでなく配下全体を basename で探し、サブディレクトリ配置の録画も拾えるようにする。
+            # 複数ヒットする場合は別番組を誤って入庫しないよう、解決不能として扱う。
+            basename = pathlib.Path(recorded_path).name
+            if basename == '':
+                return None
+            if basename in basename_resolved_path_cache:
+                return basename_resolved_path_cache[basename]
+
+            matched_paths: list[anyio.Path] = []
+            for recorded_folder in self.recorded_folders:
+                try:
+                    async for matched_path in recorded_folder.rglob(basename):
+                        if await self.isFileExists(matched_path) is True:
+                            matched_paths.append(matched_path)
+                            if len(matched_paths) >= 2:
+                                logging.warning(
+                                    f'[RecordedScanTask][EPGStation] Multiple basename matches skipped: '
+                                    f'{recorded_path} -> {", ".join([str(path) for path in matched_paths])}'
+                                )
+                                basename_resolved_path_cache[basename] = None
+                                return None
+                except Exception as ex:
+                    logging.warning(
+                        f'[RecordedScanTask][EPGStation] Failed to search recorded folder by basename: '
+                        f'{recorded_folder} [{basename}]',
+                        exc_info=ex,
+                    )
+                    continue
+
+            if len(matched_paths) == 1:
+                basename_resolved_paths.append(f'{recorded_path} -> {matched_paths[0]}')
+                logging.info(f'[RecordedScanTask][EPGStation] Basename resolved: {recorded_path} -> {matched_paths[0]}')
+                basename_resolved_path_cache[basename] = matched_paths[0]
+                return matched_paths[0]
+
+            basename_resolved_path_cache[basename] = None
+            return None
+
+        async def syncSingleEPGStationRecordedPath(recorded_path: str) -> None:
+            """
+            EPGStation の直近録画済み候補 1 件だけを DB と同期する。
+
+            Args:
+                recorded_path (str): EPGStation から取得した録画ファイル候補パス。
+
+            Returns:
+                None
+            """
+
             file_path = anyio.Path(recorded_path)
             if file_path.suffix.lower() not in self.SCAN_TARGET_EXTENSIONS:
-                continue
+                return
             if str(file_path) in processed_paths:
-                continue
-            if await self.isFileExists(file_path) is False:
-                continue
+                return
+            resolved_file_path = await resolveEPGStationRecordedPath(recorded_path)
+            if resolved_file_path is None:
+                # 相対パス候補と絶対パス候補が同じファイル名で重複している場合、絶対パス側で処理済みなら相対パスの missing ログは出さない。
+                # EPGStation のレスポンス形式によっては同じ録画が複数の候補パスに展開されるため、ログを重複させると問題箇所が見えづらくなる。
+                if pathlib.Path(str(file_path)).name in processed_basenames:
+                    return
+                local_missing_paths.append(str(file_path))
+                logging.info(f'[RecordedScanTask][EPGStation] Local missing, skipped: {file_path}')
+                return
+            file_path = resolved_file_path
+            if str(file_path) in processed_paths:
+                return
             processed_paths.add(str(file_path))
+            processed_basenames.add(pathlib.Path(str(file_path)).name)
             self._epgstation_tracked_recorded_paths.add(str(file_path))
+
+            # 前回の EPGStation 同期で解析に失敗し、その後ファイルサイズと更新日時が変わっていないファイルは再解析しない。
+            # 破損ファイルや短すぎるファイルを毎分 processRecordedFile() に流し続けると、直近録画済み同期キューが毎回そこで無駄に詰まるため。
+            stat = await file_path.stat()
+            file_modified_at = datetime.fromtimestamp(stat.st_mtime, tz=JST)
+            file_signature = (stat.st_size, file_modified_at)
+
+            # MetadataAnalyzer.__calculateFileHash() は 3MiB 未満のファイルを必ず解析失敗扱いにする。
+            # 既に入口で判定できる短すぎるファイルは processRecordedFile() に渡さず、同期キューを先へ進める。
+            if stat.st_size < self.MINIMUM_ANALYZABLE_FILE_SIZE_BYTES:
+                self._epgstation_failed_recorded_file_signatures[str(file_path)] = file_signature
+                too_small_paths.append(f'{file_path} [{stat.st_size} bytes]')
+                logging.warning(
+                    f'[RecordedScanTask][EPGStation] Too small file skipped: '
+                    f'{file_path} ({stat.st_size} bytes)'
+                )
+                return
+
+            failed_signature = self._epgstation_failed_recorded_file_signatures.get(str(file_path))
+            if failed_signature == file_signature:
+                unchanged_failed_paths.append(str(file_path))
+                logging.warning(f'[RecordedScanTask][EPGStation] Previously failed unchanged file skipped: {file_path}')
+                return
+
+            logging.info(f'[RecordedScanTask][EPGStation] Sync started: {file_path}')
             try:
-                # EPGStation の録画済み一覧には、録画失敗・短すぎるファイル・破損ファイルも混在しうる。
-                # 1 ファイルの解析失敗やハングで直近一覧全体の同期が止まると、その後ろにある正常な録画まで UI に反映されないため、
-                # ファイル単位で timeout と例外境界を設け、次の候補の同期を必ず継続する。
-                await asyncio.wait_for(
-                    self.processRecordedFile(file_path),
-                    timeout=self.EPGSTATION_RECENT_RECORDED_FILE_SYNC_TIMEOUT_SECONDS,
-                )
-            except TimeoutError:
-                logging.error(
-                    f'{file_path}: Timed out while syncing EPGStation recorded file. '
-                    f'({self.EPGSTATION_RECENT_RECORDED_FILE_SYNC_TIMEOUT_SECONDS}s)'
-                )
-                continue
+                await self.processRecordedFile(file_path)
             except Exception as ex:
-                logging.error(f'{file_path}: Failed to sync EPGStation recorded file.', exc_info=ex)
+                self._epgstation_failed_recorded_file_signatures[str(file_path)] = file_signature
+                db_missing_paths.append(str(file_path))
+                logging.error(f'[RecordedScanTask][EPGStation] Failed to sync recorded file: {file_path}', exc_info=ex)
+                return
+            db_recorded_video = await RecordedVideo.get_or_none(
+                file_path = str(file_path),
+            ).select_related('recorded_program')
+            if db_recorded_video is not None:
+                self._epgstation_failed_recorded_file_signatures.pop(str(file_path), None)
+                db_saved_paths.append(
+                    f'{file_path} '
+                    f'[id: {db_recorded_video.recorded_program.id}, '
+                    f'status: {db_recorded_video.status}, '
+                    f'title: {db_recorded_video.recorded_program.title}]'
+                )
+                logging.info(
+                    f'[RecordedScanTask][EPGStation] DB saved: {file_path} '
+                    f'[id: {db_recorded_video.recorded_program.id}, '
+                    f'status: {db_recorded_video.status}, '
+                    f'title: {db_recorded_video.recorded_program.title}]'
+                )
+            else:
+                self._epgstation_failed_recorded_file_signatures[str(file_path)] = file_signature
+                db_missing_paths.append(str(file_path))
+                logging.warning(f'[RecordedScanTask][EPGStation] DB missing after sync: {file_path}')
+
+        for recorded_path in epgstation_candidate_paths:
+            try:
+                await syncSingleEPGStationRecordedPath(recorded_path)
+            except asyncio.CancelledError:
+                raise
+            except Exception as ex:
+                # EPGStation 由来の候補 1 件が stat / DB 照合 / ログ整形などで失敗しても、残り候補の同期は必ず続行する。
+                # ここで例外を外へ出すと定期同期タスク全体が止まり、後続の正常な録画が DB に入らなくなる。
+                db_missing_paths.append(recorded_path)
+                logging.error(
+                    f'[RecordedScanTask][EPGStation] Unexpected error while syncing recorded candidate: {recorded_path}',
+                    exc_info=ex,
+                )
                 continue
+
+        # EPGStation 候補に対するローカル存在確認と DB 入庫結果をまとめて出す。
+        # 1 行ずつの通常ログだけでは「どこまで進んだか」「どのファイルが入っていないか」を追いにくいため、同期 1 回ごとの終端で一覧化する。
+        logging.info(
+            '[RecordedScanTask][EPGStation] Recent recorded sync result: '
+            f'local_missing={len(local_missing_paths)}, '
+            f'basename_resolved={len(basename_resolved_paths)}, '
+            f'too_small={len(too_small_paths)}, '
+            f'unchanged_failed={len(unchanged_failed_paths)}, '
+            f'db_saved={len(db_saved_paths)}, '
+            f'db_missing={len(db_missing_paths)}.'
+        )
+        if len(local_missing_paths) > 0:
+            logging.info(
+                '[RecordedScanTask][EPGStation] Local missing paths:\n' +
+                '\n'.join([f'  - {path}' for path in local_missing_paths])
+            )
+        if len(basename_resolved_paths) > 0:
+            logging.info(
+                '[RecordedScanTask][EPGStation] Basename resolved paths:\n' +
+                '\n'.join([f'  - {path}' for path in basename_resolved_paths])
+            )
+        if len(too_small_paths) > 0:
+            logging.warning(
+                '[RecordedScanTask][EPGStation] Too small paths skipped:\n' +
+                '\n'.join([f'  - {path}' for path in too_small_paths])
+            )
+        if len(unchanged_failed_paths) > 0:
+            logging.warning(
+                '[RecordedScanTask][EPGStation] Previously failed unchanged paths skipped:\n' +
+                '\n'.join([f'  - {path}' for path in unchanged_failed_paths])
+            )
+        if len(db_saved_paths) > 0:
+            logging.info(
+                '[RecordedScanTask][EPGStation] DB saved paths:\n' +
+                '\n'.join([f'  - {path}' for path in db_saved_paths])
+            )
+        if len(db_missing_paths) > 0:
+            logging.warning(
+                '[RecordedScanTask][EPGStation] DB missing paths after sync:\n' +
+                '\n'.join([f'  - {path}' for path in db_missing_paths])
+            )
 
         # EPGStation の直近一覧で一度実体確認できたファイルについて、後からファイル実体が消えた場合は
         # EPGStation 側で削除された可能性が高い。直近20件から押し出されただけの古い録画を誤削除しないよう、

@@ -280,6 +280,7 @@ def _ExtractEPGStationRecordingFilePaths(payload: Any) -> set[str]:
         'path',
         'recordedFilePath',
         'recordingFilePath',
+        'relativeFilePath',
         'videoFilePath',
     }
 
@@ -287,7 +288,14 @@ def _ExtractEPGStationRecordingFilePaths(payload: Any) -> set[str]:
     if isinstance(payload, dict):
         for key, value in payload.items():
             if key in file_path_keys and isinstance(value, str) and value != '':
-                extracted_paths.add(value)
+                if key == 'relativeFilePath':
+                    # EPGStation の relativeFilePath は録画ルートからの相対パスとして扱う。
+                    # API 表現上は "/subdir/file.ts" のように先頭スラッシュを付けるが、KonomiTV 側では recorded_folders 配下へ展開する必要がある。
+                    relative_file_path = _NormalizePathLikeString(value).lstrip('/')
+                    if relative_file_path != '':
+                        extracted_paths.add(relative_file_path)
+                else:
+                    extracted_paths.add(value)
             else:
                 extracted_paths.update(_ExtractEPGStationRecordingFilePaths(value))
     elif isinstance(payload, list):
