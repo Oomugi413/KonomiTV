@@ -48,6 +48,21 @@ class PlayerController {
     // 視聴履歴の更新間隔 (秒)
     private static readonly WATCHED_HISTORY_UPDATE_INTERVAL = 10;
 
+    // BS4K/BS8K の TLV/MMT を変換せずに再生する特殊な画質の表示名
+    private static readonly PASSTHROUGH_PRIMARY_QUALITY_NAME = 'TLV パススルー';
+    private static readonly PASSTHROUGH_SECONDARY_QUALITY_NAME = 'TLV パススルー（降雨放送）';
+    private static readonly PASSTHROUGH_LEGACY_QUALITY_NAMES = ['Raw MMTS', 'TLV パススルー'];
+    private static readonly PASSTHROUGH_LEGACY_SECONDARY_QUALITY_NAMES = ['TLV パススルー（降雨対応）'];
+
+    // ライブ視聴中に短時間でバッファリングが頻発した場合、降雨放送へ自動切り替えするための判定条件
+    private static readonly MMTS_SECONDARY_AUTO_SWITCH_BUFFERING_WINDOW_MS = 30 * 1000;
+    private static readonly MMTS_SECONDARY_AUTO_SWITCH_BUFFERING_THRESHOLD = 4;
+
+    // BS4K/BS8K の TLV/MMT では HEVC 映像アセットが複数存在する
+    // 通常は mmts.js の自動選択に任せ、Secondary 映像を明示する場合だけ packet_id を固定する
+    private static readonly BS4K_MMTS_SECONDARY_VIDEO_PACKET_ID = 0xf301;
+    private static readonly BS8K_MMTS_SECONDARY_VIDEO_PACKET_ID = 0xf101;
+
     // DPlayer のインスタンス
     private player: DPlayer | null = null;
 
@@ -112,6 +127,17 @@ class PlayerController {
     // ライブ再生開始時の一時ミュートを、保存済みミュートと区別するフラグ
     // 一時ミュートで発火した volumechange を、ユーザー操作として保存しないために使う
     private is_live_startup_temporary_muted = false;
+
+    // MMTS の Primary/Secondary 映像が切り替わった直後に発生した MSE / Native error を、
+    // 予期された切り替え由来として扱い PlayerController の自動再起動を抑止する期限
+    private ignore_mmts_video_switch_error_until = 0;
+
+    // 現在の MMTS 映像ロール
+    private mmts_video_role: 'unknown' | 'primary' | 'secondary' = 'unknown';
+
+    // ライブ視聴中のバッファリング発生時刻を保持する
+    // handleLiveBufferingForMMTSSecondaryAutoSwitch() で 30 秒以内に何度バッファリングしたかを判定するために使う
+    private mmts_secondary_auto_switch_buffering_timestamps_ms: number[] = [];
 
 
     /**
@@ -232,6 +258,9 @@ class PlayerController {
         // 破棄済みかどうかのフラグを下ろす
         this.destroyed = false;
         this.is_live_startup_temporary_muted = false;
+        this.ignore_mmts_video_switch_error_until = 0;
+        this.mmts_video_role = 'unknown';
+        this.mmts_secondary_auto_switch_buffering_timestamps_ms = [];
 
         // PlayerStore にプレイヤーを初期化したことを通知する
         // 実際にはこの時点ではプレイヤーの初期化は完了していないが、PlayerController.init() を実行したことが通知されることが重要
@@ -382,8 +411,7 @@ class PlayerController {
         (window as any).mpegts = mpegts;
         (window as any).Hls = Hls;
 
-        // BS4K の TLV/MMT を変換せずに再生する特殊な画質の表示名
-        const passthrough_quality_name = 'TLV パススルー';
+        type MMTSVideoQuality = DPlayerType.VideoQuality & {mmtsVideoPacketId?: number};
 
         // DPlayer は内蔵の mpegts.js 連携では MediaDataSource.type を常に 'mpegts' として作成する。
         // Raw MMTS では mpegts.js 側の MMTSDemuxer を明示的に選ばせる必要があるため、
@@ -417,15 +445,39 @@ class PlayerController {
             if (dplayer.options.pluginOptions.mpegts === undefined) {
                 dplayer.options.pluginOptions.mpegts = {};
             }
+            const mpegts_config: NonNullable<Parameters<typeof mpegts.createPlayer>[1]> & {mmtsVideoPacketId?: number} = Object.assign(
+                {},
+                dplayer.options.pluginOptions.mpegts.config,
+            );
+            // 選択中の画質に packet_id が紐づいている場合のみ mmts.js に渡す
+            // Primary では渡さず、mmts.js 側で Primary/Secondary 映像を自動選択させる
+            const current_quality = dplayer.quality as MMTSVideoQuality | null;
+            if (current_quality?.mmtsVideoPacketId !== undefined) {
+                mpegts_config.mmtsVideoPacketId = current_quality.mmtsVideoPacketId;
+            }
             const mpegtsPlayer = mpegts.createPlayer(
                 Object.assign(dplayer.options.pluginOptions.mpegts.mediaDataSource || {}, {
                     type: 'mmts',
                     isLive: dplayer.options.live,
                     url: video.src,
                 }),
-                dplayer.options.pluginOptions.mpegts.config,
+                mpegts_config,
             );
             dplayer.plugins.mpegts = mpegtsPlayer;
+
+            const mmts_video_tracks_event = (mpegts.Events as any).MMTS_VIDEO_TRACKS;
+            if (mmts_video_tracks_event !== undefined) {
+                mpegtsPlayer.on(mmts_video_tracks_event, (video_tracks: any) => {
+                    this.onMMTSVideoTracks(video_tracks);
+                });
+            }
+            const mmts_audio_tracks_event = (mpegts.Events as any).MMTS_AUDIO_TRACKS;
+            if (mmts_audio_tracks_event !== undefined) {
+                mpegtsPlayer.on(mmts_audio_tracks_event, (audio_tracks: any) => {
+                    this.onMMTSAudioTracks(audio_tracks);
+                });
+            }
+
             mpegtsPlayer.attachMediaElement(video);
             mpegtsPlayer.load();
 
@@ -476,7 +528,7 @@ class PlayerController {
             // 動画の設定
             video: (() => {
                 // 画質リスト
-                const qualities: DPlayerType.VideoQuality[] = [];
+                const qualities: MMTSVideoQuality[] = [];
                 // H.265 / HEVC 再生時のみ、API に渡す画質の末尾に -hevc を付ける
                 const hevc_suffix = is_hevc_playback === true ? '-hevc' : '';
                 // -10bit や -24fps は品質名の末尾に付けて API パスに含める
@@ -505,6 +557,8 @@ class PlayerController {
                     const streaming_api_base_url = `${Utils.api_base_url}/streams/live/${channels_store.channel.current.display_channel_id}`;
                     // BS4K チャンネルでは、Mirakurun から decode=0 で受け取った Raw MMTS をそのまま再生できる
                     const is_bs4k_channel = channels_store.channel.current.type === 'BS4K';
+                    // NHK BS8K (NID11-SID102 / bs4k102) では packet_id が 0xf100 -> 0xf101、それ以外の BS4K では 0xf300 -> 0xf301 になる
+                    const is_bs8k_channel = channels_store.channel.current.network_id === 11 && channels_store.channel.current.service_id === 102;
                     // ラジオチャンネルの場合
                     // API が受け付ける画質の値は通常のチャンネルと同じだが (手抜き…)、実際の画質は 48KHz/192kbps で固定される
                     // ラジオチャンネルの場合は、1080p と渡しても 48kHz/192kbps 固定の音声だけの MPEG-TS が配信される
@@ -520,9 +574,17 @@ class PlayerController {
                         // Raw MMTS は設定画面のデフォルト画質とは独立したライブ視聴時専用の画質として扱う
                         if (is_bs4k_channel === true) {
                             qualities.push({
-                                name: passthrough_quality_name,
+                                name: PlayerController.PASSTHROUGH_PRIMARY_QUALITY_NAME,
                                 type: 'mmts',
                                 url: `${streaming_api_base_url}/raw-mmts/mpegts`,
+                            });
+                            qualities.push({
+                                name: PlayerController.PASSTHROUGH_SECONDARY_QUALITY_NAME,
+                                type: 'mmts',
+                                url: `${streaming_api_base_url}/raw-mmts/mpegts`,
+                                mmtsVideoPacketId: is_bs8k_channel === true ?
+                                    PlayerController.BS8K_MMTS_SECONDARY_VIDEO_PACKET_ID :
+                                    PlayerController.BS4K_MMTS_SECONDARY_VIDEO_PACKET_ID,
                             });
                         }
                         // 画質リストを作成
@@ -537,18 +599,25 @@ class PlayerController {
                     }
                     // デフォルトの画質
                     // BS4K チャンネルでは設定画面のデフォルト画質に関わらず Raw MMTS を初期選択にする
-                    let default_quality: string = is_bs4k_channel === true ? passthrough_quality_name : this.quality_profile.tv_streaming_quality;
+                    let default_quality: string = is_bs4k_channel === true ? PlayerController.PASSTHROUGH_PRIMARY_QUALITY_NAME : this.quality_profile.tv_streaming_quality;
                     if (options.default_quality !== null) {
                         // PlayerController.init() のオプションでデフォルト画質が指定されている場合は
                         // 画質プロファイルに記載の画質ではなく、指定された（前回再生時の）画質を使ってレジュームする
                         default_quality = options.default_quality;
                     }
                     // 旧バージョンの表示名がレジューム情報として残っている場合は、新しい表示名へ正規化する
-                    if (default_quality === 'Raw MMTS') {
-                        default_quality = passthrough_quality_name;
+                    if (PlayerController.PASSTHROUGH_LEGACY_QUALITY_NAMES.includes(default_quality)) {
+                        default_quality = PlayerController.PASSTHROUGH_PRIMARY_QUALITY_NAME;
+                    }
+                    if (PlayerController.PASSTHROUGH_LEGACY_SECONDARY_QUALITY_NAMES.includes(default_quality)) {
+                        default_quality = PlayerController.PASSTHROUGH_SECONDARY_QUALITY_NAME;
                     }
                     // Raw MMTS は BS4K 以外では使えないため、チャンネル切り替えなどで持ち越された場合は 1080p に戻す
-                    if (default_quality === passthrough_quality_name && is_bs4k_channel === false) {
+                    if (
+                        (default_quality === PlayerController.PASSTHROUGH_PRIMARY_QUALITY_NAME ||
+                         default_quality === PlayerController.PASSTHROUGH_SECONDARY_QUALITY_NAME) &&
+                        is_bs4k_channel === false
+                    ) {
                         default_quality = '1080p';
                     }
                     // ラジオチャンネルのみ常に 48KHz/192kbps に固定する
@@ -1056,6 +1125,7 @@ class PlayerController {
         // このイベントは常にアプリケーション上で1つだけ登録されていなければならない
         // さもなければ使い終わった破棄済みの PlayerController が再起動イベントにより復活し、現在利用中の PlayerController と競合してしまう
         let is_player_restarting = false;  // 現在再起動中かどうか
+        let delayed_restart_timer_id: number | null = null;  // コントロール UI 操作中に延期した再起動タイマーの ID
         player_store.event_emitter.off('PlayerRestartRequired');  // PlayerRestartRequired イベントの全てのイベントハンドラーを削除
         player_store.event_emitter.on('PlayerRestartRequired', async (event) => {
 
@@ -1074,6 +1144,21 @@ class PlayerController {
             // 既に再起動中であれば何もしない (再起動が重複して行われるのを防ぐ)
             if (is_player_restarting === true) {
                 console.warn('\u001b[31m[PlayerController] PlayerRestartRequired event received, but already restarting. Ignored.');
+                return;
+            }
+            // DPlayer の設定パネルや画質メニューを操作中に即座に再起動すると、
+            // ユーザーが画質項目をクリックする前に DOM が作り直されてしまうため、操作が終わるまで少し待つ
+            if (this.isPlayerSettingPanelInteracting() === true) {
+                if (delayed_restart_timer_id === null) {
+                    delayed_restart_timer_id = window.setTimeout(() => {
+                        delayed_restart_timer_id = null;
+                        if (this.destroyed === true) {
+                            return;
+                        }
+                        player_store.event_emitter.emit('PlayerRestartRequired', event);
+                    }, 1200);
+                }
+                console.warn('\u001b[31m[PlayerController] PlayerRestartRequired event delayed because the setting panel is being interacted with.');
                 return;
             }
             is_player_restarting = true;
@@ -1350,6 +1435,8 @@ class PlayerController {
         this.player.on('waiting', () => {
             // Progress Circular を表示する
             player_store.is_video_buffering = true;
+            // ライブ視聴で短時間にバッファリングが頻発した場合、降雨放送が選べるチャンネルでは自動的に降雨放送へ切り替える
+            this.handleLiveBufferingForMMTSSecondaryAutoSwitch();
         });
         this.player.on('playing', () => {
             // ロード中 (映像が表示されていない) でなければ Progress Circular を非表示にする
@@ -1366,6 +1453,9 @@ class PlayerController {
         // mpegts.js などの DPlayer のプラグインは画質切り替え時に一旦破棄されるため、再度イベントハンドラーを登録する必要がある
         const on_init_or_quality_change = async () => {
             assert(this.player !== null);
+
+            // 画質切り替え後に以前のバッファリング回数が残ると、別画質で即座に自動切り替えしてしまうためクリアする
+            this.mmts_secondary_auto_switch_buffering_timestamps_ms = [];
 
             // ローディング中の背景写真をランダムに変更
             player_store.background_url = PlayerUtils.generatePlayerBackgroundURL();
@@ -1402,6 +1492,12 @@ class PlayerController {
                         await Utils.waitUntilOnline();
                     }
 
+                    // MMTS の Primary/Secondary 映像切り替え直後のエラーは、mmts.js 側の自動選択に任せる
+                    if (this.shouldIgnoreMMTSVideoSwitchError() === true) {
+                        console.warn('\u001b[31m[PlayerController] mpegts.js error event ignored after MMTS video mode switch:', error_type, detail);
+                        return;
+                    }
+
                     // PlayerController の再起動を要求する
                     console.error('\u001b[31m[PlayerController] mpegts.js error event:', error_type, detail);
                     player_store.event_emitter.emit('PlayerRestartRequired', {
@@ -1421,6 +1517,12 @@ class PlayerController {
 
                     // すぐ再起動すると問題があるケースがあるので、少し待機する
                     await Utils.sleep(1);
+
+                    // MMTS の Primary/Secondary 映像切り替え直後のエラーは、mmts.js 側の自動選択に任せる
+                    if (this.shouldIgnoreMMTSVideoSwitchError() === true) {
+                        console.warn('\u001b[31m[PlayerController] HTMLVideoElement error event ignored after MMTS video mode switch:', this.player.video.error);
+                        return;
+                    }
 
                     if (this.player.video.error) {
                         console.error('\u001b[31m[PlayerController] HTMLVideoElement error event:', this.player.video.error);
@@ -1589,7 +1691,12 @@ class PlayerController {
                 // ロードに失敗したとみなし PlayerController の再起動を要求する
                 await Utils.sleep(15);
                 if (this.destroyed === true || this.player === null) return;
-                if (player_store.live_stream_status === 'ONAir' && player_store.is_video_buffering === true && on_canplay_called === false) {
+                if (
+                    player_store.live_stream_status === 'ONAir' &&
+                    player_store.is_video_buffering === true &&
+                    on_canplay_called === false &&
+                    this.shouldIgnoreMMTSVideoSwitchError() === false
+                ) {
                     player_store.event_emitter.emit('PlayerRestartRequired', {
                         message: '再生開始までに時間が掛かっています。プレイヤーを再起動しています…',
                     });
@@ -2272,6 +2379,248 @@ class PlayerController {
             this.player_control_ui_hide_timer_id =
                 window.setTimeout(player_control_ui_hide_timer, timeout_seconds * 1000);
         }
+    }
+
+
+    /**
+     * mmts.js から通知される MMTS 音声トラック情報を DPlayer の音声メニューに反映する
+     */
+    private onMMTSAudioTracks(audio_tracks: any): void {
+        if (this.player === null || Array.isArray(audio_tracks?.tracks) === false) {
+            return;
+        }
+
+        const tracks = audio_tracks.tracks as any[];
+        const audio_panel = this.player.container.querySelector<HTMLDivElement>('.dplayer-setting-audio-panel');
+        if (audio_panel === null) {
+            return;
+        }
+
+        const current_icon_html = audio_panel.querySelector<HTMLDivElement>('.dplayer-setting-audio-item .dplayer-toggle')?.innerHTML ?? '';
+        audio_panel.querySelectorAll('.dplayer-setting-audio-item').forEach((item) => item.remove());
+
+        this.player.template.settingBox.style.setProperty('--mmts-audio-panel-height', `${54 + tracks.length * 30}px`);
+
+        if (tracks.length <= 1) {
+            this.player.container.classList.add('dplayer-no-audio-switching');
+        } else {
+            this.player.container.classList.remove('dplayer-no-audio-switching');
+        }
+
+        for (const track of tracks) {
+            const item = document.createElement('div');
+            const selected = track.selected === true || track.packetId === audio_tracks.selectedPacketId;
+            item.className = [
+                'dplayer-setting-audio-item',
+                selected ? 'dplayer-setting-audio-current' : '',
+            ].filter(Boolean).join(' ');
+            item.dataset.audio = `mmts-${track.packetId}`;
+            item.dataset.audioPacketId = String(track.packetId);
+
+            const toggle = document.createElement('div');
+            toggle.className = 'dplayer-toggle';
+            toggle.innerHTML = current_icon_html;
+            item.appendChild(toggle);
+
+            const label = document.createElement('span');
+            label.className = 'dplayer-label';
+            label.textContent = this.formatMMTSAudioTrackLabel(track);
+            item.appendChild(label);
+
+            item.addEventListener('click', () => {
+                if (this.player === null) {
+                    return;
+                }
+
+                const mpegts_player = this.player.plugins.mpegts as any;
+                if (mpegts_player?.selectAudioTrack === undefined) {
+                    return;
+                }
+
+                mpegts_player.selectAudioTrack(track.packetId);
+                audio_panel.querySelectorAll('.dplayer-setting-audio-item').forEach((audio_item) => {
+                    audio_item.classList.remove('dplayer-setting-audio-current');
+                });
+                item.classList.add('dplayer-setting-audio-current');
+                this.player.template.audioValue.textContent = this.formatMMTSAudioTrackLabel(track);
+                this.player.template.settingBox.classList.remove('dplayer-setting-box-audio');
+                this.player.notice(`音声を ${this.formatMMTSAudioTrackLabel(track)} に切り替えました。`);
+            });
+
+            audio_panel.appendChild(item);
+        }
+
+        const selected_track = tracks.find((track) => track.selected === true || track.packetId === audio_tracks.selectedPacketId);
+        if (selected_track !== undefined) {
+            this.player.template.audioValue.textContent = this.formatMMTSAudioTrackLabel(selected_track);
+        }
+    }
+
+
+    /**
+     * MMTS 音声トラックの表示名を生成する
+     */
+    private formatMMTSAudioTrackLabel(track: any): string {
+        const layout = track.channelLayout ?? (typeof track.channelCount === 'number' ? `${track.channelCount}ch` : 'unknown');
+        const language = track.language ?? 'und';
+        const sample_rate = typeof track.audioSampleRate === 'number' ? ` ${track.audioSampleRate}Hz` : '';
+        const packet_id = typeof track.packetId === 'number' ? ` ${this.formatHex(track.packetId, 4)}` : '';
+        return `${layout}${sample_rate} / ${language}${packet_id}`;
+    }
+
+
+    /**
+     * 数値を 0x 前置の 16 進数に整形する
+     */
+    private formatHex(value: number, width: number): string {
+        return `0x${value.toString(16).padStart(width, '0')}`;
+    }
+
+
+    /**
+     * ライブ視聴中の短時間なバッファリング頻発を検知し、降雨放送が選択可能なら自動的に切り替える
+     */
+    private handleLiveBufferingForMMTSSecondaryAutoSwitch(): void {
+
+        // ライブ視聴以外では降雨放送の画質が存在しないため、判定しない
+        if (this.playback_mode !== 'Live') {
+            return;
+        }
+
+        // プレイヤーが破棄済み、またはユーザーが一時停止している場合は、バッファリング頻発とは扱わない
+        if (this.player === null || this.player.video.paused === true) {
+            return;
+        }
+
+        const player_store = usePlayerStore();
+
+        // 初回ロード中やライブストリーム停止中の waiting は、受信状態の悪化ではなく再生準備・接続状態に由来する可能性が高い
+        if (player_store.is_loading === true || player_store.live_stream_status !== 'ONAir') {
+            return;
+        }
+
+        // DPlayer の画質リストに降雨放送が存在する場合だけ、自動切り替え可能とみなす
+        const qualities = this.player.options.video.quality;
+        const secondary_quality_index = qualities?.findIndex((quality) => {
+            return quality.name === PlayerController.PASSTHROUGH_SECONDARY_QUALITY_NAME;
+        }) ?? -1;
+        if (qualities === undefined || secondary_quality_index === -1) {
+            this.mmts_secondary_auto_switch_buffering_timestamps_ms = [];
+            return;
+        }
+
+        // 既に降雨放送で再生している場合は、それ以上自動切り替えしない
+        if (
+            this.player.qualityIndex === secondary_quality_index ||
+            this.player.quality?.name === PlayerController.PASSTHROUGH_SECONDARY_QUALITY_NAME
+        ) {
+            this.mmts_secondary_auto_switch_buffering_timestamps_ms = [];
+            return;
+        }
+
+        // 30 秒のスライディングウィンドウ内に発生した waiting だけを保持する
+        const now = performance.now();
+        const oldest_accepted_timestamp = now - PlayerController.MMTS_SECONDARY_AUTO_SWITCH_BUFFERING_WINDOW_MS;
+        this.mmts_secondary_auto_switch_buffering_timestamps_ms =
+            this.mmts_secondary_auto_switch_buffering_timestamps_ms.filter((timestamp) => timestamp >= oldest_accepted_timestamp);
+        this.mmts_secondary_auto_switch_buffering_timestamps_ms.push(now);
+
+        // 30 秒以内に 4 回以上バッファリングした場合だけ、降雨放送へ切り替える
+        if (
+            this.mmts_secondary_auto_switch_buffering_timestamps_ms.length <
+            PlayerController.MMTS_SECONDARY_AUTO_SWITCH_BUFFERING_THRESHOLD
+        ) {
+            return;
+        }
+
+        this.mmts_secondary_auto_switch_buffering_timestamps_ms = [];
+        console.warn('\u001b[31m[PlayerController] Frequent live buffering detected. Switching to MMTS secondary video.');
+        this.player.switchQuality(secondary_quality_index);
+    }
+
+
+    /**
+     * mmts.js から通知される MMTS 映像トラック情報を元に、Primary/Secondary 映像の切り替えを UI に反映する
+     */
+    private onMMTSVideoTracks(video_tracks: any): void {
+        const next_role = video_tracks?.selectedRole === 'secondary' || video_tracks?.fallback === true ? 'secondary' :
+            video_tracks?.selectedRole === 'primary' ? 'primary' : 'unknown';
+        if (next_role === 'unknown' || next_role === this.mmts_video_role) {
+            return;
+        }
+
+        const previous_role = this.mmts_video_role;
+        this.mmts_video_role = next_role;
+        this.ignore_mmts_video_switch_error_until = performance.now() + 10 * 1000;
+
+        if (this.player === null) {
+            return;
+        }
+
+        if (next_role === 'secondary') {
+            this.player.notice(
+                previous_role === 'unknown' ?
+                    '降雨放送で再生しています。' :
+                    '降雨放送に切り替えました。',
+                undefined,
+                undefined,
+                '#FFA86A',
+            );
+        } else if (previous_role !== 'unknown') {
+            this.player.notice('通常放送に切り替えました。', undefined, undefined, undefined);
+        }
+    }
+
+
+    /**
+     * MMTS 映像トラック切り替え直後の一時的な MSE / Native error を自動再起動の対象外にする
+     */
+    private shouldIgnoreMMTSVideoSwitchError(): boolean {
+        return performance.now() < this.ignore_mmts_video_switch_error_until;
+    }
+
+
+    /**
+     * DPlayer の設定パネルがユーザー操作中かどうかを判定する
+     * 設定パネル操作中のプレイヤー再起動を避けるため、PlayerRestartRequired のハンドラーから参照される
+     *
+     * Returns:
+     *     設定パネルや画質メニューを開いている、hover している、またはフォーカスしている場合は true
+     */
+    private isPlayerSettingPanelInteracting(): boolean {
+
+        // プレイヤーがまだ初期化されていない場合は、操作中とはみなさない
+        if (this.player === null) {
+            return false;
+        }
+
+        // DPlayer の設定パネルは開いている間 dplayer-setting-box-open が付与される
+        const setting_box = this.player.template.settingBox;
+        if (setting_box.classList.contains('dplayer-setting-box-open') === true) {
+            return true;
+        }
+
+        // 画質サブメニューが開いている間も、パネル操作中として扱う
+        if (setting_box.classList.contains('dplayer-setting-box-quality') === true) {
+            return true;
+        }
+
+        // マウス操作中は hover 状態を頼りに、クリック直前の自動再起動を遅らせる
+        if (
+            this.player.template.settingButton.matches(':hover') === true ||
+            this.player.template.settingBox.matches(':hover') === true ||
+            this.player.template.quality.matches(':hover') === true
+        ) {
+            return true;
+        }
+
+        // キーボード/リモコン操作では hover が付かないため、設定パネル内の focus も操作中として扱う
+        const active_element = document.activeElement;
+        if (active_element instanceof HTMLElement && setting_box.contains(active_element) === true) {
+            return true;
+        }
+
+        return false;
     }
 
 

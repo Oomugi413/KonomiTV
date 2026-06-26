@@ -333,6 +333,9 @@ const handleSettingCoverClick = () => {
     }
     .dplayer-setting-box {
         z-index: 10 !important;
+        &.dplayer-setting-box-audio {
+            clip-path: inset(calc(100% - var(--mmts-audio-panel-height, 114px)) 0 0 round 7px) !important;
+        }
         @include tablet-vertical {
             height: calc(100% - 60px) !important;
         }
@@ -342,15 +345,6 @@ const handleSettingCoverClick = () => {
                 // Document Picture-in-Picture ウインドウでは非表示
                 @media all and (display-mode: picture-in-picture) {
                     display: none;
-                }
-            }
-        }
-        .dplayer-setting-audio-panel {
-            // 副音声がない番組で副音声を選択できないように
-            .dplayer-setting-audio-item.dplayer-setting-audio-item--disabled {
-                pointer-events: none;  // クリックイベントを無効化
-                .dplayer-label {
-                    color: #AAAAAA;  // グレーアウト
                 }
             }
         }
