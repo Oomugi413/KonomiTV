@@ -331,7 +331,14 @@ class RecordedScanTask:
                 continue
             processed_paths.add(str(file_path))
             self._epgstation_tracked_recorded_paths.add(str(file_path))
-            await self.processRecordedFile(file_path)
+            try:
+                # EPGStation の録画済み一覧には、録画失敗・短すぎるファイル・破損ファイルも混在しうる。
+                # 1 ファイルの解析失敗で直近一覧全体の同期が止まると、その後ろにある正常な録画まで UI に反映されないため、
+                # ファイル単位で例外を握り、次の候補の同期を必ず継続する。
+                await self.processRecordedFile(file_path)
+            except Exception as ex:
+                logging.error(f'{file_path}: Failed to sync EPGStation recorded file.', exc_info=ex)
+                continue
 
         # EPGStation の直近一覧で一度実体確認できたファイルについて、後からファイル実体が消えた場合は
         # EPGStation 側で削除された可能性が高い。直近20件から押し出されただけの古い録画を誤削除しないよう、
