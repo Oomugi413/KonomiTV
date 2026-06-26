@@ -135,6 +135,10 @@ class PlayerController {
     // 現在の MMTS 映像ロール
     private mmts_video_role: 'unknown' | 'primary' | 'secondary' = 'unknown';
 
+    // ユーザーが直近で選択した MMTS 音声 packet_id
+    // 古い MMTS_AUDIO_TRACKS イベントで設定表示が巻き戻るのを防ぐために使う
+    private mmts_selected_audio_packet_id_override: number | null = null;
+
     // ライブ視聴中のバッファリング発生時刻を保持する
     // handleLiveBufferingForMMTSSecondaryAutoSwitch() で 30 秒以内に何度バッファリングしたかを判定するために使う
     private mmts_secondary_auto_switch_buffering_timestamps_ms: number[] = [];
@@ -260,6 +264,7 @@ class PlayerController {
         this.is_live_startup_temporary_muted = false;
         this.ignore_mmts_video_switch_error_until = 0;
         this.mmts_video_role = 'unknown';
+        this.mmts_selected_audio_packet_id_override = null;
         this.mmts_secondary_auto_switch_buffering_timestamps_ms = [];
 
         // PlayerStore にプレイヤーを初期化したことを通知する
@@ -2391,6 +2396,14 @@ class PlayerController {
         }
 
         const tracks = audio_tracks.tracks as any[];
+        const selected_packet_id = this.mmts_selected_audio_packet_id_override ?? audio_tracks.selectedPacketId;
+        if (
+            this.mmts_selected_audio_packet_id_override !== null &&
+            audio_tracks.selectedPacketId === this.mmts_selected_audio_packet_id_override
+        ) {
+            this.mmts_selected_audio_packet_id_override = null;
+        }
+
         const audio_panel = this.player.container.querySelector<HTMLDivElement>('.dplayer-setting-audio-panel');
         if (audio_panel === null) {
             return;
@@ -2409,7 +2422,8 @@ class PlayerController {
 
         for (const track of tracks) {
             const item = document.createElement('div');
-            const selected = track.selected === true || track.packetId === audio_tracks.selectedPacketId;
+            const selected = track.packetId === selected_packet_id ||
+                (selected_packet_id === undefined && track.selected === true);
             item.className = [
                 'dplayer-setting-audio-item',
                 selected ? 'dplayer-setting-audio-current' : '',
@@ -2438,11 +2452,8 @@ class PlayerController {
                 }
 
                 mpegts_player.selectAudioTrack(track.packetId);
-                audio_panel.querySelectorAll('.dplayer-setting-audio-item').forEach((audio_item) => {
-                    audio_item.classList.remove('dplayer-setting-audio-current');
-                });
-                item.classList.add('dplayer-setting-audio-current');
-                this.player.template.audioValue.textContent = this.formatMMTSAudioTrackLabel(track);
+                this.mmts_selected_audio_packet_id_override = track.packetId;
+                this.syncMMTSAudioTrackSelection(track.packetId, this.formatMMTSAudioTrackLabel(track));
                 this.player.template.settingBox.classList.remove('dplayer-setting-box-audio');
                 this.player.notice(`音声を ${this.formatMMTSAudioTrackLabel(track)} に切り替えました。`);
             });
@@ -2450,10 +2461,34 @@ class PlayerController {
             audio_panel.appendChild(item);
         }
 
-        const selected_track = tracks.find((track) => track.selected === true || track.packetId === audio_tracks.selectedPacketId);
+        const selected_track = tracks.find((track) => track.packetId === selected_packet_id) ??
+            tracks.find((track) => track.selected === true);
         if (selected_track !== undefined) {
-            this.player.template.audioValue.textContent = this.formatMMTSAudioTrackLabel(selected_track);
+            this.syncMMTSAudioTrackSelection(selected_track.packetId, this.formatMMTSAudioTrackLabel(selected_track));
         }
+    }
+
+
+    /**
+     * MMTS 音声トラック選択を DPlayer の音声 UI に反映する
+     */
+    private syncMMTSAudioTrackSelection(packet_id: number, label: string): void {
+        if (this.player === null) {
+            return;
+        }
+
+        this.player.template.audioValue.textContent = label;
+        const audio_value = this.player.container.querySelector<HTMLElement>('.dplayer-setting-audio .dplayer-label-value');
+        if (audio_value !== null) {
+            audio_value.textContent = label;
+        }
+
+        this.player.container.querySelectorAll<HTMLElement>('.dplayer-setting-audio-item').forEach((audio_item) => {
+            audio_item.classList.toggle(
+                'dplayer-setting-audio-current',
+                audio_item.dataset.audioPacketId === String(packet_id),
+            );
+        });
     }
 
 
@@ -2535,6 +2570,20 @@ class PlayerController {
 
         this.mmts_secondary_auto_switch_buffering_timestamps_ms = [];
         console.warn('\u001b[31m[PlayerController] Frequent live buffering detected. Switching to MMTS secondary video.');
+        const secondary_quality = qualities[secondary_quality_index] as (DPlayerType.VideoQuality & {mmtsVideoPacketId?: number});
+        const mpegts_player = this.player.plugins.mpegts as any;
+        if (
+            secondary_quality.type === 'mmts' &&
+            secondary_quality.mmtsVideoPacketId !== undefined &&
+            mpegts_player?.selectVideoTrack !== undefined
+        ) {
+            mpegts_player.selectVideoTrack(secondary_quality.mmtsVideoPacketId);
+            this.syncMMTSPassthroughQualityRole('secondary');
+            this.ignore_mmts_video_switch_error_until = performance.now() + 10 * 1000;
+            this.player.notice('降雨放送に切り替えました。', undefined, undefined, '#FFA86A');
+            return;
+        }
+
         this.player.switchQuality(secondary_quality_index);
     }
 
@@ -2543,6 +2592,8 @@ class PlayerController {
      * mmts.js から通知される MMTS 映像トラック情報を元に、Primary/Secondary 映像の切り替えを UI に反映する
      */
     private onMMTSVideoTracks(video_tracks: any): void {
+        this.applyMMTSVideoTrackAutoSelection(video_tracks);
+
         const next_role = video_tracks?.selectedRole === 'secondary' || video_tracks?.fallback === true ? 'secondary' :
             video_tracks?.selectedRole === 'primary' ? 'primary' : 'unknown';
         if (next_role === 'unknown' || next_role === this.mmts_video_role) {
@@ -2569,6 +2620,80 @@ class PlayerController {
         } else if (previous_role !== 'unknown') {
             this.player.notice('通常放送に切り替えました。', undefined, undefined, undefined);
         }
+    }
+
+
+    /**
+     * mmts.js から通知された映像トラック状態を元に、再起動せずオンラインで降雨放送へ切り替える
+     */
+    private applyMMTSVideoTrackAutoSelection(video_tracks: any): void {
+        if (this.player === null || Array.isArray(video_tracks?.tracks) === false) {
+            return;
+        }
+
+        const tracks = video_tracks.tracks as any[];
+        const primary_track = tracks.find((track) => track.role === 'primary');
+        const secondary_track = tracks.find((track) => track.role === 'secondary');
+        if (
+            secondary_track === undefined ||
+            secondary_track.active !== true ||
+            primary_track?.active !== false ||
+            secondary_track.selected === true ||
+            video_tracks.selectedPacketId === secondary_track.packetId
+        ) {
+            this.syncMMTSPassthroughQualityRole(
+                video_tracks?.selectedRole === 'secondary' || video_tracks?.fallback === true ? 'secondary' :
+                    video_tracks?.selectedRole === 'primary' ? 'primary' : 'unknown'
+            );
+            return;
+        }
+
+        const mpegts_player = this.player.plugins.mpegts as any;
+        if (mpegts_player?.selectVideoTrack === undefined || typeof secondary_track.packetId !== 'number') {
+            return;
+        }
+
+        console.warn(
+            '\u001b[31m[PlayerController] MMTS primary video is inactive. ' +
+            `Switching online to secondary packet_id=${this.formatHex(secondary_track.packetId, 4)}.`
+        );
+        mpegts_player.selectVideoTrack(secondary_track.packetId);
+        this.syncMMTSPassthroughQualityRole('secondary');
+        this.ignore_mmts_video_switch_error_until = performance.now() + 10 * 1000;
+    }
+
+
+    /**
+     * MMTS のオンライン PID 切り替え結果を DPlayer の画質 UI に反映する
+     */
+    private syncMMTSPassthroughQualityRole(role: 'unknown' | 'primary' | 'secondary'): void {
+        if (this.player === null || role === 'unknown') {
+            return;
+        }
+
+        const qualities = this.player.options.video.quality;
+        if (qualities === undefined) {
+            return;
+        }
+
+        const target_quality_name = role === 'secondary' ?
+            PlayerController.PASSTHROUGH_SECONDARY_QUALITY_NAME :
+            PlayerController.PASSTHROUGH_PRIMARY_QUALITY_NAME;
+        const target_quality_index = qualities.findIndex((quality) => quality.name === target_quality_name);
+        if (target_quality_index === -1) {
+            return;
+        }
+
+        const player = this.player as any;
+        player.qualityIndex = target_quality_index;
+        player.quality = qualities[target_quality_index];
+        this.player.template.qualityValue.textContent = target_quality_name;
+        this.player.template.qualityItem.forEach((quality_item: HTMLElement) => {
+            quality_item.classList.toggle(
+                'dplayer-setting-quality-current',
+                Number(quality_item.dataset.index) === target_quality_index,
+            );
+        });
     }
 
 
@@ -2680,6 +2805,10 @@ class PlayerController {
 
         // 再びローディング状態にする
         player_store.is_loading = true;
+
+        // 破棄中のプレイヤーで発生した waiting 状態は、次に作り直されるプレイヤーへ引き継いではならない
+        // 多重 reload 時に旧インスタンス由来の Progress Circular だけが残り、映像再生状態と UI が脱同期するため明示的に解除する
+        player_store.is_video_buffering = false;
 
         // コメントの取得に失敗した際のエラーメッセージを削除
         player_store.live_comment_init_failed_message = null;

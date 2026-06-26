@@ -28,7 +28,7 @@
         "floating-vue": "^5.2.2",
         "hls.js": "^1.6.9",
         "mitt": "^3.0.1",
-        "mpegts.js": "github:makeding/mmts.js#02d84df8b0a629b14d26b691f04fd024a9a8f86a",
+        "mpegts.js": "github:makeding/mmts.js#9017849f43ec1c634696c975c44a0dc336af2472",
         "nanoid": "^5.0.9",
         "ohash": "^1.1.3",
         "piexifjs": "^2.0.0-beta.9",
@@ -46,6 +46,9 @@
         "vuedraggable": "^4.1.0",
         "vuetify": "~3.7.1",
         "web-bml": "github:tsukumijima/web-bml#811305f1d091fbbcf0a5ed9480721857a613ccaf"
+    },
+    "resolutions": {
+        "mpegts.js": "file:../../mmts.js"
     },
     "devDependencies": {
         "@babel/types": "^7.25.4",

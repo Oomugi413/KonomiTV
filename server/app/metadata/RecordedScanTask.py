@@ -162,7 +162,7 @@ class RecordedScanTask:
         self._active_recording_paths_log_signature: tuple[bool, tuple[str, ...]] | None = None
         # EPGStation の直近録画済み一覧で一度実体を確認したファイルパスを保持する。
         ## 参照箇所: __syncEPGStationRecentRecordedFiles()
-        ## 前提条件: 直近20ページの範囲外へ押し出された録画を削除扱いしないため、実在を確認できたパスだけを削除追跡対象にする。
+        ## 前提条件: 直近20件の範囲外へ押し出された録画を削除扱いしないため、実在を確認できたパスだけを削除追跡対象にする。
         self._epgstation_tracked_recorded_paths: set[str] = set()
         # EPGStation の直近録画済み一覧同期のログ出力重複を抑えるため、直前の状態を保持する。
         ## 参照箇所: __syncEPGStationRecentRecordedFiles()
@@ -334,7 +334,7 @@ class RecordedScanTask:
             await self.processRecordedFile(file_path)
 
         # EPGStation の直近一覧で一度実体確認できたファイルについて、後からファイル実体が消えた場合は
-        # EPGStation 側で削除された可能性が高い。直近20ページから押し出されただけの古い録画を誤削除しないよう、
+        # EPGStation 側で削除された可能性が高い。直近20件から押し出されただけの古い録画を誤削除しないよう、
         # 「過去に実在確認済み」かつ「現在ファイルが存在しない」パスだけを DB から削除する。
         tracked_recorded_paths = list(self._epgstation_tracked_recorded_paths)
         for offset in range(0, len(tracked_recorded_paths), 100):
