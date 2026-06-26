@@ -103,6 +103,10 @@ class RecordedScanTask:
     # EPGStation が把握している直近録画済み一覧を同期する間隔 (秒)
     EPGSTATION_RECENT_RECORDED_SYNC_INTERVAL_SECONDS: ClassVar[int] = 60
 
+    # EPGStation の直近録画済み一覧から 1 ファイルを同期するときの最大待機時間 (秒)
+    # 破損ファイルや極端に重いファイルでキュー全体が止まらないよう、ファイル単位で打ち切る
+    EPGSTATION_RECENT_RECORDED_FILE_SYNC_TIMEOUT_SECONDS: ClassVar[int] = 120
+
     # 録画中ファイルの最小データ長 (秒)
     MINIMUM_RECORDING_SECONDS: ClassVar[int] = 60
 
@@ -333,9 +337,18 @@ class RecordedScanTask:
             self._epgstation_tracked_recorded_paths.add(str(file_path))
             try:
                 # EPGStation の録画済み一覧には、録画失敗・短すぎるファイル・破損ファイルも混在しうる。
-                # 1 ファイルの解析失敗で直近一覧全体の同期が止まると、その後ろにある正常な録画まで UI に反映されないため、
-                # ファイル単位で例外を握り、次の候補の同期を必ず継続する。
-                await self.processRecordedFile(file_path)
+                # 1 ファイルの解析失敗やハングで直近一覧全体の同期が止まると、その後ろにある正常な録画まで UI に反映されないため、
+                # ファイル単位で timeout と例外境界を設け、次の候補の同期を必ず継続する。
+                await asyncio.wait_for(
+                    self.processRecordedFile(file_path),
+                    timeout=self.EPGSTATION_RECENT_RECORDED_FILE_SYNC_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                logging.error(
+                    f'{file_path}: Timed out while syncing EPGStation recorded file. '
+                    f'({self.EPGSTATION_RECENT_RECORDED_FILE_SYNC_TIMEOUT_SECONDS}s)'
+                )
+                continue
             except Exception as ex:
                 logging.error(f'{file_path}: Failed to sync EPGStation recorded file.', exc_info=ex)
                 continue
