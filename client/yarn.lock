@@ -4389,9 +4389,9 @@ mpegts.js@^1.7.3, "mpegts.js@file:../../mmts.js":
   dependencies:
     es6-promise "^4.2.5"
 
-"mpegts.js@github:makeding/mmts.js#9017849f43ec1c634696c975c44a0dc336af2472":
+"mpegts.js@github:makeding/mmts.js#8ce492039037dd5f03cc53a631a27401e4799cd5":
   version "1.8.0"
-  resolved "https://codeload.github.com/makeding/mmts.js/tar.gz/9017849f43ec1c634696c975c44a0dc336af2472"
+  resolved "https://codeload.github.com/makeding/mmts.js/tar.gz/8ce492039037dd5f03cc53a631a27401e4799cd5"
   dependencies:
     es6-promise "^4.2.5"
 

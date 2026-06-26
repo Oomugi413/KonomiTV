@@ -2592,8 +2592,6 @@ class PlayerController {
      * mmts.js から通知される MMTS 映像トラック情報を元に、Primary/Secondary 映像の切り替えを UI に反映する
      */
     private onMMTSVideoTracks(video_tracks: any): void {
-        this.applyMMTSVideoTrackAutoSelection(video_tracks);
-
         const next_role = video_tracks?.selectedRole === 'secondary' || video_tracks?.fallback === true ? 'secondary' :
             video_tracks?.selectedRole === 'primary' ? 'primary' : 'unknown';
         if (next_role === 'unknown' || next_role === this.mmts_video_role) {
@@ -2620,46 +2618,6 @@ class PlayerController {
         } else if (previous_role !== 'unknown') {
             this.player.notice('通常放送に切り替えました。', undefined, undefined, undefined);
         }
-    }
-
-
-    /**
-     * mmts.js から通知された映像トラック状態を元に、再起動せずオンラインで降雨放送へ切り替える
-     */
-    private applyMMTSVideoTrackAutoSelection(video_tracks: any): void {
-        if (this.player === null || Array.isArray(video_tracks?.tracks) === false) {
-            return;
-        }
-
-        const tracks = video_tracks.tracks as any[];
-        const primary_track = tracks.find((track) => track.role === 'primary');
-        const secondary_track = tracks.find((track) => track.role === 'secondary');
-        if (
-            secondary_track === undefined ||
-            secondary_track.active !== true ||
-            primary_track?.active !== false ||
-            secondary_track.selected === true ||
-            video_tracks.selectedPacketId === secondary_track.packetId
-        ) {
-            this.syncMMTSPassthroughQualityRole(
-                video_tracks?.selectedRole === 'secondary' || video_tracks?.fallback === true ? 'secondary' :
-                    video_tracks?.selectedRole === 'primary' ? 'primary' : 'unknown'
-            );
-            return;
-        }
-
-        const mpegts_player = this.player.plugins.mpegts as any;
-        if (mpegts_player?.selectVideoTrack === undefined || typeof secondary_track.packetId !== 'number') {
-            return;
-        }
-
-        console.warn(
-            '\u001b[31m[PlayerController] MMTS primary video is inactive. ' +
-            `Switching online to secondary packet_id=${this.formatHex(secondary_track.packetId, 4)}.`
-        );
-        mpegts_player.selectVideoTrack(secondary_track.packetId);
-        this.syncMMTSPassthroughQualityRole('secondary');
-        this.ignore_mmts_video_switch_error_until = performance.now() + 10 * 1000;
     }
 
 
