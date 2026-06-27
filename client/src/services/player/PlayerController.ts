@@ -427,6 +427,9 @@ class PlayerController {
                 console.warn('\u001b[31m[PlayerController] mpegts.js is not supported. Raw MMTS playback is unavailable.');
                 return;
             }
+            if (dplayer.options.subtitle) {
+                dplayer.options.subtitle.type = 'aribb62';
+            }
 
             // DPlayer 内蔵の mpegts.js 初期化処理を通らないため、字幕/文字スーパーの Renderer も明示的に破棄する
             if (dplayer.plugins.aribb24Caption) {
@@ -436,6 +439,11 @@ class PlayerController {
             if (dplayer.plugins.aribb24Superimpose) {
                 dplayer.plugins.aribb24Superimpose.dispose();
                 delete dplayer.plugins.aribb24Superimpose;
+            }
+            if (dplayer.plugins.aribb62) {
+                dplayer.plugins.aribb62.renderer.destroy();
+                dplayer.plugins.aribb62.overlay.remove();
+                delete dplayer.plugins.aribb62;
             }
 
             // 画質切り替え時に既存の mpegts.js Player が残っている場合は、DPlayer 内蔵処理と同じ順序で破棄する
@@ -483,6 +491,10 @@ class PlayerController {
                 });
             }
 
+            if (typeof (dplayer as any).initARIBB62Subtitle === 'function') {
+                (dplayer as any).initARIBB62Subtitle(video, mpegtsPlayer);
+            }
+
             mpegtsPlayer.attachMediaElement(video);
             mpegtsPlayer.load();
 
@@ -496,8 +508,33 @@ class PlayerController {
                 mpegtsPlayer.detachMediaElement();
                 mpegtsPlayer.destroy();
                 delete dplayer.plugins.mpegts;
+                if (dplayer.plugins.aribb62) {
+                    dplayer.plugins.aribb62.renderer.destroy();
+                    dplayer.plugins.aribb62.overlay.remove();
+                    delete dplayer.plugins.aribb62;
+                }
             });
         };
+
+        const caption_normal_font = (() => {
+            let font = settings_store.settings.caption_font;
+            if (font === 'sans-serif') {
+                return 'sans-serif';
+            }
+            if (font === 'Yu Gothic') {
+                // 游ゴシックのみ、Windows と Mac で名前が異なる
+                font = 'Yu Gothic Medium","Yu Gothic","YuGothic';
+            }
+            return `"${font}", "Rounded M+ 1m for ARIB", sans-serif`;
+        })();
+        const caption_background_color = (() => {
+            if (settings_store.settings.specify_caption_opacity === true) {
+                const opacity = settings_store.settings.caption_opacity;
+                return `rgba(0, 0, 0, ${opacity})`;
+            } else {
+                return undefined;
+            }
+        })();
 
         // DPlayer を初期化
         this.player = new DPlayer({
@@ -822,7 +859,7 @@ class PlayerController {
 
             // 字幕の設定
             subtitle: {
-                type: 'aribb24',  // aribb24.js を有効化
+                type: 'aribb24',
             },
 
             // 再生プラグインの設定
@@ -936,28 +973,11 @@ class PlayerController {
                     // 文字スーパーレンダラーを無効にするかどうか
                     disableSuperimposeRenderer: is_show_superimpose === false,
                     // 描画フォント
-                    normalFont: (() => {
-                        let font = settings_store.settings.caption_font;
-                        if (font === 'sans-serif') {
-                            return 'sans-serif';
-                        }
-                        if (font === 'Yu Gothic') {
-                            // 游ゴシックのみ、Windows と Mac で名前が異なる
-                            font = 'Yu Gothic Medium","Yu Gothic","YuGothic';
-                        }
-                        return `"${font}", "Rounded M+ 1m for ARIB", sans-serif`;
-                    })(),
+                    normalFont: caption_normal_font,
                     // 縁取りする色
                     forceStrokeColor: settings_store.settings.always_border_caption_text,
                     // 背景色
-                    forceBackgroundColor: (() => {
-                        if (settings_store.settings.specify_caption_opacity === true) {
-                            const opacity = settings_store.settings.caption_opacity;
-                            return `rgba(0, 0, 0, ${opacity})`;
-                        } else {
-                            return undefined;
-                        }
-                    })(),
+                    forceBackgroundColor: caption_background_color,
                     // DRCS 文字を対応する Unicode 文字に置換
                     drcsReplacement: true,
                     // 高解像度の字幕 Canvas を取得できるように
@@ -1004,12 +1024,41 @@ class PlayerController {
                         // 再生開始
                         buffer_source_node.start(0);
                     }
+                },
+                // aribb62.js
+                aribb62: {
+                    // 描画フォント
+                    normalFont: caption_normal_font,
+                    // 縁取りする色
+                    forceStrokeColor: settings_store.settings.always_border_caption_text,
+                    // 背景色
+                    forceBackgroundColor: caption_background_color,
+                    // DOM レンダリングでは背景を文字列の行に付けるため、aribb24.js の余白感に寄せる
+                    backgroundPadding: '0 0.08em',
+                    lineBackground: true,
                 }
             }
         });
 
         // デバッグ用にプレイヤーインスタンスも window 直下に入れる
         (window as any).player = this.player;
+
+        const dplayer_instance = this.player;
+        const syncDPlayerSubtitleTypeForQuality = (quality: DPlayerType.VideoQuality | null | undefined): void => {
+            if (!dplayer_instance.options.subtitle) {
+                return;
+            }
+            dplayer_instance.options.subtitle.type = quality?.type === 'mmts' ? 'aribb62' : 'aribb24';
+        };
+        const originalSwitchQuality = dplayer_instance.switchQuality.bind(dplayer_instance);
+        dplayer_instance.switchQuality = (index: number): void => {
+            syncDPlayerSubtitleTypeForQuality(dplayer_instance.options.video.quality?.[index]);
+            if (dplayer_instance.options?.pluginOptions?.hls && dplayer_instance.video && dplayer_instance.options.live !== true) {
+                // 画質切り替え前の再生位置を hls.js の startPosition に指定して、無駄な HLS セグメントの取得を抑止する
+                dplayer_instance.options.pluginOptions.hls.startPosition = dplayer_instance.video.currentTime;
+            }
+            originalSwitchQuality(index);
+        };
 
         // 録画中の追っかけ再生では、DPlayer の永続化された loop 設定も含めて強制的に無効化する。
         // DPlayer は options.loop より localStorage の dplayer-loop を優先するため、ここで UI と内部状態を明示的に揃える。
@@ -1080,17 +1129,6 @@ class PlayerController {
 
         // ビデオ視聴時のみ、指定されている場合は再生速度をレジュームし、指定秒数シークする
         if (this.playback_mode === 'Video') {
-
-            // DPlayer の画質切り替え時にも現在の再生位置から HLS セグメントをロードさせるためのモンキーパッチを適用
-            const dplayer_instance = this.player;
-            const originalSwitchQuality = dplayer_instance.switchQuality.bind(dplayer_instance);
-            dplayer_instance.switchQuality = (index: number): void => {
-                if (dplayer_instance.options?.pluginOptions?.hls && dplayer_instance.video && dplayer_instance.options.live !== true) {
-                    // 画質切り替え前の再生位置を hls.js の startPosition に指定して、無駄な HLS セグメントの取得を抑止する
-                    dplayer_instance.options.pluginOptions.hls.startPosition = dplayer_instance.video.currentTime;
-                }
-                originalSwitchQuality(index);
-            };
 
             // 初期化前に算出しておいた秒数分初回シークを実行
             // 録画マージン分シークするケースと、プレイヤー再起動前の再生位置を復元するケースの2通りある
