@@ -483,8 +483,15 @@ class PlayerController {
                 dplayer.user.get('subtitle') === 0 ||
                 dplayer.template.subtitle.classList.contains('dplayer-subtitle-hide');
 
-            dplayer.plugins.aribb62.overlay.classList.toggle('dplayer-subtitle-hide', is_subtitle_hidden);
-            if (is_subtitle_hidden === false) {
+            // DPlayer の CSS は .dplayer-subtitle.dplayer-subtitle-hide にだけ display: none を定義している
+            // aribb62 overlay は .dplayer-aribb62-subtitle なので、class だけでは非表示にならない環境がある
+            if (is_subtitle_hidden === true) {
+                dplayer.plugins.aribb62.overlay.classList.add('dplayer-subtitle-hide');
+                dplayer.plugins.aribb62.overlay.style.display = 'none';
+                dplayer.plugins.aribb62.overlay.innerHTML = '';
+            } else {
+                dplayer.plugins.aribb62.overlay.classList.remove('dplayer-subtitle-hide');
+                dplayer.plugins.aribb62.overlay.style.display = '';
                 dplayer.plugins.aribb62.renderer.render();
             }
         };
