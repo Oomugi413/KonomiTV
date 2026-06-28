@@ -42,6 +42,23 @@ class PlayerController {
     // 4 秒程度の遅延を許容する
     private static readonly LIVE_PLAYBACK_BUFFER_SECONDS = 4.0;
 
+    // ライブ視聴: Raw MMTS 向けの再生開始待ちバッファ (秒単位)
+    // 入力側の揺らぎは stash buffer で吸収し、MediaSource 側は burst 時に 2 秒程度の余裕を維持する
+    private static readonly LIVE_MMTS_PLAYBACK_BUFFER_SECONDS = 2.0;
+
+    // ライブ視聴: BS4K Raw MMTS 向けの mpegts.js stash buffer サイズ
+    // BS4K は通常 1 トランスポンダーに 3 チャンネル程度多重されるため、BS8K 向け stash の 1/3 程度を確保する
+    private static readonly LIVE_BS4K_MMTS_STASH_INITIAL_SIZE = 10 * 1024 * 1024;
+
+    // ライブ視聴: BS8K Raw MMTS 向けの mpegts.js stash buffer サイズ
+    // BS8K は BS4K よりビットレートが高いため、同程度の時間幅を確保できるようさらに大きめにする
+    private static readonly LIVE_BS8K_MMTS_STASH_INITIAL_SIZE = 30 * 1024 * 1024;
+
+    // ライブ視聴: Raw MMTS 向けの SourceBuffer 保持時間 (秒単位)
+    // ブラウザ側のメモリ肥大を避けつつ、多少の揺らぎや手動同期には耐えられるだけの後方バッファを残す
+    private static readonly LIVE_MMTS_AUTO_CLEANUP_MAX_BACKWARD_DURATION = 90;
+    private static readonly LIVE_MMTS_AUTO_CLEANUP_MIN_BACKWARD_DURATION = 45;
+
     // 何秒視聴したら視聴履歴に追加するかの閾値 (秒)
     private static readonly WATCHED_HISTORY_THRESHOLD_SECONDS = 30;
 
@@ -239,6 +256,36 @@ class PlayerController {
             live_playback_buffer_seconds += 0.3;
         }
         return live_playback_buffer_seconds;
+    }
+
+
+    /**
+     * ライブ視聴: 現在選択中の画質に応じた再生開始待ちバッファ
+     */
+    private get current_live_playback_buffer_seconds(): number {
+        // Raw MMTS は低遅延より安定性を優先し、通常 MPEG-TS より大きいバッファを使う
+        if (this.player?.quality?.type === 'mmts') {
+            return PlayerController.LIVE_MMTS_PLAYBACK_BUFFER_SECONDS;
+        }
+        return this.live_playback_buffer_seconds;
+    }
+
+
+    /**
+     * ライブ視聴: 現在のチャンネルに応じた Raw MMTS 向け stash buffer サイズ
+     */
+    private get live_mmts_stash_initial_size(): number {
+        const channels_store = useChannelsStore();
+
+        // NHK BS8K は HonomiTV 上では BS4K 種別として扱われるため、NID/SID で個別判定する
+        if (
+            this.playback_mode === 'Live' &&
+            channels_store.channel.current.network_id === 11 &&
+            channels_store.channel.current.service_id === 102
+        ) {
+            return PlayerController.LIVE_BS8K_MMTS_STASH_INITIAL_SIZE;
+        }
+        return PlayerController.LIVE_BS4K_MMTS_STASH_INITIAL_SIZE;
     }
 
 
@@ -465,6 +512,18 @@ class PlayerController {
             // 選択中の画質に packet_id が紐づいている場合のみ mmts.js に渡す
             // Primary では渡さず、mmts.js 側で Primary/Secondary 映像を自動選択させる
             const current_quality = dplayer.quality as MMTSVideoQuality | null;
+            if (current_quality?.type === 'mmts') {
+                // Raw MMTS は 4K HEVC をそのまま MSE に積むため、通常の MPEG-TS 向け低遅延設定ではバッファが薄くなりやすい
+                // ここでは latency chasing を止め、起動時 stash / SourceBuffer 保持を増やして多少の受信揺らぎを吸収する
+                Object.assign(mpegts_config, {
+                    enableStashBuffer: true,
+                    stashInitialSize: this.live_mmts_stash_initial_size,
+                    liveSync: false,
+                    autoCleanupSourceBuffer: true,
+                    autoCleanupMaxBackwardDuration: PlayerController.LIVE_MMTS_AUTO_CLEANUP_MAX_BACKWARD_DURATION,
+                    autoCleanupMinBackwardDuration: PlayerController.LIVE_MMTS_AUTO_CLEANUP_MIN_BACKWARD_DURATION,
+                });
+            }
             if (current_quality?.mmtsVideoPacketId !== undefined) {
                 mpegts_config.mmtsVideoPacketId = current_quality.mmtsVideoPacketId;
             }
@@ -537,6 +596,7 @@ class PlayerController {
         })();
 
         // DPlayer を初期化
+        const is_bs4k_live_channel = this.playback_mode === 'Live' && channels_store.channel.current.type === 'BS4K';
         this.player = new DPlayer({
             // DPlayer を配置する要素
             container: document.querySelector<HTMLDivElement>('.watch-player__dplayer')!,
@@ -546,8 +606,13 @@ class PlayerController {
             lang: 'ja-jp',
             // ライブモード (ビデオ視聴では無効)
             live: this.playback_mode === 'Live' ? true : false,
+            // Raw MMTS では DPlayer の play() 時自動 live sync が MediaSource 側のバッファを削りやすい
+            // 手動の Live バッジ同期は残しつつ、Raw MMTS だけ自動同期を止めて 2 秒程度の buffer remain を維持する
+            syncWhenPlayingLive: is_bs4k_live_channel === false,
             // ライブモードで同期する際の最小バッファサイズ
-            liveSyncMinBufferSize: this.live_playback_buffer_seconds - 0.1,
+            liveSyncMinBufferSize: (is_bs4k_live_channel === true ?
+                PlayerController.LIVE_MMTS_PLAYBACK_BUFFER_SECONDS :
+                this.live_playback_buffer_seconds) - 0.1,
             // ループ再生 (ライブ視聴では無効)
             loop: (this.playback_mode === 'Live' || is_recording_chase_playback === true) ? false : true,
             // 自動再生
@@ -599,7 +664,10 @@ class PlayerController {
                     const streaming_api_base_url = `${Utils.api_base_url}/streams/live/${channels_store.channel.current.display_channel_id}`;
                     // BS4K チャンネルでは、Mirakurun から decode=0 で受け取った Raw MMTS をそのまま再生できる
                     const is_bs4k_channel = channels_store.channel.current.type === 'BS4K';
-                    // NHK BS8K (NID11-SID102 / bs4k102) では packet_id が 0xf100 -> 0xf101、それ以外の BS4K では 0xf300 -> 0xf301 になる
+                    // NHK BSP4K (NID11-SID101 / bs4k101) と NHK BS8K (NID11-SID102 / bs4k102) のみ降雨放送がある
+                    const has_mmts_secondary_video = channels_store.channel.current.network_id === 11 &&
+                        [101, 102].includes(channels_store.channel.current.service_id);
+                    // NHK BS8K では packet_id が 0xf100 -> 0xf101、それ以外の降雨放送対応 BS4K では 0xf300 -> 0xf301 になる
                     const is_bs8k_channel = channels_store.channel.current.network_id === 11 && channels_store.channel.current.service_id === 102;
                     // ラジオチャンネルの場合
                     // API が受け付ける画質の値は通常のチャンネルと同じだが (手抜き…)、実際の画質は 48KHz/192kbps で固定される
@@ -620,14 +688,16 @@ class PlayerController {
                                 type: 'mmts',
                                 url: `${streaming_api_base_url}/raw-mmts/mpegts`,
                             });
-                            qualities.push({
-                                name: PlayerController.PASSTHROUGH_SECONDARY_QUALITY_NAME,
-                                type: 'mmts',
-                                url: `${streaming_api_base_url}/raw-mmts/mpegts`,
-                                mmtsVideoPacketId: is_bs8k_channel === true ?
-                                    PlayerController.BS8K_MMTS_SECONDARY_VIDEO_PACKET_ID :
-                                    PlayerController.BS4K_MMTS_SECONDARY_VIDEO_PACKET_ID,
-                            });
+                            if (has_mmts_secondary_video === true) {
+                                qualities.push({
+                                    name: PlayerController.PASSTHROUGH_SECONDARY_QUALITY_NAME,
+                                    type: 'mmts',
+                                    url: `${streaming_api_base_url}/raw-mmts/mpegts`,
+                                    mmtsVideoPacketId: is_bs8k_channel === true ?
+                                        PlayerController.BS8K_MMTS_SECONDARY_VIDEO_PACKET_ID :
+                                        PlayerController.BS4K_MMTS_SECONDARY_VIDEO_PACKET_ID,
+                                });
+                            }
                         }
                         // 画質リストを作成
                         for (const quality_name of LIVE_STREAMING_QUALITIES) {
@@ -1633,11 +1703,11 @@ class PlayerController {
                     console.log('\u001b[31m[PlayerController] Buffering...');
                     this.player.video.playbackRate = 0;
 
-                    // 再生バッファが live_playback_buffer_seconds を超えるまで 0.1 秒おきに再生バッファをチェックする
-                    // 再生バッファが live_playback_buffer_seconds を切ると再生が途切れやすくなるので (特に動きの激しい映像)、
+                    // 再生バッファが current_live_playback_buffer_seconds を超えるまで 0.1 秒おきに再生バッファをチェックする
+                    // 再生バッファが current_live_playback_buffer_seconds を切ると再生が途切れやすくなるので (特に動きの激しい映像)、
                     // 再生開始までの時間を若干犠牲にして、再生バッファの調整と同期に時間を割く
-                    // live_playback_buffer_seconds の値は mpegts.js の liveSyncTargetLatency 設定に渡す値と共通
-                    const live_playback_buffer_seconds = this.live_playback_buffer_seconds;  // 毎回取得すると負荷が掛かるのでキャッシュする
+                    // Raw MMTS では通常 MPEG-TS より大きい値を使い、4K HEVC の burst に耐えられる余裕を作る
+                    const live_playback_buffer_seconds = this.current_live_playback_buffer_seconds;  // 毎回取得すると負荷が掛かるのでキャッシュする
                     let current_playback_buffer_sec = this.getPlaybackBufferSeconds();
                     while (current_playback_buffer_sec < live_playback_buffer_seconds) {
                         await Utils.sleep(0.1);
@@ -2643,6 +2713,10 @@ class PlayerController {
         if (this.player === null) {
             return;
         }
+
+        // mmts.js 側の自動 Primary/Secondary 選択結果を画質メニューに反映する。
+        // switchQuality() は呼ばず、再初期化や selectVideoTrack() の再入を避ける。
+        this.syncMMTSPassthroughQualityRole(next_role);
 
         if (next_role === 'secondary') {
             this.player.notice(
