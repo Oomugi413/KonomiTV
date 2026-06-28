@@ -471,6 +471,24 @@ class PlayerController {
         const initialized_aribb62_subtitle_players = new WeakSet<object>();
         let is_aribb62_subtitle_event_unavailable_warned = false;
 
+        // DPlayer の字幕表示状態を Raw MMTS 用の aribb62 overlay に反映する
+        // initARIBB62Subtitle() は overlay を新規作成した直後に表示状態へしてしまうため、字幕を非表示にした状態で
+        // Raw MMTS の初期化・画質切り替え・プレイヤー再起動が起きた場合でも、保存済みの非表示状態を即座に反映する必要がある
+        const syncARIBB62SubtitleVisibility = (dplayer: DPlayer): void => {
+            if (dplayer.plugins.aribb62 === undefined) {
+                return;
+            }
+
+            const is_subtitle_hidden =
+                dplayer.user.get('subtitle') === 0 ||
+                dplayer.template.subtitle.classList.contains('dplayer-subtitle-hide');
+
+            dplayer.plugins.aribb62.overlay.classList.toggle('dplayer-subtitle-hide', is_subtitle_hidden);
+            if (is_subtitle_hidden === false) {
+                dplayer.plugins.aribb62.renderer.render();
+            }
+        };
+
         // DPlayer 側の initARIBB62Subtitle() は呼び出しのたびに MMTS_SUBTITLE_DATA_ARRIVED の listener を追加する。
         // Raw MMTS の customType は HonomiTV 側で直接呼び出すため、同じ mpegts.js Player に対して二重登録しないようにする。
         const initializeARIBB62Subtitle = (
@@ -498,6 +516,7 @@ class PlayerController {
             }
             initialized_aribb62_subtitle_players.add(mpegts_player_object);
             init_aribb62_subtitle.call(dplayer, video, mpegtsPlayer);
+            syncARIBB62SubtitleVisibility(dplayer);
         };
 
         // DPlayer は内蔵の mpegts.js 連携では MediaDataSource.type を常に 'mpegts' として作成する。
@@ -1148,6 +1167,15 @@ class PlayerController {
         (window as any).player = this.player;
 
         const dplayer_instance = this.player;
+        // DPlayer の字幕ボタンで表示状態が変わったとき、通常の字幕コンテナだけでなく Raw MMTS 用の aribb62 overlay にも反映する
+        // aribb62 overlay は initARIBB62Subtitle() が別 DOM として作成するため、この同期がないと字幕ボタンの状態から外れることがある
+        dplayer_instance.on('subtitle_show', () => {
+            syncARIBB62SubtitleVisibility(dplayer_instance);
+        });
+        dplayer_instance.on('subtitle_hide', () => {
+            syncARIBB62SubtitleVisibility(dplayer_instance);
+        });
+
         const syncDPlayerSubtitleTypeForQuality = (quality: DPlayerType.VideoQuality | null | undefined): void => {
             if (!dplayer_instance.options.subtitle) {
                 return;
