@@ -45,7 +45,7 @@ class LiveEncodingTask:
     GOP_LENGTH_SECONDS_H264: ClassVar[float] = 0.5
 
     # H.265 再生時のエンコード後のストリームの GOP 長 (秒)
-    GOP_LENGTH_SECONDS_H265: ClassVar[float] = float(0.5)
+    GOP_LENGTH_SECONDS_H265: ClassVar[float] = 0.5
 
     # エンコードタスクの最大リトライ回数
     ## この数を超えた場合はエンコードタスクを再起動しない（無限ループを避ける）

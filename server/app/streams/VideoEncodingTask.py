@@ -236,7 +236,7 @@ class VideoEncodingTask:
         ## 音声が 5.1ch かどうかに関わらず、ステレオにダウンミックスする
         options.append('--audio-stream 1?:stereo --data-copy timed_id3')
         # options.append('--audio-stream 1?:stereo --audio-stream 2?:stereo --data-copy timed_id3')
-        
+
         # フラグ
         ## 主に HWEncC の起動を高速化するための設定
         ## max_interleave_delta: mux 時に影響するオプションで、ライブ再生では増やしすぎると CM で詰まりがちになる
