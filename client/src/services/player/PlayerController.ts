@@ -468,6 +468,37 @@ class PlayerController {
         (window as any).Hls = Hls;
 
         type MMTSVideoQuality = DPlayerType.VideoQuality & {mmtsVideoPacketId?: number};
+        const initialized_aribb62_subtitle_players = new WeakSet<object>();
+        let is_aribb62_subtitle_event_unavailable_warned = false;
+
+        // DPlayer 側の initARIBB62Subtitle() は呼び出しのたびに MMTS_SUBTITLE_DATA_ARRIVED の listener を追加する。
+        // Raw MMTS の customType は HonomiTV 側で直接呼び出すため、同じ mpegts.js Player に対して二重登録しないようにする。
+        const initializeARIBB62Subtitle = (
+            video: HTMLVideoElement,
+            dplayer: DPlayer,
+            mpegtsPlayer: {on(event: string, listener: (data: unknown) => void): void},
+        ): void => {
+            const init_aribb62_subtitle = (dplayer as any).initARIBB62Subtitle;
+            if (typeof init_aribb62_subtitle !== 'function') {
+                return;
+            }
+
+            const mmts_subtitle_data_event = (mpegts.Events as any).MMTS_SUBTITLE_DATA_ARRIVED;
+            if (mmts_subtitle_data_event === undefined) {
+                if (is_aribb62_subtitle_event_unavailable_warned === false) {
+                    is_aribb62_subtitle_event_unavailable_warned = true;
+                    console.warn('\u001b[31m[PlayerController] mpegts.js does not expose MMTS subtitle events. ARIB B62 subtitles are disabled.');
+                }
+                return;
+            }
+
+            const mpegts_player_object = mpegtsPlayer as object;
+            if (initialized_aribb62_subtitle_players.has(mpegts_player_object)) {
+                return;
+            }
+            initialized_aribb62_subtitle_players.add(mpegts_player_object);
+            init_aribb62_subtitle.call(dplayer, video, mpegtsPlayer);
+        };
 
         // DPlayer は内蔵の mpegts.js 連携では MediaDataSource.type を常に 'mpegts' として作成する。
         // Raw MMTS では mpegts.js 側の MMTSDemuxer を明示的に選ばせる必要があるため、
@@ -496,6 +527,7 @@ class PlayerController {
                 dplayer.plugins.aribb62.overlay.remove();
                 delete dplayer.plugins.aribb62;
             }
+            dplayer.template.videoWrap.querySelectorAll('.dplayer-aribb62-subtitle').forEach((overlay) => overlay.remove());
 
             // 画質切り替え時に既存の mpegts.js Player が残っている場合は、DPlayer 内蔵処理と同じ順序で破棄する
             if (dplayer.plugins.mpegts) {
@@ -554,9 +586,7 @@ class PlayerController {
                 });
             }
 
-            if (typeof (dplayer as any).initARIBB62Subtitle === 'function') {
-                (dplayer as any).initARIBB62Subtitle(video, mpegtsPlayer);
-            }
+            initializeARIBB62Subtitle(video, dplayer, mpegtsPlayer);
 
             mpegtsPlayer.attachMediaElement(video);
             mpegtsPlayer.load();
