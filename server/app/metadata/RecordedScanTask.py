@@ -83,7 +83,7 @@ class RecordedScanTask:
     __instance: ClassVar[RecordedScanTask | None] = None
 
     # スキャン対象の拡張子
-    SCAN_TARGET_EXTENSIONS: ClassVar[list[str]] = ['.ts', '.m2t', '.m2ts', '.mts', '.mp4']
+    SCAN_TARGET_EXTENSIONS: ClassVar[list[str]] = ['.ts', '.m2t', '.m2ts', '.mts', '.mp4', '.mmts']
 
     # MetadataAnalyzer がファイルハッシュ計算に必要とする最小ファイルサイズ (3 * 1MiB)
     # これ未満の録画ファイルは解析しても必ず ValueError になるため、直近 EPGStation 同期では入口でスキップする。
@@ -1694,6 +1694,11 @@ class RecordedScanTask:
 
         try:
             logging.info(f'{file_path}: Starting background analysis task...')
+            # MMT/TLV は FFmpeg / CMSectionsDetector / ThumbnailGenerator がまだ直接扱えない。
+            # 録画一覧のメタデータ登録を優先し、重い後段解析は MPEG-TS / MP4 のみで実行する。
+            if recorded_program.recorded_video.container_format == 'MMT/TLV':
+                logging.info(f'{file_path}: Background analysis is skipped for MMT/TLV recordings.')
+                return
             # ProcessLimiter で稼働中のバックグラウンドタスクの同時実行数を CPU コア数の 50% に制限
             async with ProcessLimiter.getSemaphore('RecordedScanTask'):
                 # DriveIOLimiter で同一 HDD に対してのバックグラウンドタスクの同時実行数を原則1セッションに制限

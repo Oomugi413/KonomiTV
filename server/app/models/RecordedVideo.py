@@ -34,7 +34,7 @@ class RecordedVideo(TortoiseModel):
     recording_start_time = cast(TortoiseField[datetime | None], fields.DatetimeField(null=True))
     recording_end_time = cast(TortoiseField[datetime | None], fields.DatetimeField(null=True))
     duration = fields.FloatField()
-    container_format = cast(TortoiseField[Literal['MPEG-TS', 'MPEG-4']], fields.CharField(255))
+    container_format = cast(TortoiseField[Literal['MPEG-TS', 'MPEG-4', 'MMT/TLV']], fields.CharField(255))
     video_codec = cast(TortoiseField[Literal['MPEG-2', 'H.264', 'H.265']], fields.CharField(255))
     # プロファイルは他にも多くあるが、現実的に使われそうなものだけを列挙
     video_codec_profile = cast(TortoiseField[Literal['High', 'High 10', 'Main', 'Main 10', 'Baseline', 'Constrained Baseline']], fields.CharField(255))

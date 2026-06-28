@@ -152,7 +152,7 @@ class RecordedVideo(PydanticModel):
     recording_start_time: datetime | None
     recording_end_time: datetime | None
     duration: float
-    container_format: Literal['MPEG-TS', 'MPEG-4']
+    container_format: Literal['MPEG-TS', 'MPEG-4', 'MMT/TLV']
     video_codec: Literal['MPEG-2', 'H.264', 'H.265']
     video_codec_profile: Literal['High', 'High 10', 'Main', 'Main 10', 'Baseline', 'Constrained Baseline']
     video_scan_type: Literal['Interlaced', 'Progressive']

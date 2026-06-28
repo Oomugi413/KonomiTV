@@ -21,7 +21,7 @@ export interface IRecordedVideo {
     recording_start_time: string | null;
     recording_end_time: string | null;
     duration: number;
-    container_format: 'MPEG-TS' | 'MPEG-4';
+    container_format: 'MPEG-TS' | 'MPEG-4' | 'MMT/TLV';
     video_codec: 'MPEG-2' | 'H.264' | 'H.265';
     video_codec_profile: 'High' | 'High 10' | 'Main' | 'Main 10' | 'Baseline' | 'Constrained Baseline';
     video_scan_type: 'Interlaced' | 'Progressive';

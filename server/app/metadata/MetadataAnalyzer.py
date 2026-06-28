@@ -14,6 +14,7 @@ from rich import print
 from app import logging, schemas
 from app.config import Config, LoadConfig
 from app.constants import JST, LIBRARY_PATH
+from app.metadata.MMTSInfoAnalyzer import MMTSInfoAnalyzer
 from app.metadata.TSInfoAnalyzer import TSInfoAnalyzer
 from app.utils import ClosestMultiple
 from app.utils.TSInformation import TSInformation
@@ -263,7 +264,7 @@ class MetadataAnalyzer:
 
         # 必要な情報を一旦変数として保持
         duration: float | None = None
-        container_format: Literal['MPEG-TS', 'MPEG-4'] | None = None
+        container_format: Literal['MPEG-TS', 'MPEG-4', 'MMT/TLV'] | None = None
         video_codec: Literal['MPEG-2', 'H.264', 'H.265'] | None = None
         video_codec_profile: Literal['High', 'High 10', 'Main', 'Main 10', 'Baseline', 'Constrained Baseline'] | None = None
         video_scan_type: Literal['Interlaced', 'Progressive'] | None = None
@@ -282,6 +283,24 @@ class MetadataAnalyzer:
         ## 取得に失敗した場合は KonomiTV で再生可能なファイルではないと判断し、None を返す
         result = self.__analyzeFFprobe()
         if result is None:
+            # FFprobe は BS4K/BS8K の MMT/TLV を直接扱えないため、MMT-SI から録画メタデータを復元する。
+            # ここでは従来の MPEG-TS / MP4 解析には一切触れず、MMT/TLV と probe できるファイルだけ専用解析へ進める。
+            if MMTSInfoAnalyzer.probe(self.recorded_file_path) is True:
+                try:
+                    file_hash = self.__calculateFileHash(None)
+                    stat_info = self.recorded_file_path.stat()
+                    analyzer = MMTSInfoAnalyzer(self.recorded_file_path, selected_service_id=self.selected_service_id)
+                    recorded_program = analyzer.analyze(
+                        file_hash = file_hash,
+                        file_size = stat_info.st_size,
+                        file_created_at = datetime.fromtimestamp(stat_info.st_ctime, tz=JST),
+                        file_modified_at = datetime.fromtimestamp(stat_info.st_mtime, tz=JST),
+                    )
+                    if recorded_program is not None:
+                        logging.debug(f'{self.recorded_file_path}: MMT/TLV metadata analysis completed.')
+                    return recorded_program
+                except Exception as ex:
+                    logging.warning(f'{self.recorded_file_path}: MMT/TLV metadata analysis failed:', exc_info=ex)
             return None
         full_probe, sample_probe, end_ts_offset = result
         logging.debug(f'{self.recorded_file_path}: FFprobe analysis completed.')
