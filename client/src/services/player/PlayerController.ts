@@ -152,7 +152,11 @@ class PlayerController {
     // 現在の MMTS 映像ロール
     private mmts_video_role: 'unknown' | 'primary' | 'secondary' = 'unknown';
 
-    // ユーザーが直近で選択した MMTS 音声 packet_id
+    // ユーザーが選択した MMTS 音声 packet_id
+    // DPlayer の音声 UI は primary/secondary 前提のため、MMTS では packet_id を PlayerController 側で保持する
+    private mmts_preferred_audio_packet_id: number | null = null;
+
+    // mmts.js に選択を要求済みの MMTS 音声 packet_id
     // 古い MMTS_AUDIO_TRACKS イベントで設定表示が巻き戻るのを防ぐために使う
     private mmts_selected_audio_packet_id_override: number | null = null;
 
@@ -2503,14 +2507,26 @@ class PlayerController {
             return;
         }
 
-        const tracks = audio_tracks.tracks as any[];
-        const selected_packet_id = this.mmts_selected_audio_packet_id_override ?? audio_tracks.selectedPacketId;
+        const tracks = (audio_tracks.tracks as any[]).filter((track) => this.getMMTSAudioTrackPacketId(track) !== null);
+        const reported_selected_packet_id = typeof audio_tracks.selectedPacketId === 'number' ? audio_tracks.selectedPacketId : null;
         if (
             this.mmts_selected_audio_packet_id_override !== null &&
-            audio_tracks.selectedPacketId === this.mmts_selected_audio_packet_id_override
+            reported_selected_packet_id === this.mmts_selected_audio_packet_id_override
         ) {
             this.mmts_selected_audio_packet_id_override = null;
         }
+        const preferred_track = this.mmts_preferred_audio_packet_id !== null ?
+            tracks.find((track) => this.getMMTSAudioTrackPacketId(track) === this.mmts_preferred_audio_packet_id) :
+            undefined;
+        const should_restore_preferred_track =
+            preferred_track !== undefined &&
+            reported_selected_packet_id !== this.mmts_preferred_audio_packet_id &&
+            this.mmts_selected_audio_packet_id_override !== this.mmts_preferred_audio_packet_id;
+        const selected_packet_id =
+            this.mmts_selected_audio_packet_id_override ??
+            (preferred_track !== undefined ? this.getMMTSAudioTrackPacketId(preferred_track) : null) ??
+            reported_selected_packet_id ??
+            this.getMMTSAudioTrackPacketId(tracks.find((track) => track.selected === true));
 
         const audio_panel = this.player.container.querySelector<HTMLDivElement>('.dplayer-setting-audio-panel');
         if (audio_panel === null) {
@@ -2529,15 +2545,20 @@ class PlayerController {
         }
 
         for (const track of tracks) {
+            const packet_id = this.getMMTSAudioTrackPacketId(track);
+            if (packet_id === null) {
+                continue;
+            }
+
             const item = document.createElement('div');
-            const selected = track.packetId === selected_packet_id ||
+            const selected = packet_id === selected_packet_id ||
                 (selected_packet_id === undefined && track.selected === true);
             item.className = [
                 'dplayer-setting-audio-item',
                 selected ? 'dplayer-setting-audio-current' : '',
             ].filter(Boolean).join(' ');
-            item.dataset.audio = `mmts-${track.packetId}`;
-            item.dataset.audioPacketId = String(track.packetId);
+            item.dataset.audio = `mmts-${packet_id}`;
+            item.dataset.audioPacketId = String(packet_id);
 
             const toggle = document.createElement('div');
             toggle.className = 'dplayer-toggle';
@@ -2550,30 +2571,71 @@ class PlayerController {
             item.appendChild(label);
 
             item.addEventListener('click', () => {
-                if (this.player === null) {
-                    return;
-                }
-
-                const mpegts_player = this.player.plugins.mpegts as any;
-                if (mpegts_player?.selectAudioTrack === undefined) {
-                    return;
-                }
-
-                mpegts_player.selectAudioTrack(track.packetId);
-                this.mmts_selected_audio_packet_id_override = track.packetId;
-                this.syncMMTSAudioTrackSelection(track.packetId, this.formatMMTSAudioTrackLabel(track));
-                this.player.template.settingBox.classList.remove('dplayer-setting-box-audio');
-                this.player.notice(`音声を ${this.formatMMTSAudioTrackLabel(track)} に切り替えました。`);
+                this.selectMMTSAudioTrack(track, true);
             });
 
             audio_panel.appendChild(item);
         }
 
-        const selected_track = tracks.find((track) => track.packetId === selected_packet_id) ??
+        const selected_track = tracks.find((track) => this.getMMTSAudioTrackPacketId(track) === selected_packet_id) ??
             tracks.find((track) => track.selected === true);
         if (selected_track !== undefined) {
-            this.syncMMTSAudioTrackSelection(selected_track.packetId, this.formatMMTSAudioTrackLabel(selected_track));
+            const selected_track_packet_id = this.getMMTSAudioTrackPacketId(selected_track);
+            if (selected_track_packet_id !== null) {
+                this.syncMMTSAudioTrackSelection(selected_track_packet_id, this.formatMMTSAudioTrackLabel(selected_track));
+            }
         }
+
+        if (should_restore_preferred_track === true) {
+            // 新しい mpegts.js Player で音声トラック情報が揃ったあと、ユーザーが選んだ packet_id を復元する。
+            Promise.resolve().then(() => {
+                this.selectMMTSAudioTrack(preferred_track, false);
+            });
+        }
+    }
+
+
+    /**
+     * MMTS 音声トラックを packet_id で選択する
+     */
+    private selectMMTSAudioTrack(track: any, show_notice: boolean): void {
+        if (this.player === null) {
+            return;
+        }
+
+        const packet_id = this.getMMTSAudioTrackPacketId(track);
+        if (packet_id === null) {
+            return;
+        }
+
+        const mpegts_player = this.player.plugins.mpegts as any;
+        if (mpegts_player?.selectAudioTrack === undefined) {
+            return;
+        }
+
+        const label = this.formatMMTSAudioTrackLabel(track);
+        this.mmts_preferred_audio_packet_id = packet_id;
+        this.mmts_selected_audio_packet_id_override = packet_id;
+        mpegts_player.selectAudioTrack(packet_id);
+        this.syncMMTSAudioTrackSelection(packet_id, label);
+        this.player.template.settingBox.classList.remove('dplayer-setting-box-audio');
+        if (show_notice === true) {
+            this.player.notice(`音声を ${label} に切り替えました。`);
+        }
+    }
+
+
+    /**
+     * MMTS 音声トラック情報から packet_id を取り出す
+     */
+    private getMMTSAudioTrackPacketId(track: any): number | null {
+        if (track === undefined || track === null || typeof track.packetId !== 'number') {
+            return null;
+        }
+        if (Number.isInteger(track.packetId) === false) {
+            return null;
+        }
+        return track.packetId;
     }
 
 
