@@ -1,0 +1,565 @@
+[2026/06/27 22:53:56.110] INFO:     /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: New recording or copying file detected.
+[2026/06/27 22:53:56.111] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File size is 0. ignored.
+[2026/06/27 22:53:57.015] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:53:58.220] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:53:59.525] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:00.730] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:02.034] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:03.187] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:04.491] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:05.797] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:07.000] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:08.304] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:09.508] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:10.812] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:12.016] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:13.319] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:14.523] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:14.624] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:15.828] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:17.031] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:17.133] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:18.336] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:19.641] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:20.845] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:22.150] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:23.354] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:23.456] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:24.662] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:25.867] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:25.969] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:27.173] DEBUG:    /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File size changed.
+[2026/06/27 22:54:27.173] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:28.479] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:29.684] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:30.989] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:32.194] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:32.296] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:33.500] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:34.704] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:36.008] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:37.213] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:37.314] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:38.518] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:39.722] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:39.824] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:40.978] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:42.282] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:43.487] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:44.792] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:45.997] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:46.099] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:47.305] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:48.511] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:48.614] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:49.819] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:51.124] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:52.329] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:53.635] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:54.840] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:56.145] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:57.350] DEBUG:    /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File size changed.
+[2026/06/27 22:54:57.351] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:58.656] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:59.862] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:54:59.964] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:01.170] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:02.376] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:02.478] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:03.683] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:04.989] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:06.192] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:07.497] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:08.055] INFO:     Channels updating...
+[2026/06/27 22:55:08.072] INFO:     Channels update complete. (0.017 sec)
+[2026/06/27 22:55:08.231] INFO:     Programs updating...
+[2026/06/27 22:55:08.702] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:08.804] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:09.503] DEBUG:    Delete Program: NID4-SID151-EID3042
+[2026/06/27 22:55:09.503] DEBUG:    Delete Program: NID4-SID245-EID43588
+[2026/06/27 22:55:09.503] DEBUG:    Delete Program: NID4-SID256-EID47890
+[2026/06/27 22:55:09.692] INFO:     Programs update complete. (1.461 sec)
+[2026/06/27 22:55:09.957] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:11.162] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:11.265] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:12.469] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:13.774] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:14.979] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:16.284] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:17.488] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:18.792] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:19.997] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:21.303] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:22.609] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:23.814] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:25.019] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:25.122] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:26.325] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:27.628] DEBUG:    /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File size changed.
+[2026/06/27 22:55:27.629] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:28.833] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:30.138] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:31.343] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:31.445] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:32.648] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:33.851] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:33.952] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:35.156] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:36.461] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:37.667] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:38.972] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:40.177] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:41.483] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:42.689] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:43.994] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:45.149] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:45.250] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:46.454] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:47.659] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:47.762] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:48.968] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:50.274] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:51.479] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:52.786] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:53.990] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:54.093] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:55.298] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:56.504] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:56.606] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:57.809] DEBUG:    /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File size changed.
+[2026/06/27 22:55:57.810] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:55:59.115] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:00.320] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:01.626] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:02.831] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:04.136] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:05.340] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:06.646] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:07.852] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:07.954] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:09.160] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:10.364] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:10.466] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:11.669] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:12.973] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:14.177] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:15.481] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:16.685] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:17.989] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:19.144] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:19.246] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:20.451] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:21.756] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:22.961] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:24.266] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:25.471] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:26.776] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:27.980] DEBUG:    /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File size changed.
+[2026/06/27 22:56:27.981] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:29.286] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:30.490] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:31.794] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:33.099] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:34.302] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:35.606] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:36.810] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:38.115] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:39.319] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:40.623] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:41.828] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:41.931] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:43.136] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:44.441] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:45.647] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:46.953] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:48.157] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:49.463] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:50.667] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:51.972] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:53.177] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:54.483] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:55.688] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:55.791] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:56.945] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:58.248] DEBUG:    /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File size changed.
+[2026/06/27 22:56:58.249] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:56:59.456] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:00.761] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:01.965] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:03.271] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:04.475] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:04.576] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:05.780] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:07.084] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:08.288] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:09.592] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:10.797] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:12.102] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:13.306] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:14.612] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:15.917] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:17.123] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:18.428] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:19.633] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:20.940] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:22.145] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:23.450] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:24.604] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:24.706] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:25.912] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:27.117] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:27.220] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:28.424] DEBUG:    /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File size changed.
+[2026/06/27 22:57:28.425] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:29.730] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:30.935] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:32.240] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:33.446] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:33.549] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:34.755] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:35.961] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:36.063] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:37.268] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:38.573] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:39.777] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:41.082] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:42.287] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:43.592] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:44.795] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:46.100] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:47.304] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:47.405] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:48.609] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:49.814] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:49.916] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:51.071] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:52.426] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:53.582] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:54.887] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:56.092] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:57.398] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:58.602] DEBUG:    /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File size changed.
+[2026/06/27 22:57:58.603] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:58.706] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:57:59.912] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:01.216] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:02.421] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:03.724] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:04.928] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:06.232] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:07.437] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:08.742] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:10.047] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:11.251] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:12.456] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:12.559] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:13.765] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:15.068] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:16.273] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:17.578] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:18.782] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:18.885] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:20.090] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:21.295] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:21.398] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:22.603] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:23.908] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:25.064] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:26.369] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:27.575] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:28.879] DEBUG:    /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File size changed.
+[2026/06/27 22:58:28.880] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:30.085] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:31.391] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:32.697] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:33.903] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:35.108] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:35.210] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:36.415] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:37.721] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:38.927] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:40.233] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:41.439] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:42.746] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:43.952] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:44.055] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:45.260] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:46.565] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:47.770] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:49.076] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:50.281] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:51.586] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:52.792] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:54.047] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:55.252] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:56.558] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:57.763] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:57.866] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:58:59.072] DEBUG:    /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File size changed.
+[2026/06/27 22:58:59.073] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:00.380] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:01.585] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:02.891] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:04.095] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:05.400] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:06.605] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:06.708] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:07.914] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:09.119] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:09.222] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:10.428] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:11.734] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:12.940] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:14.244] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:15.450] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:16.704] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:17.909] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:19.213] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:20.418] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:20.519] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:21.724] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:23.029] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:24.234] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:25.540] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:26.745] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:28.050] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:29.254] DEBUG:    /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File size changed.
+[2026/06/27 22:59:29.255] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:29.359] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:30.564] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:31.769] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:33.073] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:34.378] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:35.583] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:36.887] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:38.092] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:39.398] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:40.604] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:41.909] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:43.114] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:43.216] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:44.420] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:45.623] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:45.725] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:46.930] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:48.235] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:49.440] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:50.746] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:51.952] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:53.207] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:54.412] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:54.515] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:55.721] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:57.026] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:58.231] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 22:59:59.535] DEBUG:    /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File size changed.
+[2026/06/27 22:59:59.536] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 23:00:00.744] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 23:00:02.048] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 23:00:03.253] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 23:00:03.705] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: File is not recording. ignored.
+[2026/06/27 23:00:09.692] INFO:     Channels updating...
+[2026/06/27 23:00:09.709] INFO:     Channels update complete. (0.017 sec)
+[2026/06/27 23:00:10.085] INFO:     Programs updating...
+[2026/06/27 23:00:11.911] DEBUG:    Delete Program: NID4-SID151-EID3043
+[2026/06/27 23:00:11.911] DEBUG:    Delete Program: NID4-SID151-EID3044
+[2026/06/27 23:00:11.912] DEBUG:    Delete Program: NID4-SID161-EID25639
+[2026/06/27 23:00:11.912] DEBUG:    Delete Program: NID4-SID171-EID775
+[2026/06/27 23:00:11.912] DEBUG:    Delete Program: NID4-SID191-EID58190
+[2026/06/27 23:00:11.912] DEBUG:    Delete Program: NID4-SID211-EID30963
+[2026/06/27 23:00:11.913] DEBUG:    Delete Program: NID4-SID222-EID20412
+[2026/06/27 23:00:11.913] DEBUG:    Delete Program: NID4-SID141-EID7750
+[2026/06/27 23:00:11.913] DEBUG:    Delete Program: NID4-SID181-EID1364
+[2026/06/27 23:00:11.913] DEBUG:    Delete Program: NID4-SID236-EID62740
+[2026/06/27 23:00:11.913] DEBUG:    Delete Program: NID4-SID251-EID30225
+[2026/06/27 23:00:11.914] DEBUG:    Delete Program: NID4-SID244-EID52178
+[2026/06/27 23:00:11.915] DEBUG:    Delete Program: NID4-SID256-EID47891
+[2026/06/27 23:00:11.915] DEBUG:    Delete Program: NID4-SID200-EID4510
+[2026/06/27 23:00:11.915] DEBUG:    Delete Program: NID4-SID265-EID62909
+[2026/06/27 23:00:11.915] DEBUG:    Delete Program: NID4-SID260-EID21315
+[2026/06/27 23:00:11.915] DEBUG:    Delete Program: NID6-SID298-EID59569
+[2026/06/27 23:00:11.916] DEBUG:    Delete Program: NID6-SID339-EID54702
+[2026/06/27 23:00:11.916] DEBUG:    Delete Program: NID6-SID055-EID63030
+[2026/06/27 23:00:11.916] DEBUG:    Delete Program: NID6-SID218-EID53856
+[2026/06/27 23:00:11.916] DEBUG:    Delete Program: NID7-SID250-EID60759
+[2026/06/27 23:00:11.916] DEBUG:    Delete Program: NID7-SID292-EID960
+[2026/06/27 23:00:11.916] DEBUG:    Delete Program: NID7-SID301-EID31862
+[2026/06/27 23:00:11.916] DEBUG:    Delete Program: NID7-SID324-EID31244
+[2026/06/27 23:00:11.917] DEBUG:    Delete Program: NID7-SID331-EID37934
+[2026/06/27 23:00:11.917] DEBUG:    Delete Program: NID7-SID340-EID64427
+[2026/06/27 23:00:11.917] DEBUG:    Delete Program: NID7-SID354-EID48132
+[2026/06/27 23:00:11.917] DEBUG:    Delete Program: NID7-SID254-EID61294
+[2026/06/27 23:00:11.917] DEBUG:    Delete Program: NID7-SID330-EID52542
+[2026/06/27 23:00:11.917] DEBUG:    Delete Program: NID7-SID343-EID52359
+[2026/06/27 23:00:11.918] DEBUG:    Delete Program: NID7-SID310-EID59000
+[2026/06/27 23:00:11.918] DEBUG:    Delete Program: NID7-SID290-EID37389
+[2026/06/27 23:00:11.918] DEBUG:    Delete Program: NID7-SID316-EID53983
+[2026/06/27 23:00:11.918] DEBUG:    Delete Program: NID7-SID353-EID32580
+[2026/06/27 23:00:11.918] DEBUG:    Delete Program: NID7-SID262-EID54932
+[2026/06/27 23:00:11.919] DEBUG:    Delete Program: NID7-SID314-EID60236
+[2026/06/27 23:00:11.919] DEBUG:    Delete Program: NID7-SID161-EID37349
+[2026/06/27 23:00:11.920] DEBUG:    Delete Program: NID7-SID223-EID30726
+[2026/06/27 23:00:11.920] DEBUG:    Delete Program: NID7-SID295-EID39592
+[2026/06/27 23:00:11.920] DEBUG:    Delete Program: NID11-SID171-EID783
+[2026/06/27 23:00:11.921] DEBUG:    Delete Program: NID11-SID171-EID784
+[2026/06/27 23:00:11.921] DEBUG:    Delete Program: NID11-SID171-EID1093
+[2026/06/27 23:00:11.921] DEBUG:    Delete Program: NID11-SID171-EID2179
+[2026/06/27 23:00:11.921] DEBUG:    Delete Program: NID11-SID171-EID2439
+[2026/06/27 23:00:11.922] DEBUG:    Delete Program: NID11-SID171-EID2924
+[2026/06/27 23:00:12.673] INFO:     Programs update complete. (2.587 sec)
+[2026/06/27 23:00:23.240] INFO:     /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: Recording or copying has just completed or has already completed.
+[2026/06/27 23:00:24.218] DEBUG:    /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: FFprobe analysis completed.
+[2026/06/27 23:00:24.234] DEBUG:    /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: Detected preferred service_id 171 from FFprobe (nb_streams: 4, pcr_pid: 511).
+[2026/06/27 23:00:24.235] DEBUG:    /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: Using preferred service_id 171 from external analysis.
+[2026/06/27 23:00:24.252] DEBUG:    /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: MPEG-TS SDT/EIT analysis completed.
+[2026/06/27 23:00:24.315] INFO:     /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: Saved metadata to DB. (status: Recorded)
+[2026/06/27 23:00:24.316] INFO:     /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: Starting background analysis task...
+[2026/06/27 23:00:24.317] DEBUG:    /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: Tile layout -> interval: 5.0 sec, cols: 51, rows: 2, total: 74, image: 16320x360
+[2026/06/27 23:00:24.318] INFO:     /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: Detecting CM sections...
+[2026/06/27 23:00:24.318] INFO:     /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: Generating thumbnail... / Face detection mode: Human
+[2026/06/27 23:00:24.344] INFO:     /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: No CM sections detected. (0.03 sec)
+[2026/06/27 23:00:40.869] DEBUG:    /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: Extracted 50/74 frames
+[2026/06/27 23:00:50.276] INFO:     /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: All 74 frames extraction completed. (25.94 sec)
+[2026/06/27 23:00:50.519] DEBUG:    Score: (row:1, col:19):
+[2026/06/27 23:00:50.519] DEBUG:      Luminance STD: 68.91 / Contrast: 33.76 / Sharpness: 11.22 / Edge Density: 0.00
+[2026/06/27 23:00:50.519] DEBUG:      Entropy: 2.81 / Face Size: 0.00 / Color Balance: 0.00
+[2026/06/27 23:00:50.519] DEBUG:      Solid Color Penalty: -0.00 / Letterbox Penalty: -0.00 / Edge Penalty: -0.00
+[2026/06/27 23:00:50.519] DEBUG:      = Final Score: 116.70
+[2026/06/27 23:00:50.540] DEBUG:    Face detected. Face area ratio: 0.02 (row:1, col:20)
+[2026/06/27 23:00:50.546] DEBUG:    Score: (row:1, col:20):
+[2026/06/27 23:00:50.546] DEBUG:      Luminance STD: 47.50 / Contrast: 27.33 / Sharpness: 5.54 / Edge Density: 0.00
+[2026/06/27 23:00:50.546] DEBUG:      Entropy: 0.00 / Face Size: 0.49 / Color Balance: 0.00
+[2026/06/27 23:00:50.546] DEBUG:      Solid Color Penalty: -0.00 / Letterbox Penalty: -0.00 / Edge Penalty: -0.00
+[2026/06/27 23:00:50.546] DEBUG:      = Final Score: 80.86
+[2026/06/27 23:00:50.547] DEBUG:    Letterbox detected. Penalty applied. (row:1, col:46)
+[2026/06/27 23:00:50.575] DEBUG:    Face detected. Face area ratio: 0.02 (row:1, col:46)
+[2026/06/27 23:00:50.578] DEBUG:    Score: (row:1, col:46):
+[2026/06/27 23:00:50.578] DEBUG:      Luminance STD: 53.75 / Contrast: 26.63 / Sharpness: 9.41 / Edge Density: 8.99
+[2026/06/27 23:00:50.578] DEBUG:      Entropy: 0.55 / Face Size: 0.74 / Color Balance: 0.00
+[2026/06/27 23:00:50.578] DEBUG:      Solid Color Penalty: -0.00 / Letterbox Penalty: -50.00 / Edge Penalty: -0.00
+[2026/06/27 23:00:50.578] DEBUG:      = Final Score: 50.08
+[2026/06/27 23:00:50.622] DEBUG:    Score: (row:1, col:47):
+[2026/06/27 23:00:50.622] DEBUG:      Luminance STD: 44.16 / Contrast: 22.49 / Sharpness: 18.85 / Edge Density: 22.35
+[2026/06/27 23:00:50.622] DEBUG:      Entropy: 2.20 / Face Size: 0.00 / Color Balance: 0.00
+[2026/06/27 23:00:50.622] DEBUG:      Solid Color Penalty: -0.00 / Letterbox Penalty: -0.00 / Edge Penalty: -0.00
+[2026/06/27 23:00:50.622] DEBUG:      = Final Score: 110.06
+[2026/06/27 23:00:50.623] DEBUG:    Letterbox detected. Penalty applied. (row:1, col:48)
+[2026/06/27 23:00:50.624] DEBUG:    Border effect detected on edges: top(1.00/dark), right(1.00/dark) (row:1, col:48)
+[2026/06/27 23:00:50.651] DEBUG:    Score: (row:1, col:48):
+[2026/06/27 23:00:50.652] DEBUG:      Luminance STD: 38.08 / Contrast: 15.98 / Sharpness: 8.37 / Edge Density: 0.00
+[2026/06/27 23:00:50.652] DEBUG:      Entropy: 14.89 / Face Size: 0.00 / Color Balance: 0.00
+[2026/06/27 23:00:50.652] DEBUG:      Solid Color Penalty: -0.00 / Letterbox Penalty: -50.00 / Edge Penalty: -45.00
+[2026/06/27 23:00:50.652] DEBUG:      = Final Score: -17.69
+[2026/06/27 23:00:50.679] DEBUG:    Score: (row:1, col:49):
+[2026/06/27 23:00:50.679] DEBUG:      Luminance STD: 34.64 / Contrast: 20.33 / Sharpness: 16.05 / Edge Density: 4.06
+[2026/06/27 23:00:50.679] DEBUG:      Entropy: 3.62 / Face Size: 0.00 / Color Balance: 0.00
+[2026/06/27 23:00:50.679] DEBUG:      Solid Color Penalty: -0.00 / Letterbox Penalty: -0.00 / Edge Penalty: -0.00
+[2026/06/27 23:00:50.679] DEBUG:      = Final Score: 78.70
+[2026/06/27 23:00:50.712] DEBUG:    Score: (row:1, col:50):
+[2026/06/27 23:00:50.713] DEBUG:      Luminance STD: 33.52 / Contrast: 18.97 / Sharpness: 15.96 / Edge Density: 2.63
+[2026/06/27 23:00:50.713] DEBUG:      Entropy: 4.11 / Face Size: 0.00 / Color Balance: 0.00
+[2026/06/27 23:00:50.713] DEBUG:      Solid Color Penalty: -0.00 / Letterbox Penalty: -0.00 / Edge Penalty: -0.00
+[2026/06/27 23:00:50.713] DEBUG:      = Final Score: 75.19
+[2026/06/27 23:00:50.739] DEBUG:    Face detected. Face area ratio: 0.03 (row:1, col:51)
+[2026/06/27 23:00:50.745] DEBUG:    Score: (row:1, col:51):
+[2026/06/27 23:00:50.745] DEBUG:      Luminance STD: 45.03 / Contrast: 24.91 / Sharpness: 26.00 / Edge Density: 10.72
+[2026/06/27 23:00:50.745] DEBUG:      Entropy: 0.00 / Face Size: 0.78 / Color Balance: 0.00
+[2026/06/27 23:00:50.745] DEBUG:      Solid Color Penalty: -0.00 / Letterbox Penalty: -0.00 / Edge Penalty: -0.00
+[2026/06/27 23:00:50.746] DEBUG:      = Final Score: 107.44
+[2026/06/27 23:00:50.774] DEBUG:    Score: (row:2, col:1):
+[2026/06/27 23:00:50.774] DEBUG:      Luminance STD: 50.92 / Contrast: 27.80 / Sharpness: 50.42 / Edge Density: 8.29
+[2026/06/27 23:00:50.774] DEBUG:      Entropy: 4.17 / Face Size: 0.00 / Color Balance: 0.00
+[2026/06/27 23:00:50.774] DEBUG:      Solid Color Penalty: -0.00 / Letterbox Penalty: -0.00 / Edge Penalty: -0.00
+[2026/06/27 23:00:50.774] DEBUG:      = Final Score: 141.59
+[2026/06/27 23:00:50.774] DEBUG:    Best frame selected. (face found / row:1, col:51)
+[2026/06/27 23:00:50.774] INFO:     /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: Frame scoring completed. (0.50 sec)
+[2026/06/27 23:00:50.787] INFO:     /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: Representative thumbnail saved. (0.01 sec)
+[2026/06/27 23:00:51.797] INFO:     /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: Tile image generation completed. (1.01 sec)
+[2026/06/27 23:00:51.959] INFO:     /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: Thumbnail generation completed. (Total: 27.64 sec)
+[2026/06/27 23:00:51.960] DEBUG:    Thumbnail tile -> 3faa95ca7240ba588cb7d0a623f94aeb_tile.webp
+[2026/06/27 23:00:51.960] DEBUG:    Representative -> 3faa95ca7240ba588cb7d0a623f94aeb.webp
+[2026/06/27 23:00:51.960] INFO:     /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: Background analysis task completed.
+[2026/06/27 23:02:01.950] INFO:     /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].hevc.ts: New recording or copying file detected.
+[2026/06/27 23:02:01.950] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].hevc.ts: File size is 0. ignored.
+[2026/06/27 23:02:02.401] DEBUG:    /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].hevc.ts: FFprobe analysis completed.
+[2026/06/27 23:02:02.410] DEBUG:    /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].hevc.ts: Detected preferred service_id 171 from FFprobe (nb_streams: 4, pcr_pid: 511).
+[2026/06/27 23:02:02.411] DEBUG:    /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].hevc.ts: Using preferred service_id 171 from external analysis.
+[2026/06/27 23:02:02.416] DEBUG:    /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].hevc.ts: MPEG-TS SDT/EIT analysis completed.
+[2026/06/27 23:02:02.437] DEBUG:    /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].hevc.ts: This file is recording or copying. (duration 76.2s >= 60s)
+[2026/06/27 23:02:02.441] INFO:     /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].hevc.ts: Saved metadata to DB. (status: Recording)
+[2026/06/27 23:02:03.002] INFO:     /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].ts: Deleted record for removed file.
+[2026/06/27 23:02:19.320] INFO:     /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].hevc.ts: Recording or copying has just completed or has already completed.
+[2026/06/27 23:02:19.631] DEBUG:    /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].hevc.ts: FFprobe analysis completed.
+[2026/06/27 23:02:19.640] DEBUG:    /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].hevc.ts: Detected preferred service_id 171 from FFprobe (nb_streams: 4, pcr_pid: 511).
+[2026/06/27 23:02:19.641] DEBUG:    /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].hevc.ts: Using preferred service_id 171 from external analysis.
+[2026/06/27 23:02:19.648] DEBUG:    /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].hevc.ts: MPEG-TS SDT/EIT analysis completed.
+[2026/06/27 23:02:19.673] INFO:     /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].hevc.ts: Updated metadata to DB. (status: Recorded)
+[2026/06/27 23:02:19.673] INFO:     /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].hevc.ts: Starting background analysis task...
+[2026/06/27 23:02:19.674] DEBUG:    /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].hevc.ts: Tile layout -> interval: 5.0 sec, cols: 51, rows: 2, total: 74, image: 16320x360
+[2026/06/27 23:02:19.674] INFO:     /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].hevc.ts: Detecting CM sections...
+[2026/06/27 23:02:19.674] INFO:     /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].hevc.ts: Generating thumbnail... / Face detection mode: Human
+[2026/06/27 23:02:19.687] INFO:     /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].hevc.ts: No CM sections detected. (0.01 sec)
+[2026/06/27 23:02:21.194] DEBUG:    /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].hevc.ts: Extracted 50/74 frames
+[2026/06/27 23:02:22.007] WARNING:  /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].hevc.ts: Failed to extract frame at 365.00s. Using black image.
+[2026/06/27 23:02:22.007] INFO:     /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].hevc.ts: All 74 frames extraction completed. (2.32 sec)
+[2026/06/27 23:02:22.190] DEBUG:    Score: (row:1, col:19):
+[2026/06/27 23:02:22.190] DEBUG:      Luminance STD: 57.17 / Contrast: 33.54 / Sharpness: 4.60 / Edge Density: 0.00
+[2026/06/27 23:02:22.190] DEBUG:      Entropy: 0.00 / Face Size: 0.00 / Color Balance: 0.00
+[2026/06/27 23:02:22.190] DEBUG:      Solid Color Penalty: -0.00 / Letterbox Penalty: -0.00 / Edge Penalty: -0.00
+[2026/06/27 23:02:22.190] DEBUG:      = Final Score: 95.31
+[2026/06/27 23:02:22.208] DEBUG:    Score: (row:1, col:20):
+[2026/06/27 23:02:22.208] DEBUG:      Luminance STD: 68.40 / Contrast: 39.41 / Sharpness: 10.17 / Edge Density: 14.33
+[2026/06/27 23:02:22.208] DEBUG:      Entropy: 0.00 / Face Size: 0.00 / Color Balance: 0.00
+[2026/06/27 23:02:22.208] DEBUG:      Solid Color Penalty: -0.00 / Letterbox Penalty: -0.00 / Edge Penalty: -0.00
+[2026/06/27 23:02:22.208] DEBUG:      = Final Score: 132.30
+[2026/06/27 23:02:22.209] DEBUG:    Letterbox detected. Penalty applied. (row:1, col:46)
+[2026/06/27 23:02:22.210] DEBUG:    Border effect detected on edges: left(0.97/dark), right(1.00/dark) (row:1, col:46)
+[2026/06/27 23:02:22.231] DEBUG:    Score: (row:1, col:46):
+[2026/06/27 23:02:22.231] DEBUG:      Luminance STD: 47.29 / Contrast: 24.01 / Sharpness: 20.76 / Edge Density: 30.53
+[2026/06/27 23:02:22.231] DEBUG:      Entropy: 0.21 / Face Size: 0.00 / Color Balance: 0.00
+[2026/06/27 23:02:22.231] DEBUG:      Solid Color Penalty: -0.00 / Letterbox Penalty: -50.00 / Edge Penalty: -44.39
+[2026/06/27 23:02:22.231] DEBUG:      = Final Score: 28.40
+[2026/06/27 23:02:22.232] DEBUG:    Letterbox detected. Penalty applied. (row:1, col:47)
+[2026/06/27 23:02:22.233] DEBUG:    Border effect detected on edges: top(1.00/dark), right(1.00/dark) (row:1, col:47)
+[2026/06/27 23:02:22.246] DEBUG:    Score: (row:1, col:47):
+[2026/06/27 23:02:22.246] DEBUG:      Luminance STD: 45.79 / Contrast: 16.66 / Sharpness: 14.82 / Edge Density: 0.00
+[2026/06/27 23:02:22.246] DEBUG:      Entropy: 15.99 / Face Size: 0.00 / Color Balance: 0.00
+[2026/06/27 23:02:22.246] DEBUG:      Solid Color Penalty: -0.00 / Letterbox Penalty: -50.00 / Edge Penalty: -45.00
+[2026/06/27 23:02:22.246] DEBUG:      = Final Score: -1.74
+[2026/06/27 23:02:22.247] DEBUG:    Letterbox detected. Penalty applied. (row:1, col:48)
+[2026/06/27 23:02:22.248] DEBUG:    Border effect detected on edges: top(1.00/dark), right(1.00/dark) (row:1, col:48)
+[2026/06/27 23:02:22.262] DEBUG:    Score: (row:1, col:48):
+[2026/06/27 23:02:22.262] DEBUG:      Luminance STD: 45.79 / Contrast: 16.66 / Sharpness: 14.82 / Edge Density: 0.00
+[2026/06/27 23:02:22.262] DEBUG:      Entropy: 15.99 / Face Size: 0.00 / Color Balance: 0.00
+[2026/06/27 23:02:22.262] DEBUG:      Solid Color Penalty: -0.00 / Letterbox Penalty: -50.00 / Edge Penalty: -45.00
+[2026/06/27 23:02:22.262] DEBUG:      = Final Score: -1.74
+[2026/06/27 23:02:22.263] DEBUG:    Letterbox detected. Penalty applied. (row:1, col:49)
+[2026/06/27 23:02:22.279] DEBUG:    Score: (row:1, col:49):
+[2026/06/27 23:02:22.279] DEBUG:      Luminance STD: 52.90 / Contrast: 29.76 / Sharpness: 21.23 / Edge Density: 9.21
+[2026/06/27 23:02:22.279] DEBUG:      Entropy: 0.00 / Face Size: 0.00 / Color Balance: 0.00
+[2026/06/27 23:02:22.279] DEBUG:      Solid Color Penalty: -0.00 / Letterbox Penalty: -50.00 / Edge Penalty: -0.00
+[2026/06/27 23:02:22.279] DEBUG:      = Final Score: 63.10
+[2026/06/27 23:02:22.280] DEBUG:    Letterbox detected. Penalty applied. (row:1, col:50)
+[2026/06/27 23:02:22.294] DEBUG:    Score: (row:1, col:50):
+[2026/06/27 23:02:22.294] DEBUG:      Luminance STD: 52.90 / Contrast: 29.76 / Sharpness: 21.23 / Edge Density: 9.21
+[2026/06/27 23:02:22.294] DEBUG:      Entropy: 0.00 / Face Size: 0.00 / Color Balance: 0.00
+[2026/06/27 23:02:22.294] DEBUG:      Solid Color Penalty: -0.00 / Letterbox Penalty: -50.00 / Edge Penalty: -0.00
+[2026/06/27 23:02:22.294] DEBUG:      = Final Score: 63.10
+[2026/06/27 23:02:22.307] DEBUG:    Score: (row:1, col:51):
+[2026/06/27 23:02:22.307] DEBUG:      Luminance STD: 47.41 / Contrast: 27.52 / Sharpness: 3.28 / Edge Density: 0.00
+[2026/06/27 23:02:22.307] DEBUG:      Entropy: 1.09 / Face Size: 0.00 / Color Balance: 0.00
+[2026/06/27 23:02:22.307] DEBUG:      Solid Color Penalty: -0.00 / Letterbox Penalty: -0.00 / Edge Penalty: -0.00
+[2026/06/27 23:02:22.307] DEBUG:      = Final Score: 79.30
+[2026/06/27 23:02:22.321] DEBUG:    Score: (row:2, col:1):
+[2026/06/27 23:02:22.321] DEBUG:      Luminance STD: 55.87 / Contrast: 31.40 / Sharpness: 43.54 / Edge Density: 6.67
+[2026/06/27 23:02:22.321] DEBUG:      Entropy: 1.80 / Face Size: 0.00 / Color Balance: 0.00
+[2026/06/27 23:02:22.321] DEBUG:      Solid Color Penalty: -0.00 / Letterbox Penalty: -0.00 / Edge Penalty: -0.00
+[2026/06/27 23:02:22.321] DEBUG:      = Final Score: 139.28
+[2026/06/27 23:02:22.322] DEBUG:    Best frame selected. (face not found / row:2, col:1)
+[2026/06/27 23:02:22.322] INFO:     /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].hevc.ts: Frame scoring completed. (0.31 sec)
+[2026/06/27 23:02:22.329] INFO:     /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].hevc.ts: Representative thumbnail saved. (0.01 sec)
+[2026/06/27 23:02:23.011] INFO:     /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].hevc.ts: Tile image generation completed. (0.68 sec)
+[2026/06/27 23:02:23.075] INFO:     /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].hevc.ts: Thumbnail generation completed. (Total: 3.40 sec)
+[2026/06/27 23:02:23.075] DEBUG:    Thumbnail tile -> e6232f9a7901ba60b4b9067d776dcf4b_tile.webp
+[2026/06/27 23:02:23.075] DEBUG:    Representative -> e6232f9a7901ba60b4b9067d776dcf4b.webp
+[2026/06/27 23:02:23.075] INFO:     /mnt/recording/20260627_わたしのヒュッゲ【パラサーファー・高尾千香子（後編）】[字].hevc.ts: Background analysis task completed.

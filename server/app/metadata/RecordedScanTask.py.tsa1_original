@@ -45,20 +45,6 @@ class FileRecordingInfo:
 
 
 @dataclass(slots=True)
-class FileRecordingInfoSnapshot:
-    """
-    FileRecordingInfo を更新する直前の録画中ファイル状態を保持する軽量データ構造
-    - last_modified: ファイルの最終更新日時
-    - file_size: ファイルのサイズ
-    - mtime_continuous_start_at: ファイルの最終更新日時が継続的に更新されている場合の継続更新の開始日時
-    """
-
-    last_modified: datetime
-    file_size: int
-    mtime_continuous_start_at: datetime | None
-
-
-@dataclass(slots=True)
 class RecordedVideoSummary:
     """
     RecordedScanTask.runBatchScan() 内でのメモリ使用量を抑えるため、RecordedVideo のうち必要最低限の情報のみを保持する軽量データ構造
@@ -501,7 +487,6 @@ class RecordedScanTask:
         file_path: anyio.Path,
         original_path: anyio.Path | None = None,
         existing_db_recorded_videos: dict[anyio.Path, RecordedVideoSummary] | None = None,
-        recording_info_snapshot: FileRecordingInfoSnapshot | None = None,
         force_update: bool = False,
         wait_background_analysis: bool = False,
     ) -> None:
@@ -514,8 +499,6 @@ class RecordedScanTask:
             original_path (anyio.Path | None): シンボリックリンクなどで取得した元のファイルパス
             existing_db_recorded_videos (dict[anyio.Path, RecordedVideoSummary] | None): 既に DB に永続化されている録画ファイルパスと RecordedVideo のサマリーデータのマッピング
                 (ファイル変更イベントから呼ばれた場合、watchfiles 初期化時に取得した全レコードと今で状態が一致しているとは限らないため、None が入る)
-            recording_info_snapshot (FileRecordingInfoSnapshot | None): ファイル変更イベントで _recording_files を更新する直前の録画中ファイル状態
-                (None の場合は現在 _recording_files に保存されている状態を比較対象にする)
             force_update (bool): 既に DB に登録されている録画ファイルのメタデータを強制的に再解析するかどうか (デフォルト: False)
             wait_background_analysis (bool): バックグラウンド解析が完了するまで待つかどうか (デフォルト: False)
         """
@@ -623,18 +606,8 @@ class RecordedScanTask:
                         return
                     # まだ DB に登録されていない＆ファイルサイズが前回から変化していない場合
                     recording_info = self._recording_files[file_path]
-                    # ファイル変更イベント経由では、__handleFileChange() が _recording_files を現在値に更新した後にこのメソッドを呼ぶ。
-                    # その更新済み状態を「前回値」として扱うと、録画中にサイズが増えているファイルでも file_size == last_size になりやすい。
-                    # そのため、呼び出し元が更新前スナップショットを渡した場合はそちらを比較対象にする。
-                    recording_info_for_comparison = recording_info_snapshot
-                    if recording_info_for_comparison is None:
-                        recording_info_for_comparison = FileRecordingInfoSnapshot(
-                            last_modified = recording_info.last_modified,
-                            file_size = recording_info.file_size,
-                            mtime_continuous_start_at = recording_info.mtime_continuous_start_at,
-                        )
-                    last_size = recording_info_for_comparison.file_size
-                    mtime_continuous_start_at = recording_info_for_comparison.mtime_continuous_start_at
+                    last_size = recording_info.file_size
+                    mtime_continuous_start_at = recording_info.mtime_continuous_start_at
                     if file_size == last_size:
                         # 最終更新日時の継続更新中でない場合はスキップ
                         if mtime_continuous_start_at is None:
@@ -1372,11 +1345,6 @@ class RecordedScanTask:
                 last_checked = recording_info.last_checked
                 last_size = recording_info.file_size
                 mtime_continuous_start_at = recording_info.mtime_continuous_start_at
-                recording_info_snapshot = FileRecordingInfoSnapshot(
-                    last_modified = recording_info.last_modified,
-                    file_size = last_size,
-                    mtime_continuous_start_at = mtime_continuous_start_at,
-                )
 
                 # 前回のチェックから UPDATE_THROTTLE_SECONDS 秒以上経過していない場合はログを間引く（状態自体は更新する）
                 throttle_event = False
@@ -1408,11 +1376,7 @@ class RecordedScanTask:
                 recording_info.mtime_continuous_start_at = mtime_continuous_start_at
 
                 # メタデータ解析を実行
-                await self.processRecordedFile(
-                    file_path,
-                    original_file_path,
-                    recording_info_snapshot = recording_info_snapshot,
-                )
+                await self.processRecordedFile(file_path, original_file_path)
 
             # まだ録画中とマークされていないファイルの処理
             else:

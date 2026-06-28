@@ -1,0 +1,50 @@
+しかし、このエラーは30分の番組でもでているため、解消を望む。そこで、KonomiTVの録画ファイル監視・メタデータ解析コマンドを、NHK総合1・東京の番組を録画して、録画中の試験を行うこと。ただし、録画先は/mnt/recordingとし、必ず録画ファイルは作業終了後に消すこと。
+対処法を考えて
+~/git/EDCB/.codex/error-try2.md
+に追記して。
+
+codex resume 019f0871-fad3-7e02-9e8b-a0eb7c43fb62
+
+
+~/git/EDCB/.codex/konomilog.txt
+
+・それぞれの変更ファイルごとに、元ファイルはファイル名を変更して保持し、元ファイル（名称変更）と新ファイル（名称維持）の2つを作成。
+・変更したファイルの新旧名称と、もとのコードへの復旧方法をまとめて
+~/git/EDCB/.codex/try2_codediff.md
+にまとめること。
+・変更した点を、linux_reserve_feature.mdと同様のフォーマットで、
+~/git/EDCB/.codex/try2_change.md
+にまとめること。
+・現在EDCBでは録画が進行していないので、sudo systemctl restart edcb などの再起動コマンドを実行してよい。
+
+
+
+
+~/git/KonomiTV/.codex/error-try-edcb.mdを見て、問題の原因を述べてほしい。
+まだ検証案やファイル変更は実施せず、原因としてcodexがソースコードやログを読んで考えたことを述べてほしい。
+つまり、error-try-edcb.mdに書いてある原因の推定は無視して一度考えてほしい。
+
+" MPEG-2 録画中 TS と  同じ「既に _recording_files に入っていて、サイズ更新後に process へ渡される」経路を通っていない可能性"を検証して。
+「なぜ別経路を通るのか」まで説明できたら、~/git/KonomiTV/.codex/ts-analysis1.mdに原因を記載して。
+
+別経路をたどる原因は、KonomiTVのソースコードで説明できなければならない。
+
+次の検証を再開してほしい。ただし事実として、検証予約はまだ実行されていない。再予約を実行してほしい。
+
+NHK総合1・東京の番組を、録画先は/mnt/recordingとし、5-10分録画。
+
+録画設定プリセット"Amatsukaze_NVENC-HEVC-2K-auto-auto"を使用してエンコード。
+
+録画中とエンコード中で、KonomiTVで実行されている録画ファイル監視・メタデータ解析コマンドのログを調べ、
+
+必ず録画ファイルは作業終了後に消すこと。
+
+必要に応じて、~/git/EDCBも確認すること。ただし、この検証とは関係のない録画中の番組への影響を避けるため、**systemctl restart edcbは絶対に行わない**こと
+
+この問題のcodexが考える原因と対処法を
+~/git/KonomiTV/.codex/ts-analysis2.md
+にまとめる。
+
+13:40になったら録画ファイルとログの監視に戻ってね
+codex resume 019f0bb8-5b71-7420-8bb4-e5c3f8855534
+
