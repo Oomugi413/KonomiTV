@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Literal
 
 from app import logging, schemas
 from app.constants import JST
 from app.utils import NormalizeToJSTDatetime
 from app.utils.TSInformation import TSInformation
+
+
+_SatelliteChannelType = Literal['BS', 'CS', 'CATV', 'SKY', 'BS4K']
+_MMTSMediaType = Literal['video', 'audio', 'unknown']
+_AudioChannel = Literal['Monaural', 'Stereo', '5.1ch']
 
 
 @dataclass(slots=True)
@@ -65,9 +72,9 @@ class _MMTSMediaInfo:
     video_resolution_width: int
     video_resolution_height: int
     video_frame_rate: float
-    primary_audio_channel: str
+    primary_audio_channel: _AudioChannel
     primary_audio_sampling_rate: int
-    secondary_audio_channel: str | None
+    secondary_audio_channel: _AudioChannel | None
     secondary_audio_sampling_rate: int | None
 
 
@@ -285,7 +292,7 @@ class MMTSInfoAnalyzer:
         return windows
 
     @classmethod
-    def __iterTLVCompressedIPPayloads(cls, data: bytes):
+    def __iterTLVCompressedIPPayloads(cls, data: bytes) -> Iterator[bytes]:
         """
         TLV から Compressed IP packet payload を列挙する
 
@@ -736,7 +743,7 @@ class MMTSInfoAnalyzer:
         video_width = 3840
         video_height = 2160
         video_frame_rate = 59.94
-        audio_channels: list[str] = []
+        audio_channels: list[_AudioChannel] = []
         audio_sampling_rates: list[int] = []
 
         for table in tables:
@@ -778,7 +785,7 @@ class MMTSInfoAnalyzer:
             secondary_audio_sampling_rate = secondary_audio_sampling_rate,
         )
 
-    def __parseMPTAssets(self, data: bytes) -> list[tuple[str, list[tuple[int, bytes]]]]:
+    def __parseMPTAssets(self, data: bytes) -> list[tuple[_MMTSMediaType, list[tuple[int, bytes]]]]:
         """
         MPT から asset type と descriptor loop を解析する
 
@@ -786,10 +793,10 @@ class MMTSInfoAnalyzer:
             data (bytes): MPT table
 
         Returns:
-            list[tuple[str, list[tuple[int, bytes]]]]: media_type と descriptor 一覧
+            list[tuple[_MMTSMediaType, list[tuple[int, bytes]]]]: media_type と descriptor 一覧
         """
 
-        assets: list[tuple[str, list[tuple[int, bytes]]]] = []
+        assets: list[tuple[_MMTSMediaType, list[tuple[int, bytes]]]] = []
         if len(data) < 8 or data[0] != self.TABLE_ID_MPT:
             return assets
         table_length = int.from_bytes(data[2:4], 'big')
@@ -884,8 +891,16 @@ class MMTSInfoAnalyzer:
             schemas.Channel: チャンネル情報
         """
 
-        channel_type = TSInformation.getNetworkType(service.network_id)
-        if channel_type == 'OTHER':
+        network_type = TSInformation.getNetworkType(service.network_id)
+        if network_type == 'BS':
+            channel_type: _SatelliteChannelType = 'BS'
+        elif network_type == 'CS':
+            channel_type = 'CS'
+        elif network_type == 'CATV':
+            channel_type = 'CATV'
+        elif network_type == 'SKY':
+            channel_type = 'SKY'
+        else:
             channel_type = 'BS4K'
         remocon_id = TSInformation.calculateRemoconID(channel_type, service.service_id)
         channel_number = f'{remocon_id:03d}'
@@ -998,7 +1013,7 @@ class MMTSInfoAnalyzer:
         language = TSInformation.getISO639LanguageCodeName(payload[7:10].decode('ascii', errors='ignore'))
         return (self.__resolveAudioType(component_type), language, is_main)
 
-    def __iterDescriptors(self, descriptors: bytes):
+    def __iterDescriptors(self, descriptors: bytes) -> Iterator[tuple[int, bytes]]:
         """
         MMT-SI descriptor loop を列挙する
 
@@ -1048,7 +1063,7 @@ class MMTSInfoAnalyzer:
         mjd = int.from_bytes(data[0:2], 'big')
         y = int((mjd - 15078.2) / 365.25)
         m = int((mjd - 14956.1 - int(y * 365.25)) / 30.6001)
-        day = mjd - 14956 - int(y * 365.25) - int(m * 30.6001)
+        day = int(mjd - 14956 - int(y * 365.25) - int(m * 30.6001))
         k = 1 if m in (14, 15) else 0
         year = 1900 + y + k
         month = m - 1 - k * 12
@@ -1146,7 +1161,7 @@ class MMTSInfoAnalyzer:
             return '1/0モード(モノ)'
         return '2/0モード(ステレオ)'
 
-    def __resolveAudioChannel(self, audio_type: str) -> str:
+    def __resolveAudioChannel(self, audio_type: str) -> _AudioChannel:
         """
         音声形式の表示文字列を RecordedVideo のチャンネル表現に変換する
 

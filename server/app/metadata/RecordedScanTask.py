@@ -457,9 +457,23 @@ class RecordedScanTask:
                 logging.warning(f'[RecordedScanTask][EPGStation] Previously failed unchanged file skipped: {file_path}')
                 return
 
+            existing_recorded_video = await RecordedVideo.get_or_none(
+                file_path = str(file_path),
+            ).only('id', 'status', 'file_size', 'file_modified_at')
+            should_force_update = (
+                existing_recorded_video is not None and
+                existing_recorded_video.status == 'Recording'
+            )
+            if should_force_update is True:
+                logging.info(
+                    f'[RecordedScanTask][EPGStation] Completed file is still marked Recording. '
+                    f'Forcing metadata refresh: {file_path} '
+                    f'[db_size: {existing_recorded_video.file_size}, actual_size: {stat.st_size}]'
+                )
+
             logging.info(f'[RecordedScanTask][EPGStation] Sync started: {file_path}')
             try:
-                await self.processRecordedFile(file_path)
+                await self.processRecordedFile(file_path, force_update=should_force_update)
             except Exception as ex:
                 self._epgstation_failed_recorded_file_signatures[str(file_path)] = file_signature
                 db_missing_paths.append(str(file_path))
@@ -1126,7 +1140,8 @@ class RecordedScanTask:
                 )
                 if is_recording:
                     # 既に DB に登録済みで録画中の場合は再解析しない
-                    if (existing_recorded_video_summary is not None and
+                    if (force_update is False and
+                        existing_recorded_video_summary is not None and
                         existing_recorded_video_summary.status == 'Recording'):
                         return
 
