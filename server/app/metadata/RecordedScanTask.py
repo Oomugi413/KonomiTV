@@ -283,7 +283,7 @@ class RecordedScanTask:
 
         # DB に残っている Recording レコードのうち、録画バックエンドの active list に存在しないものは録画完了候補として処理する。
         ## 件数は通常ごく少数なので、全録画フォルダのスキャンよりはるかに軽い。
-        recording_video_rows = await RecordedVideo.filter(status='Recording').values('file_path')
+        recording_video_rows = await RecordedVideo.filter(status='Recording').values('file_path', 'recorded_program_id')
         for row in recording_video_rows:
             file_path_str = row['file_path']
             if IsActiveRecordingFilePath(file_path_str, active_recording_file_paths.paths) is True:
@@ -292,6 +292,12 @@ class RecordedScanTask:
             self._recording_files.pop(file_path, None)
             if await self.isFileExists(file_path) is True:
                 await self.processRecordedFile(file_path)
+            else:
+                await RecordedProgram.filter(id=row['recorded_program_id']).delete()
+                logging.info(
+                    f'{file_path}: Deleted stale Recording record for non-existent file. '
+                    f'[recorded_program_id: {row["recorded_program_id"]}]'
+                )
 
 
     async def __syncEPGStationRecentRecordedFiles(self) -> None:

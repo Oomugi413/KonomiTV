@@ -78,7 +78,7 @@ import HeaderBar from '@/components/HeaderBar.vue';
 import Navigation from '@/components/Navigation.vue';
 import SPHeaderBar from '@/components/SPHeaderBar.vue';
 import RecordedProgramList from '@/components/Videos/RecordedProgramList.vue';
-import { IRecordedProgram } from '@/services/Videos';
+import { IRecordedProgram, isChasePlaybackProgram } from '@/services/Videos';
 import Videos from '@/services/Videos';
 import useSettingsStore from '@/stores/SettingsStore';
 import useUserStore from '@/stores/UserStore';
@@ -125,7 +125,7 @@ const fetchVideoPrograms = async () => {
         // 録画中の番組は常に最新側に並ぶため、先頭ページだけで十分に拾える。
         // 録画済みは追いかけ再生と分離して表示し、/videos/programs でも録画済みのみを扱う。
         recording_programs.value = result.recorded_programs
-            .filter(program => program.recorded_video.status === 'Recording')
+            .filter(isChasePlaybackProgram)
             .slice(0, 10);
         total_recording_programs.value = recording_programs.value.length;
         recorded_programs.value = result.recorded_programs

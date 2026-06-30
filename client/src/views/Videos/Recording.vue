@@ -39,7 +39,7 @@ import HeaderBar from '@/components/HeaderBar.vue';
 import Navigation from '@/components/Navigation.vue';
 import SPHeaderBar from '@/components/SPHeaderBar.vue';
 import RecordedProgramList from '@/components/Videos/RecordedProgramList.vue';
-import { IRecordedProgram } from '@/services/Videos';
+import { IRecordedProgram, isChasePlaybackProgram } from '@/services/Videos';
 import Videos from '@/services/Videos';
 import useUserStore from '@/stores/UserStore';
 
@@ -66,7 +66,7 @@ const fetchPrograms = async () => {
                 all_programs.push(...result.recorded_programs);
             }
         }
-        const recording_programs = all_programs.filter(program => program.recorded_video.status === 'Recording');
+        const recording_programs = all_programs.filter(isChasePlaybackProgram);
         programs.value = recording_programs.slice((current_page.value - 1) * 30, current_page.value * 30);
         total_programs.value = recording_programs.length;
     }

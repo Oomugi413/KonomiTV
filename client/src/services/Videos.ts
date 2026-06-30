@@ -166,6 +166,23 @@ export const IRecordedProgramDefault: IRecordedProgram = {
     updated_at: '2000-01-01T00:00:00+09:00',
 };
 
+const CHASE_PLAYBACK_STALE_GRACE_MS = 30 * 60 * 1000;
+
+/**
+ * 追いかけ再生として表示できる録画中番組かどうかを判定する。
+ * DB に古い Recording 状態が残った場合でも、番組終了から十分時間が経ったものは表示しない。
+ */
+export const isChasePlaybackProgram = (program: IRecordedProgram): boolean => {
+    if (program.recorded_video.status !== 'Recording') {
+        return false;
+    }
+    const end_time_ms = new Date(program.end_time).getTime();
+    if (Number.isNaN(end_time_ms)) {
+        return true;
+    }
+    return end_time_ms + CHASE_PLAYBACK_STALE_GRACE_MS >= Date.now();
+};
+
 /** 録画番組情報リストを表すインターフェース */
 export interface IRecordedPrograms {
     total: number;
