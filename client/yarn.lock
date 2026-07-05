@@ -1962,10 +1962,10 @@ aribb24.js@^1.11.0, aribb24.js@~1.11.5:
   resolved "https://registry.yarnpkg.com/aribb24.js/-/aribb24.js-1.11.5.tgz#fb4dfc5bc4b10625c0d92987bd4e833d3faa532e"
   integrity sha512-WEprzYs18FgAIxX885X7YLrgIsjmAecodm6tjmUUckX0kp2Lj9uSdOo+1vxgI7dtEEhhPSB5ocJhDIv560CRFg==
 
-aribb62.js@^0.1.4:
-  version "0.1.4"
-  resolved "https://registry.yarnpkg.com/aribb62.js/-/aribb62.js-0.1.4.tgz#461261eef5aa0751670a65e17ae45dc6029d319c"
-  integrity sha512-Wp5H/BI9XRmGJuH6HtjCpQ/PIbQ5nYD36uuOoQXgZUQupX+0r6HHvT4hN7WmiVs3qbxEuEDNRcAcLY8VYgSh/g==
+aribb62.js@^0.1.5:
+  version "0.1.5"
+  resolved "https://registry.yarnpkg.com/aribb62.js/-/aribb62.js-0.1.5.tgz#b2978daa8fb5c1c85af49db34a31449a082749ce"
+  integrity sha512-gXr8r21DHsDSn8rQ9lNAlB96w5Ezdab0KI6njN9V2ESUlgEE8XcUXaR3U13yf4TAMfw2knoQYmyBOejkW8E1Rg==
 
 array-buffer-byte-length@^1.0.1, array-buffer-byte-length@^1.0.2:
   version "1.0.2"
@@ -2707,12 +2707,12 @@ dotenv@^16.3.1:
   resolved "https://registry.yarnpkg.com/dotenv/-/dotenv-16.6.1.tgz#773f0e69527a8315c7285d5ee73c4459d20a8020"
   integrity sha512-uBq4egWHTcTt33a72vpSG0z3HnPuIl6NqYcTrKEg2azoEyl2hpW0zqlxysq2pK9HlDIHyHyakeYaYnSAwd8bow==
 
-"dplayer@github:makeding/DPlayer#b6fab85505f731fe81c08895beaca3173e876444":
+"dplayer@github:makeding/DPlayer#88b271a0b3133afdb4187d93a645dbb6b9b5ae29":
   version "1.32.8"
-  resolved "https://codeload.github.com/makeding/DPlayer/tar.gz/b6fab85505f731fe81c08895beaca3173e876444"
+  resolved "https://codeload.github.com/makeding/DPlayer/tar.gz/88b271a0b3133afdb4187d93a645dbb6b9b5ae29"
   dependencies:
     aribb24.js "~1.11.5"
-    aribb62.js "^0.1.4"
+    aribb62.js "^0.1.5"
     axios "^1.7.2"
     balloon-css "^1.2.0"
 
