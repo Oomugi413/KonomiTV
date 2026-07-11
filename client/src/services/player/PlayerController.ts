@@ -1279,6 +1279,7 @@ class PlayerController {
 
         try {
             const first_buffered_position = video.buffered.start(0);
+            const last_buffered_position = video.buffered.end(video.buffered.length - 1);
             const current_time = video.currentTime;
             const should_recover =
                 video.readyState < 2 &&
@@ -1286,11 +1287,20 @@ class PlayerController {
 
             if (should_recover === false) return false;
 
+            // Safari 27 では currentTime が非有限の状態から buffered range の最古位置へ seek しても、
+            // 数百秒に伸びたライブバッファの古い端でデコード開始点を確立できない場合がある
+            // mpegts.js の seek 経路に最新のランダムアクセスポイントを選ばせるため、
+            // Safari ではライブ末尾から通常の再生バッファ秒数だけ戻した位置を復旧先にする
             const seek_target = Utils.isSafari() === true ?
-                Math.max(first_buffered_position + 0.1, 0.1) : Math.max(first_buffered_position, 0) + 0.001;
-            console.warn('\u001b[31m[PlayerController] Startup playback stall detected. Seeking to first buffered range.', this.getVideoPlaybackStateForLog({
+                Math.max(
+                    last_buffered_position - this.live_playback_buffer_seconds,
+                    first_buffered_position + 0.1,
+                    0.1,
+                ) : Math.max(first_buffered_position, 0) + 0.001;
+            console.warn('\u001b[31m[PlayerController] Startup playback stall detected. Seeking within buffered range.', this.getVideoPlaybackStateForLog({
                 context: context,
                 first_buffered_position: first_buffered_position,
+                last_buffered_position: last_buffered_position,
                 seek_target: seek_target,
             }));
 
@@ -1303,7 +1313,26 @@ class PlayerController {
 
             // Safari の autoplay 制約を避けるため、復旧時も一旦 muted のまま再生を試みる
             video.muted = true;
-            await video.play();
+
+            // Safari では startup stall 中の play() も resolve / reject のどちらにも進まず保留されることがある
+            // ここで await すると frame verification と PlayerController 再起動まで停止してしまうため、
+            // Safari では再生要求だけを送り、短時間フレーム提示を待ってから呼び出し元の判定へ戻す
+            if (Utils.isSafari() === true) {
+                void video.play().catch((error) => {
+                    // PlayerController の破棄後に古い video 要素の Promise が reject した場合は、不要な警告を出さない
+                    if (this.player === null || this.player.video !== video) return;
+                    console.warn('\u001b[31m[PlayerController] Safari startup playback stall recovery play() failed:', error, this.getVideoPlaybackStateForLog({
+                        context: context,
+                        seek_target: seek_target,
+                    }));
+                });
+                await Utils.sleep(0.5);
+            } else {
+                await video.play();
+            }
+
+            // 待機中に PlayerController が破棄・再作成された場合、古い video 要素の復旧成功ログを出さない
+            if (this.player === null || this.player.video !== video) return false;
 
             console.warn('\u001b[31m[PlayerController] Startup playback stall recovery attempted.', this.getVideoPlaybackStateForLog({
                 context: context,
@@ -1569,12 +1598,25 @@ class PlayerController {
                             console.warn(`\u001b[31m[PlayerController] Failed to start playback after ${maxAttempts} attempts.`, this.getVideoPlaybackStateForLog());
                             return;
                         }
+                        if (this.player === null) return;
+
+                        // 再生開始試行中に PlayerController が破棄・再作成されても、古い video 要素を操作し続けないよう保持する
+                        const video = this.player.video;
                         try {
-                            await this.player?.video.play();
+                            // Safari では MSE の初期化中に play() の Promise が長時間保留されることがあるが、
+                            // 時間だけを基準に pause() すると、正常に開始しようとしている再生や startup recovery まで中断してしまう
+                            // 呼び出し元では await せず後続の起動処理を進めるため、ここでは Safari 自身の完了通知をそのまま待つ
+                            await video.play();
+
+                            // 完了までに video 要素が破棄・交換されていた場合は、古い PlayerController の成功ログを出さない
+                            if (this.player === null || this.player.video !== video) return;
+
                             console.log('\u001b[31m[PlayerController] Playback started successfully.', this.getVideoPlaybackStateForLog({
                                 attempt: attempts + 1,
                             }));
                         } catch (error) {
+                            // 破棄された video 要素の play() が reject した場合、古い PlayerController から再試行しない
+                            if (this.player === null || this.player.video !== video) return;
                             console.warn(`\u001b[31m[PlayerController] Attempt ${attempts + 1} to start playback failed:`, error, this.getVideoPlaybackStateForLog({
                                 attempt: attempts + 1,
                             }));
@@ -1583,7 +1625,11 @@ class PlayerController {
                             await attemptPlay();
                         }
                     };
-                    await attemptPlay();
+                    // Safari では MediaSource の初期化タイミングによって video.play() の Promise が
+                    // resolve / reject のどちらにも進まず、保留されたままになることがある
+                    // ここで完了を待つと、直後にある canplay / MEDIA_INFO ハンドラーや起動タイムアウトの登録まで止まり、
+                    // 本来の Safari 向け復旧処理が一切動かなくなるため、再生開始試行はバックグラウンドで継続する
+                    void attemptPlay();
                 }
 
                 // 再生準備ができた段階で再生バッファを調整し、再生準備ができた段階でローディング中の背景写真を非表示にするイベントハンドラーを登録
@@ -1605,7 +1651,11 @@ class PlayerController {
                     console.log('\u001b[31m[PlayerController] Buffering...', this.getVideoPlaybackStateForLog({
                         playback_buffer_seconds: this.getPlaybackBufferSeconds(),
                     }));
-                    this.player.video.playbackRate = 0;
+                    // Safari は MSE の canplay 発火後も play() が保留中の場合があり、ここで playbackRate=0 にすると
+                    // WebKit の再生開始処理そのものを停止させることがあるため、Safari では通常速度のままバッファを貯める
+                    if (Utils.isSafari() === false) {
+                        this.player.video.playbackRate = 0;
+                    }
 
                     // 再生バッファが live_playback_buffer_seconds を超えるまで 0.1 秒おきに再生バッファをチェックする
                     // 再生バッファが live_playback_buffer_seconds を切ると再生が途切れやすくなるので (特に動きの激しい映像)、
@@ -1619,10 +1669,20 @@ class PlayerController {
                     }
 
                     // 再生バッファ調整のため一旦停止していた再生を再び開始
-                    this.player.video.playbackRate = 1;
+                    if (Utils.isSafari() === false) {
+                        this.player.video.playbackRate = 1;
+                    }
                     console.log('\u001b[31m[PlayerController] Buffering completed.', this.getVideoPlaybackStateForLog({
                         playback_buffer_seconds: current_playback_buffer_sec,
                     }));
+
+                    // Safari では最初の play() が MSE 初期化待ちのまま保留されることがあるため、
+                    // 十分なバッファを確保した時点でもう一度再生を要求し、WebKit に再生可能状態を再評価させる
+                    if (Utils.isSafari() === true) {
+                        void this.player.video.play().catch((error) => {
+                            console.warn('\u001b[31m[PlayerController] Safari playback retry after buffering failed:', error, this.getVideoPlaybackStateForLog());
+                        });
+                    }
 
                     // Safari では buffered / dimensions があっても実フレームが出ていないケースがあるため、UI 解除前に確認する
                     const is_safari_frame_presented = await this.waitForSafariStartupFramePresentation('on_canplay');
