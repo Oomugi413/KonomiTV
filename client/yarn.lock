@@ -2707,9 +2707,9 @@ dotenv@^16.3.1:
   resolved "https://registry.yarnpkg.com/dotenv/-/dotenv-16.6.1.tgz#773f0e69527a8315c7285d5ee73c4459d20a8020"
   integrity sha512-uBq4egWHTcTt33a72vpSG0z3HnPuIl6NqYcTrKEg2azoEyl2hpW0zqlxysq2pK9HlDIHyHyakeYaYnSAwd8bow==
 
-"dplayer@github:makeding/DPlayer#88b271a0b3133afdb4187d93a645dbb6b9b5ae29":
+"dplayer@github:makeding/DPlayer#7dc245c57d0e16be973ab3053dd0c4d19902d272":
   version "1.32.8"
-  resolved "https://codeload.github.com/makeding/DPlayer/tar.gz/88b271a0b3133afdb4187d93a645dbb6b9b5ae29"
+  resolved "https://codeload.github.com/makeding/DPlayer/tar.gz/7dc245c57d0e16be973ab3053dd0c4d19902d272"
   dependencies:
     aribb24.js "~1.11.5"
     aribb62.js "^0.1.5"
@@ -4391,13 +4391,13 @@ mitt@^3.0.1:
   integrity sha512-vKivATfr97l2/QBCYAkXYDbrIWPM2IIKEl7YPhjCvKlG3kE2gm+uBo6nEXK3M5/Ffh/FLpKExzOQ3JJoJGFKBw==
 
 mpegts.js@^1.7.3, "mpegts.js@file:../../mmts.js":
-  version "1.8.0-1"
+  version "1.8.0-2"
   dependencies:
     es6-promise "^4.2.5"
 
-"mpegts.js@github:makeding/mmts.js#54bfb8413446301ae085b8340b986ade65815c9a":
-  version "1.8.0"
-  resolved "https://codeload.github.com/makeding/mmts.js/tar.gz/54bfb8413446301ae085b8340b986ade65815c9a"
+"mpegts.js@github:makeding/mmts.js#a0eb9cce2d509cfbc7897e41b3ab480ebcefac88":
+  version "1.8.0-2"
+  resolved "https://codeload.github.com/makeding/mmts.js/tar.gz/a0eb9cce2d509cfbc7897e41b3ab480ebcefac88"
   dependencies:
     es6-promise "^4.2.5"
 

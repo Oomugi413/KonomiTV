@@ -467,7 +467,11 @@ class PlayerController {
         (window as any).mpegts = mpegts;
         (window as any).Hls = Hls;
 
-        type MMTSVideoQuality = DPlayerType.VideoQuality & {mmtsVideoPacketId?: number};
+        type MMTSVideoQuality = DPlayerType.VideoQuality & {
+            mmtsVideoPacketId?: number;
+            mmtsDuration?: number;
+            mmtsFileSize?: number;
+        };
         const initialized_aribb62_subtitle_players = new WeakSet<object>();
         let is_aribb62_subtitle_event_unavailable_warned = false;
 
@@ -574,7 +578,7 @@ class PlayerController {
             // 選択中の画質に packet_id が紐づいている場合のみ mmts.js に渡す
             // Primary では渡さず、mmts.js 側で Primary/Secondary 映像を自動選択させる
             const current_quality = dplayer.quality as MMTSVideoQuality | null;
-            if (current_quality?.type === 'mmts') {
+            if (current_quality?.type === 'mmts' && dplayer.options.live === true) {
                 // Raw MMTS は 4K HEVC をそのまま MSE に積むため、通常の MPEG-TS 向け低遅延設定ではバッファが薄くなりやすい
                 // ここでは latency chasing を止め、起動時 stash / SourceBuffer 保持を増やして多少の受信揺らぎを吸収する
                 Object.assign(mpegts_config, {
@@ -589,12 +593,27 @@ class PlayerController {
             if (current_quality?.mmtsVideoPacketId !== undefined) {
                 mpegts_config.mmtsVideoPacketId = current_quality.mmtsVideoPacketId;
             }
-            const mpegtsPlayer = mpegts.createPlayer(
-                Object.assign(dplayer.options.pluginOptions.mpegts.mediaDataSource || {}, {
+            const media_data_source: Parameters<typeof mpegts.createPlayer>[0] = Object.assign(
+                {},
+                dplayer.options.pluginOptions.mpegts.mediaDataSource,
+                {
                     type: 'mmts',
-                    isLive: dplayer.options.live,
+                    isLive: dplayer.options.live === true,
                     url: video.src,
-                }),
+                },
+            );
+            // MMTS VOD は MediaSource の現在の append 範囲だけでは録画全体の長さを判断できない。
+            // DB で解析済みの正確な duration / filesize を渡し、mmts.js の VOD シークと MSE duration を初期状態から有効にする。
+            if (dplayer.options.live !== true && current_quality?.type === 'mmts') {
+                if (current_quality.mmtsDuration !== undefined && current_quality.mmtsDuration > 0) {
+                    media_data_source.duration = current_quality.mmtsDuration;
+                }
+                if (current_quality.mmtsFileSize !== undefined && current_quality.mmtsFileSize > 0) {
+                    media_data_source.filesize = current_quality.mmtsFileSize;
+                }
+            }
+            const mpegtsPlayer = mpegts.createPlayer(
+                media_data_source,
                 mpegts_config,
             );
             dplayer.plugins.mpegts = mpegtsPlayer;
@@ -831,6 +850,9 @@ class PlayerController {
                                 name: PlayerController.PASSTHROUGH_PRIMARY_QUALITY_NAME,
                                 type: 'mmts',
                                 url: `${streaming_api_base_url}/raw-mmts/mpegts`,
+                                // mpegts.js の MediaDataSource.duration はミリ秒単位
+                                mmtsDuration: Math.round(player_store.recorded_program.recorded_video.duration * 1000),
+                                mmtsFileSize: player_store.recorded_program.recorded_video.file_size,
                             });
                         }
 
