@@ -141,7 +141,8 @@ jobs:
       - name: Download Patched FFmpeg
         uses: actions/download-artifact@v8
         with:
-          name: ffmpeg-mmt-win64
+          # archive: false の Artifact 名はアップロード対象のファイル名になる
+          name: ffmpeg-mmt-win64.zip
           path: .
 
       # MSBuild を PATH に追加
@@ -279,14 +280,12 @@ jobs:
             # ref: https://gregoryszorc.com/docs/python-build-standalone/main/running.html
             python_arch_name: x86_64_v2
             artifact_suffix: ''
-            ffmpeg_artifact_name: ffmpeg-mmt-linux64
             ffmpeg_archive_name: ffmpeg-mmt-linux64.tar.xz
           # arm64 アーキテクチャ向けのビルド設定
           - arch: arm64
             runner: ubuntu-22.04-arm
             python_arch_name: aarch64
             artifact_suffix: '-arm'
-            ffmpeg_artifact_name: ffmpeg-mmt-linuxarm64
             ffmpeg_archive_name: ffmpeg-mmt-linuxarm64.tar.xz
     runs-on: ${{ matrix.runner }}
     steps:
@@ -299,7 +298,8 @@ jobs:
       - name: Download Patched FFmpeg
         uses: actions/download-artifact@v8
         with:
-          name: ${{ matrix.ffmpeg_artifact_name }}
+          # archive: false の Artifact 名はアップロード対象のファイル名になる
+          name: ${{ matrix.ffmpeg_archive_name }}
           path: .
 
       # Docker Buildx のセットアップ

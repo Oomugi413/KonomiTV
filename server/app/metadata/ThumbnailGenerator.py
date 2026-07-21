@@ -36,7 +36,7 @@ class ThumbnailGenerator:
     BASE_INTERVAL_SEC: ClassVar[float] = 5.0  # 基準となる間隔 (5秒)
     MAX_INTERVAL_SEC: ClassVar[float] = 30.0  # 最大間隔 (30秒)
     SCORING_SCALE: ClassVar[tuple[int, int]] = (480, 270)  # スコアリング・代表サムネイル選定時の解像度 (顔検出精度のため維持)
-    TILE_SCALE: ClassVar[tuple[int, int]] = (320, 180)  # タイル化時の1フレーム解像度 (width, height)
+    TILE_SCALE: ClassVar[tuple[int, int]] = (480, 270)  # タイル化時の1フレーム解像度 (width, height)
     LEGACY_TILE_SCALE: ClassVar[tuple[int, int]] = (480, 270)  # 旧タイルの1フレーム解像度 (width, height)
     LEGACY_TILE_COLS: ClassVar[int] = 34  # 旧タイルの列数
 
@@ -1430,9 +1430,9 @@ class ThumbnailGenerator:
 
     async def migrateFromLegacyTile(self) -> bool:
         """
-        既存のサムネイルタイル画像を新仕様に合わせて再タイル化し、サムネイル情報を DB に保存する
+        既存のサムネイルタイル画像を現在のレイアウトに合わせて再構成し、サムネイル情報を DB に保存する
 
-        旧仕様 (480x270, 34列) で生成されたタイル画像を読み込み、新仕様 (192x108, 85列) にリサイズ・再タイル化する
+        thumbnail_info がない旧仕様 (480x270, 34列) のタイルを読み込み、現在の 480x270 レイアウトで再タイル化する
         処理は ProcessPoolExecutor で別プロセスで実行され、完了後に旧タイルをバックアップしてから新タイルに置換する
         このメソッドは RecordedScanTask から呼び出される
 
@@ -1528,8 +1528,8 @@ class ThumbnailGenerator:
         output_tile_path: pathlib.Path,
     ) -> bool:
         """
-        既存のタイル画像を読み込み、新しい解像度に合わせて再タイル化する
-        旧仕様 (480x270, 34列) で生成されたタイル画像を、新仕様 (192x108, 85列) に変換する
+        既存のタイル画像を読み込み、現在のレイアウトに合わせて再タイル化する
+        旧仕様 (480x270, 34列) で生成されたタイル画像を、同じ解像度を維持したまま thumbnail_info 対応形式へ変換する
         ProcessPoolExecutor で実行されるエントリーポイントなので、あえて prefix のアンダースコアは1つとしている
         (別プロセスで実行されるため、__ を付けるとマングリングにより正常に実行できない)
 
@@ -2223,8 +2223,8 @@ if __name__ == "__main__":
         ),
     ) -> None:
         """
-        既存のサムネイルタイル画像を新仕様にマイグレーションする
-        旧仕様 (480x270, 34列) から新仕様 (192x108, 85列) に変換する
+        既存のサムネイルタイル画像を thumbnail_info 対応形式へマイグレーションする
+        旧仕様の 480x270 / 34列という画質とレイアウトは維持する
         """
 
         async def run() -> bool:

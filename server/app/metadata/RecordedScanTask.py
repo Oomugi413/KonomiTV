@@ -1876,10 +1876,9 @@ class RecordedScanTask:
 
         このメソッドは runBatchScan() から呼び出され、以下の処理を行う:
         - RecordedVideo.thumbnail_info が None のレコードを対象にサムネイル情報を移行
-        - 既存のサムネイルタイル画像が存在する場合は旧仕様 (480x270, 34列) から新仕様 (192x108, 85列) に変換
+        - 既存のサムネイルタイル画像が存在する場合は 480x270 / 34列を維持したまま thumbnail_info を補完
         - サムネイルが存在しない場合は新規に生成
 
-        新仕様ではタイルサイズを小さくすることで、ファイルサイズを削減しつつシークバーでの表示品質を維持している
         旧仕様のタイル画像は backup フォルダにバックアップされる (MIGRATION_BACKUP_ENABLED が True の場合)
         """
 
@@ -1929,7 +1928,7 @@ class RecordedScanTask:
                 # 同時実行数を制限しつつサムネイル処理を実行
                 async with ProcessLimiter.getSemaphore('ThumbnailMigration'):
                     async with DriveIOLimiter.getSemaphore(file_path):
-                        # タイル画像と代表サムネイルの両方が存在する場合は既存タイルを新仕様に変換
+                        # タイル画像と代表サムネイルの両方が存在する場合は画質を維持したまま thumbnail_info を補完
                         if await tile_path.is_file() and await thumbnail_path.is_file():
                             generator = ThumbnailGenerator.forMigration(
                                 file_path = video_row['file_path'],
