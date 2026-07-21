@@ -45,7 +45,15 @@ class ThumbnailGenerator:
     WEBP_QUALITY_TILE: ClassVar[int] = 71  # シークバーサムネイルタイルの WebP 品質 (0-100)
     WEBP_COMPRESSION: ClassVar[int] = 6  # WebP 圧縮レベル (0-6)
     WEBP_MAX_SIZE: ClassVar[int] = 16383  # WebP の最大サイズ制限 (px)
+
+    # MMT/TLV の HDR-to-SDR サムネイル変換設定
+    ## BS4K と BS の同時放送素材を比較し、SDR 素材由来の HLG で中間調を持ち上げすぎない値に調整している。
+    MMTS_HDR_NOMINAL_PEAK_LUMINANCE: ClassVar[int] = 200
+    MMTS_HDR_TONEMAP_MOBIUS_PARAM: ClassVar[float] = 0.9
+
+    # 外部プロセスのタイムアウト設定
     FFMPEG_TIMEOUT: ClassVar[int] = 300  # FFmpeg サブプロセスのタイムアウト時間 (秒)
+    MMTS_COLOR_TRANSFER_PROBE_TIMEOUT: ClassVar[int] = 60  # MMT/TLV の映像伝達特性を先頭 I フレームから取得するタイムアウト時間 (秒)
     MMTS_FRAME_EXTRACTION_TIMEOUT: ClassVar[int] = 900  # MMT/TLV を FFmpeg で先頭から走査するフレーム抽出のタイムアウト時間 (秒)
     TSREADEX_FRAME_EXTRACTION_TIMEOUT: ClassVar[int] = 600  # tsreadex 経由のフレーム抽出タイムアウト時間 (秒)
     FRAME_EXTRACTION_MAX_DEMUX_PACKETS: ClassVar[int] = 20000  # 1候補位置でフレーム探索する最大パケット数
@@ -764,6 +772,79 @@ class ThumbnailGenerator:
             return None
 
 
+    def __detectMMTSHDRTransfer(self) -> Literal['HLG', 'PQ'] | None:
+        """
+        MMT/TLV の先頭 I フレームから HDR の映像伝達特性を検出する
+
+        Args:
+            None
+
+        Returns:
+            Literal['HLG', 'PQ'] | None:
+                - ARIB STD-B67 (HLG) の場合は 'HLG'
+                - SMPTE ST 2084 (PQ) の場合は 'PQ'
+                - SDR または検出できなかった場合は None
+        """
+
+        try:
+            # 番組素材自体が SDR であっても、放送時に HLG へ変換されている場合は HLG として逆変換する必要がある。
+            ## FFprobe だけでは先頭に不完全な TLV パケットを含む録画を安定して同期できないため、
+            ## 実際のフレーム抽出と同じ FFmpeg デマルチプレクサで先頭 I フレームを1枚だけデコードする。
+            probe_options = [
+                LIBRARY_PATH['FFmpeg'],
+                '-nostdin',
+                '-hide_banner',
+                '-loglevel', 'info',
+                '-f', 'mmttlv',
+                '-skip_frame', 'nointra',
+                '-i', str(self.file_path),
+                '-map', '0:v:0',
+                '-frames:v', '1',
+                '-f', 'null',
+                '-',
+            ]
+            process = subprocess.run(
+                probe_options,
+                capture_output = True,
+                timeout = self.MMTS_COLOR_TRANSFER_PROBE_TIMEOUT,
+                check = False,
+            )
+            stderr_text = process.stderr.decode('utf-8', errors='ignore')
+
+            # FFmpeg のストリーム情報には、SPS の VUI から読み取った transfer_characteristics が表示される。
+            ## ARIB STD-B32 では HLG が 18、PQ が 16 であり、FFmpeg はそれぞれ下記の名前で表示する。
+            if 'arib-std-b67' in stderr_text:
+                logging.info(f'{self.file_path}: Detected ARIB STD-B67 (HLG) video for MMT/TLV thumbnails.')
+                return 'HLG'
+            if 'smpte2084' in stderr_text:
+                logging.info(f'{self.file_path}: Detected SMPTE ST 2084 (PQ) video for MMT/TLV thumbnails.')
+                return 'PQ'
+
+            # HDR 以外の transfer_characteristics を取得できた場合は、既存の SDR 変換経路をそのまま使用する。
+            ## 不明時も HDR 変換を推測適用すると SDR 映像の色を壊すため、安全側として既存経路へフォールバックする。
+            if process.returncode != 0:
+                error_message = stderr_text[-2000:]
+                logging.warning(
+                    f'{self.file_path}: Could not detect MMT/TLV video transfer characteristics. '
+                    f'Using the SDR thumbnail conversion path. [return_code: {process.returncode}]\n{error_message}'
+                )
+            return None
+
+        except subprocess.TimeoutExpired:
+            logging.warning(
+                f'{self.file_path}: MMT/TLV video transfer probe timed out after '
+                f'{self.MMTS_COLOR_TRANSFER_PROBE_TIMEOUT} seconds. Using the SDR thumbnail conversion path.'
+            )
+            return None
+        except Exception as ex:
+            logging.warning(
+                f'{self.file_path}: Failed to detect MMT/TLV video transfer characteristics. '
+                'Using the SDR thumbnail conversion path.',
+                exc_info=ex,
+            )
+            return None
+
+
     def __extractAndScoreFramesWithFFmpeg(
         self,
         candidate_offsets: list[float],
@@ -788,6 +869,27 @@ class ThumbnailGenerator:
             if expected_frame_count == 0:
                 return ([], None)
 
+            # HLG / PQ の VUI が付与された放送映像だけを HDR-to-SDR 変換する。
+            ## 4K であることだけを条件にすると、ARIB STD-B32 で許容されている BT.2020 SDR まで誤って tone-map してしまう。
+            hdr_transfer = self.__detectMMTSHDRTransfer()
+            video_filters = [
+                f'fps=fps=1/{self.tile_interval_sec:.6f}:start_time=0:round=down',
+            ]
+            if hdr_transfer is not None:
+                # HLG/PQ 信号をリニア光へ戻してから BT.709 色域へ変換し、SDR の表示範囲を超える部分だけを圧縮する。
+                ## nominal peak 200 / Mobius 0.9 は BS4K と BS の同時放送素材で比較し、SDR 側の明るさと色へ近づけた値。
+                ## Mobius の knee を 0.9 に置くことで SDR の大部分を保ち、SDR 白を超える HDR ハイライトだけを滑らかに圧縮する。
+                ## desat=0 はアニメなどの鮮やかな色が高輝度部で不用意に白へ寄るのを避けるために指定する。
+                video_filters.extend([
+                    f'zscale=transfer=linear:npl={self.MMTS_HDR_NOMINAL_PEAK_LUMINANCE}',
+                    'format=gbrpf32le',
+                    'zscale=primaries=bt709',
+                    f'tonemap=mobius:param={self.MMTS_HDR_TONEMAP_MOBIUS_PARAM}:desat=0',
+                    'zscale=transfer=bt709:matrix=bt709:range=limited',
+                    'format=yuv420p',
+                ])
+            video_filters.append(f'scale={scoring_width}:{scoring_height}')
+
             # PyAV の wheel が内蔵する FFmpeg には MMT/TLV demuxer がないため、
             # thirdparty に同梱した MMT/TLV 対応 FFmpeg を別プロセスとして使う。
             ## 4K HEVC を全フレームデコードすると負荷が高いため、I フレームだけをデコードし、
@@ -800,10 +902,7 @@ class ThumbnailGenerator:
                 '-skip_frame', 'nointra',
                 '-i', str(self.file_path),
                 '-map', '0:v:0',
-                '-vf', (
-                    f'fps=fps=1/{self.tile_interval_sec:.6f}:start_time=0:round=down,'
-                    f'scale={scoring_width}:{scoring_height}'
-                ),
+                '-vf', ','.join(video_filters),
                 '-frames:v', str(expected_frame_count),
                 '-pix_fmt', 'bgr24',
                 '-f', 'rawvideo',

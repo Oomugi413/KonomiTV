@@ -1602,10 +1602,12 @@ class PlayerController {
         // それだけではタイミング次第では十分ではないため、定期的に Keep-Alive を行う
         // Keep-Alive が行われなくなったタイミングで、サーバー側で自動的にビデオストリームの終了処理 (エンコードタスクの停止) が行われる
         // ただし、オフラインキャッシュから再生する場合は Keep-Alive は不要（サーバー側のストリームセッションが存在しないため）
+        // TLV パススルーも元ファイルの直接配信で HLS ストリームセッションを作成しないため、選択中は Keep-Alive を送信しない
         if (this.playback_mode === 'Video' && !this.is_offline_cached) {
             this.video_keep_alive_interval_timer_cancel = Utils.setIntervalInWorker(async () => {
                 // 画質切り替えでベース URL が変わることも想定し、あえて毎回 API URL を取得している
                 if (this.player === null) return;
+                if (this.player.quality?.type === 'mmts') return;
                 const api_quality = PlayerUtils.extractVideoAPIQualityFromDPlayer(this.player);
                 const session_id = PlayerUtils.extractSessionIdFromDPlayer(this.player);
                 await APIClient.put(`${Utils.api_base_url}/streams/video/${player_store.recorded_program.id}/${api_quality}/keep-alive?session_id=${session_id}`);
