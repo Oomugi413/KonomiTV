@@ -814,8 +814,7 @@ class ThumbnailGenerator:
             ## 従来経路も全スコアリング用フレームをメモリ上に保持するため、メモリ使用量は同程度に収まる。
             process = subprocess.run(
                 ffmpeg_options,
-                stdout = subprocess.PIPE,
-                stderr = subprocess.PIPE,
+                capture_output = True,
                 timeout = self.MMTS_FRAME_EXTRACTION_TIMEOUT,
                 check = False,
             )

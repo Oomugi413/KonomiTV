@@ -553,11 +553,6 @@ class RecordedScanTask:
                 '[RecordedScanTask][EPGStation] Previously failed unchanged paths skipped:\n' +
                 '\n'.join([f'  - {path}' for path in unchanged_failed_paths])
             )
-        if len(db_saved_paths) > 0:
-            logging.info(
-                '[RecordedScanTask][EPGStation] DB saved paths:\n' +
-                '\n'.join([f'  - {path}' for path in db_saved_paths])
-            )
         if len(db_missing_paths) > 0:
             logging.warning(
                 '[RecordedScanTask][EPGStation] DB missing paths after sync:\n' +
