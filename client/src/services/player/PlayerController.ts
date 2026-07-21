@@ -1646,39 +1646,50 @@ class PlayerController {
                         playback_buffer_seconds: this.getPlaybackBufferSeconds(),
                     }));
 
-                    // 再生バッファ調整のため、一旦停止させる
+                    // Safari 以外では再生バッファ調整のため、一旦停止させる
                     // this.player.video.pause() を使うとプレイヤーの UI アイコンが停止してしまうので、代わりに playbackRate を使う
                     console.log('\u001b[31m[PlayerController] Buffering...', this.getVideoPlaybackStateForLog({
                         playback_buffer_seconds: this.getPlaybackBufferSeconds(),
                     }));
-                    // Safari は MSE の canplay 発火後も play() が保留中の場合があり、ここで playbackRate=0 にすると
-                    // WebKit の再生開始処理そのものを停止させることがあるため、Safari では通常速度のままバッファを貯める
-                    if (Utils.isSafari() === false) {
+                    const is_safari = Utils.isSafari();
+                    if (is_safari === false) {
                         this.player.video.playbackRate = 0;
-                    }
 
-                    // 再生バッファが live_playback_buffer_seconds を超えるまで 0.1 秒おきに再生バッファをチェックする
-                    // 再生バッファが live_playback_buffer_seconds を切ると再生が途切れやすくなるので (特に動きの激しい映像)、
-                    // 再生開始までの時間を若干犠牲にして、再生バッファの調整と同期に時間を割く
-                    // live_playback_buffer_seconds の値は mpegts.js の liveSyncTargetLatency 設定に渡す値と共通
-                    const live_playback_buffer_seconds = this.live_playback_buffer_seconds;  // 毎回取得すると負荷が掛かるのでキャッシュする
-                    let current_playback_buffer_sec = this.getPlaybackBufferSeconds();
-                    while (current_playback_buffer_sec < live_playback_buffer_seconds) {
-                        await Utils.sleep(0.1);
-                        current_playback_buffer_sec = this.getPlaybackBufferSeconds();
-                    }
+                        // 再生バッファが live_playback_buffer_seconds を超えるまで 0.1 秒おきに再生バッファをチェックする
+                        // 再生バッファが live_playback_buffer_seconds を切ると再生が途切れやすくなるので (特に動きの激しい映像)、
+                        // 再生開始までの時間を若干犠牲にして、再生バッファの調整と同期に時間を割く
+                        // live_playback_buffer_seconds の値は mpegts.js の liveSyncTargetLatency 設定に渡す値と共通
+                        const live_playback_buffer_seconds = this.live_playback_buffer_seconds;  // 毎回取得すると負荷が掛かるのでキャッシュする
+                        let current_playback_buffer_sec = this.getPlaybackBufferSeconds();
+                        while (current_playback_buffer_sec < live_playback_buffer_seconds) {
+                            // バッファ調整中に PlayerController が破棄・再作成された場合、古い video 要素の待機処理を終了する
+                            if (this.destroyed === true || this.player === null) return;
+                            await Utils.sleep(0.1);
+                            current_playback_buffer_sec = this.getPlaybackBufferSeconds();
+                        }
 
-                    // 再生バッファ調整のため一旦停止していた再生を再び開始
-                    if (Utils.isSafari() === false) {
+                        // 再生バッファ調整のため一旦停止していた再生を再び開始
                         this.player.video.playbackRate = 1;
+
+                    // Safari 27 beta 4 では currentTime が再生に合わせて正確に進むため、通常速度で再生しながら
+                    // buffered.end() - currentTime が所定のバッファ秒数まで増えるのを待つと、値が一定のままになり得る
+                    // その状態ではこの後の一時ミュート解除へ永久に到達できないため、Safari ではバッファ秒数を待たず、
+                    // 既存の requestVideoFrameCallback() を用いた実フレーム提示検証へ進む
+                    } else {
+                        console.log('\u001b[31m[PlayerController] Safari skips startup buffer target wait while playback is progressing.', this.getVideoPlaybackStateForLog({
+                            playback_buffer_seconds: this.getPlaybackBufferSeconds(),
+                            live_playback_buffer_seconds: this.live_playback_buffer_seconds,
+                        }));
                     }
+
+                    const current_playback_buffer_sec = this.getPlaybackBufferSeconds();
                     console.log('\u001b[31m[PlayerController] Buffering completed.', this.getVideoPlaybackStateForLog({
                         playback_buffer_seconds: current_playback_buffer_sec,
                     }));
 
-                    // Safari では最初の play() が MSE 初期化待ちのまま保留されることがあるため、
-                    // 十分なバッファを確保した時点でもう一度再生を要求し、WebKit に再生可能状態を再評価させる
-                    if (Utils.isSafari() === true) {
+                    // Safari では最初の play() が MSE 初期化待ちのまま保留されることがあるため、MEDIA_INFO または
+                    // canplay(through) が発火して MSE の初期化が進んだ時点でもう一度再生を要求し、WebKit に再生可能状態を再評価させる
+                    if (is_safari === true) {
                         void this.player.video.play().catch((error) => {
                             console.warn('\u001b[31m[PlayerController] Safari playback retry after buffering failed:', error, this.getVideoPlaybackStateForLog());
                         });
