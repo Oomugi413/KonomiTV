@@ -1715,21 +1715,22 @@ class RecordedScanTask:
 
         try:
             logging.info(f'{file_path}: Starting background analysis task...')
-            # MMT/TLV は FFmpeg / CMSectionsDetector / ThumbnailGenerator がまだ直接扱えない。
-            # 録画一覧のメタデータ登録を優先し、重い後段解析は MPEG-TS / MP4 のみで実行する。
-            if recorded_program.recorded_video.container_format == 'MMT/TLV':
-                logging.info(f'{file_path}: Background analysis is skipped for MMT/TLV recordings.')
-                return
             # ProcessLimiter で稼働中のバックグラウンドタスクの同時実行数を CPU コア数の 50% に制限
             async with ProcessLimiter.getSemaphore('RecordedScanTask'):
                 # DriveIOLimiter で同一 HDD に対してのバックグラウンドタスクの同時実行数を原則1セッションに制限
                 async with DriveIOLimiter.getSemaphore(file_path):
-                    await asyncio.gather(
-                        # 録画ファイルの CM 区間を検出し DB に保存
-                        CMSectionsDetector(file_path, recorded_program.recorded_video.duration).detectAndSave(),
-                        # シークバー用サムネイルとリスト表示用の代表サムネイルの両方を生成
+                    # MMT/TLV はパッチ済み FFmpeg でサムネイルを生成できるが、CMSectionsDetector はまだ直接扱えない。
+                    # サムネイル生成は全形式で実行し、CM 区間検出だけを MMT/TLV で省略する。
+                    background_tasks = [
                         ThumbnailGenerator.fromRecordedProgram(recorded_program).generateAndSave(),
-                    )
+                    ]
+                    if recorded_program.recorded_video.container_format != 'MMT/TLV':
+                        background_tasks.append(
+                            CMSectionsDetector(file_path, recorded_program.recorded_video.duration).detectAndSave()
+                        )
+                    else:
+                        logging.info(f'{file_path}: CM section detection is skipped for MMT/TLV recordings.')
+                    await asyncio.gather(*background_tasks)
             logging.info(f'{file_path}: Background analysis task completed.')
 
             # バックグラウンド解析完了後に通知を送信（サムネイル生成完了後）

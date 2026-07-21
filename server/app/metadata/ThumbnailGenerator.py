@@ -46,6 +46,7 @@ class ThumbnailGenerator:
     WEBP_COMPRESSION: ClassVar[int] = 6  # WebP 圧縮レベル (0-6)
     WEBP_MAX_SIZE: ClassVar[int] = 16383  # WebP の最大サイズ制限 (px)
     FFMPEG_TIMEOUT: ClassVar[int] = 300  # FFmpeg サブプロセスのタイムアウト時間 (秒)
+    MMTS_FRAME_EXTRACTION_TIMEOUT: ClassVar[int] = 900  # MMT/TLV を FFmpeg で先頭から走査するフレーム抽出のタイムアウト時間 (秒)
     TSREADEX_FRAME_EXTRACTION_TIMEOUT: ClassVar[int] = 600  # tsreadex 経由のフレーム抽出タイムアウト時間 (秒)
     FRAME_EXTRACTION_MAX_DEMUX_PACKETS: ClassVar[int] = 20000  # 1候補位置でフレーム探索する最大パケット数
     FRAME_EXTRACTION_MAX_CONSECUTIVE_FAILURES: ClassVar[int] = 10  # 連続失敗時に残り候補を黒画像で埋める閾値
@@ -550,9 +551,12 @@ class ThumbnailGenerator:
             LoadConfig(bypass_validation=True)
 
         # 1. フレーム抽出を実行し、候補区間内のフレームをスコアリングして最良フレームを特定する
+        ## PyAV が同梱する FFmpeg には MMT/TLV demuxer がないため、MMT/TLV のみパッチ済み同梱 FFmpeg を使う。
         ## 映像 PID や映像ストリーム構成が途中で変わる TS は PyAV のストリーム固定シークと相性が悪いため、
         ## 該当録画だけ tsreadex で映像 PID を固定化した TS を順次デコードする
-        if self.has_video_stream_changes is True and self.container_format == 'MPEG-TS':
+        if self.container_format == 'MMT/TLV':
+            result = self.__extractAndScoreFramesWithFFmpeg(candidate_offsets)
+        elif self.has_video_stream_changes is True and self.container_format == 'MPEG-TS':
             result = self.__extractAndScoreFramesWithTSReadEx(candidate_offsets)
         else:
             result = self.__extractAndScoreFrames(candidate_offsets)
@@ -757,6 +761,122 @@ class ThumbnailGenerator:
 
         except Exception as ex:
             logging.error(f'{self.file_path}: Error in PyAV frame extraction and scoring:', exc_info=ex)
+            return None
+
+
+    def __extractAndScoreFramesWithFFmpeg(
+        self,
+        candidate_offsets: list[float],
+    ) -> tuple[list[NDArray[np.uint8]], int | None] | None:
+        """
+        MMT/TLV 録画を同梱 FFmpeg で順次デコードし、等間隔のサムネイルフレームを抽出する
+
+        Args:
+            candidate_offsets (list[float]): 抽出するフレームのタイムスタンプ (秒) のリスト
+
+        Returns:
+            tuple[list[NDArray[np.uint8]], int | None] | None:
+                - 全フレームの BGR 配列リスト (SCORING_SCALE)
+                - 最良フレームのインデック (候補区間内にフレームがない場合は None)
+                - エラー時は None
+        """
+
+        try:
+            start_time_frame_extraction = time.time()
+            scoring_width, scoring_height = self.SCORING_SCALE
+            expected_frame_count = len(candidate_offsets)
+            if expected_frame_count == 0:
+                return ([], None)
+
+            # PyAV の wheel が内蔵する FFmpeg には MMT/TLV demuxer がないため、
+            # thirdparty に同梱した MMT/TLV 対応 FFmpeg を別プロセスとして使う。
+            ## 4K HEVC を全フレームデコードすると負荷が高いため、I フレームだけをデコードし、
+            ## fps filter で従来と同じ tile_interval_sec ごとのフレームに揃える。
+            ffmpeg_options = [
+                LIBRARY_PATH['FFmpeg'],
+                '-nostdin',
+                '-loglevel', 'error',
+                '-f', 'mmttlv',
+                '-skip_frame', 'nointra',
+                '-i', str(self.file_path),
+                '-map', '0:v:0',
+                '-vf', (
+                    f'fps=fps=1/{self.tile_interval_sec:.6f}:start_time=0:round=down,'
+                    f'scale={scoring_width}:{scoring_height}'
+                ),
+                '-frames:v', str(expected_frame_count),
+                '-pix_fmt', 'bgr24',
+                '-f', 'rawvideo',
+                'pipe:1',
+            ]
+
+            # rawvideo を stdout から一括取得し、1フレームごとの BGR 配列に復元する。
+            ## 従来経路も全スコアリング用フレームをメモリ上に保持するため、メモリ使用量は同程度に収まる。
+            process = subprocess.run(
+                ffmpeg_options,
+                stdout = subprocess.PIPE,
+                stderr = subprocess.PIPE,
+                timeout = self.MMTS_FRAME_EXTRACTION_TIMEOUT,
+                check = False,
+            )
+            frame_size = scoring_width * scoring_height * 3
+            decoded_frame_count = len(process.stdout) // frame_size
+            trailing_byte_count = len(process.stdout) % frame_size
+
+            # FFmpeg から1枚もフレームを得られなかった場合は、終了コードにかかわらず生成失敗とする。
+            if decoded_frame_count == 0:
+                error_message = process.stderr.decode('utf-8', errors='ignore')[-4000:]
+                logging.error(
+                    f'{self.file_path}: FFmpeg MMT/TLV frame extraction failed. '
+                    f'[return_code: {process.returncode}]\n{error_message}'
+                )
+                return None
+
+            # 中途まで有効なフレームを得ている場合は、部分的なデコード成果をサムネイルに活用する。
+            if process.returncode != 0:
+                error_message = process.stderr.decode('utf-8', errors='ignore')[-4000:]
+                logging.warning(
+                    f'{self.file_path}: FFmpeg MMT/TLV frame extraction finished with an error after decoding '
+                    f'{decoded_frame_count} frames. [return_code: {process.returncode}]\n{error_message}'
+                )
+            if trailing_byte_count != 0:
+                logging.warning(
+                    f'{self.file_path}: FFmpeg MMT/TLV rawvideo output has incomplete trailing data. '
+                    f'[trailing_bytes: {trailing_byte_count}]'
+                )
+
+            # FFmpeg の出力は単一の bytes なので、各フレームが独立した書き込み可能な配列になるよう copy() する。
+            bgr_frames: list[NDArray[np.uint8]] = []
+            for frame_index in range(min(decoded_frame_count, expected_frame_count)):
+                frame_start = frame_index * frame_size
+                frame_end = frame_start + frame_size
+                frame = np.frombuffer(process.stdout[frame_start:frame_end], dtype=np.uint8)
+                bgr_frames.append(frame.reshape((scoring_height, scoring_width, 3)).copy())
+
+            # 録画末尾が想定より短い場合もタイルレイアウトを崩さないよう、不足分は最後の有効フレームで補う。
+            ## 有効フレームが1枚もない場合は上で失敗しているため、ここでは必ず末尾フレームを参照できる。
+            if len(bgr_frames) < expected_frame_count:
+                missing_frame_count = expected_frame_count - len(bgr_frames)
+                logging.warning(
+                    f'{self.file_path}: FFmpeg MMT/TLV frame extraction produced fewer frames than expected. '
+                    f'[expected: {expected_frame_count}, actual: {len(bgr_frames)}]'
+                )
+                bgr_frames.extend(bgr_frames[-1].copy() for _ in range(missing_frame_count))
+
+            logging.info(
+                f'{self.file_path}: FFmpeg extracted {len(bgr_frames)} MMT/TLV frames. '
+                f'({time.time() - start_time_frame_extraction:.2f} sec)'
+            )
+            return (bgr_frames, self.__scoreFrames(bgr_frames))
+
+        except subprocess.TimeoutExpired:
+            logging.error(
+                f'{self.file_path}: FFmpeg MMT/TLV frame extraction timed out after '
+                f'{self.MMTS_FRAME_EXTRACTION_TIMEOUT} seconds.'
+            )
+            return None
+        except Exception as ex:
+            logging.error(f'{self.file_path}: Error in FFmpeg MMT/TLV frame extraction and scoring:', exc_info=ex)
             return None
 
 
