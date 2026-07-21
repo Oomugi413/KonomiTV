@@ -6,6 +6,7 @@ on:
   push:
     branches:
       - master
+      - recording-chase-playback
     paths:
       - '.github/workflows/build_thirdparty.yaml'
       - '.github/workflows/scripts/build_intel_media_stack_standalone.sh'
@@ -22,13 +23,15 @@ env:
   PYTHON_VERSION: '3.11.15'
   # Poetry のバージョン
   POETRY_VERSION: '1.8.5'
-  # FFmpeg のバージョン (FFmpeg-Builds のリリースを指定する)
-  ## FFmpeg-Builds は毎月末のリリースが長期間保持されるため、基本毎月末のリリースを指定する
-  ## Linux 版の最新 HWEncC バイナリは libav* を静的リンクするようになり、FFmpeg 共有ライブラリの別途同梱は不要になった
-  ## ref: https://github.com/BtbN/FFmpeg-Builds/releases
-  FFMPEG_TAG: 'autobuild-2026-05-31-13-22'
-  FFMPEG_MAJOR_VERSION: '7.1'
-  FFMPEG_VERSION: '7.1.4-7-gadcf20da26'
+  # FFmpeg のバージョン
+  ## 公式 FFmpeg の固定タグに、msg7086-forks/FFmpeg:mmt 由来の MMT/TLV 対応パッチを適用してビルドする
+  ## ビルド環境には BtbN/FFmpeg-Builds の公開済み Docker イメージを使うが、FFmpeg 本体は必ずここで再ビルドする
+  ## ref: https://github.com/FFmpeg/FFmpeg/releases/tag/n8.1
+  ## ref: https://github.com/msg7086-forks/FFmpeg/commits/mmt/
+  ## ref: https://github.com/BtbN/FFmpeg-Builds
+  ## MMT/TLV パッチ元コミット: 249ad3c36ad36594dcf91c3ef7cf7f5716fc8a19..6c4e1554b6380dafc4939125dfdbf5292ce5f431
+  FFMPEG_SOURCE_TAG: 'n8.1'
+  FFMPEG_BUILDS_COMMIT_HASH: '8c736b2d6fe5da2a10a8896d01e53bfb0ca4f665'
   # QSVEncC・NVEncC・VCEEncC・rkmppenc のバージョン
   ## ref: https://github.com/rigaya/QSVEnc/releases
   ## ref: https://github.com/rigaya/NVEnc/releases
@@ -58,10 +61,88 @@ env:
 # ジョブの定義
 jobs:
 
+  # MMT/TLV 対応 FFmpeg のビルド
+  ## BtbN/FFmpeg-Builds のビルド環境を利用し、公式 FFmpeg の固定タグにリポジトリ内のパッチを適用する
+  ## Windows 版も Linux runner 上で MinGW 向けにクロスコンパイルする
+  build-ffmpeg:
+    strategy:
+      fail-fast: false  # 一つのビルドが失敗しても他のビルドは継続する
+      matrix:
+        include:
+          - target: win64
+            artifact_name: ffmpeg-mmt-win64
+            archive_name: ffmpeg-mmt-win64.zip
+          - target: linux64
+            artifact_name: ffmpeg-mmt-linux64
+            archive_name: ffmpeg-mmt-linux64.tar.xz
+          - target: linuxarm64
+            artifact_name: ffmpeg-mmt-linuxarm64
+            archive_name: ffmpeg-mmt-linuxarm64.tar.xz
+    runs-on: ubuntu-22.04
+    steps:
+
+      # MMT/TLV パッチを参照するため、リポジトリをチェックアウト
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # BtbN/FFmpeg-Builds のビルドスクリプトは固定コミットを使い、仕様変更で CI が突然変化しないようにする
+      - name: Checkout FFmpeg-Builds
+        run: |
+          git clone https://github.com/BtbN/FFmpeg-Builds.git
+          cd FFmpeg-Builds/
+          git checkout ${{ env.FFMPEG_BUILDS_COMMIT_HASH }}
+
+      # 公式 FFmpeg のソースに MMT/TLV パッチを適用し、従来と同じ GPL shared 構成でビルド
+      ## FFmpeg-Builds の build.sh には FFmpeg 本体向けパッチフックがないため、
+      ## ビルド用コンテナーへ patches/ffmpeg/ を read-only mount し、configure より前に git am する処理を追加する
+      - name: Build Patched FFmpeg
+        working-directory: FFmpeg-Builds/
+        env:
+          FFMPEG_PATCH_DIR: ${{ github.workspace }}/.github/workflows/patches/ffmpeg
+          FFMPEG_REPO_OVERRIDE: https://github.com/FFmpeg/FFmpeg.git
+          GIT_BRANCH_OVERRIDE: ${{ env.FFMPEG_SOURCE_TAG }}
+        run: |
+          sed -i '/^    cd ffmpeg$/a\    git config user.name "KonomiTV Build Bot"\n    git config user.email "noreply@konomi.tv"\n    git am /ffmpeg-patches/*.patch' build.sh
+          sed -i 's|-v "$BUILD_SCRIPT":/build.sh|-v "$BUILD_SCRIPT":/build.sh -v "$FFMPEG_PATCH_DIR":/ffmpeg-patches:ro|' build.sh
+
+          # build.sh は GITHUB_REPOSITORY からイメージ名を組み立てるため、公式イメージを実行中のリポジリ名に付け替える
+          official_image="ghcr.io/btbn/ffmpeg-builds/${{ matrix.target }}-gpl-shared-8.1:latest"
+          local_image="ghcr.io/${GITHUB_REPOSITORY,,}/${{ matrix.target }}-gpl-shared-8.1:latest"
+          docker pull "$official_image"
+          docker tag "$official_image" "$local_image"
+
+          ./build.sh ${{ matrix.target }} gpl-shared 8.1
+
+          # FFmpeg-Builds が生成したバージョン付きファイル名を、後続 job から固定名で参照できるように変更する
+          mapfile -t archives < <(find artifacts -maxdepth 1 -type f \( -name '*.zip' -o -name '*.tar.xz' \) | sort)
+          if [ "${#archives[@]}" -ne 1 ]; then
+            echo "Expected exactly one FFmpeg archive, found ${#archives[@]}." >&2
+            find artifacts -maxdepth 1 -type f -print | sort >&2
+            exit 1
+          fi
+          mv "${archives[0]}" "../${{ matrix.archive_name }}"
+
+      # 既に zip / tar.xz で圧縮済みのため、Artifact 側では再圧縮しない
+      - name: Upload Patched FFmpeg as Artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.archive_name }}
+          if-no-files-found: error
+          archive: false
+
   # Windows 向けのサードパーティーライブラリのビルド
   build-windows:
+    needs: build-ffmpeg
     runs-on: windows-2022
     steps:
+
+      # MMT/TLV 対応済み FFmpeg のクロスコンパイル成果物をダウンロード
+      - name: Download Patched FFmpeg
+        uses: actions/download-artifact@v8
+        with:
+          name: ffmpeg-mmt-win64
+          path: .
 
       # MSBuild を PATH に追加
       - name: Add MSBuild to PATH
@@ -123,17 +204,16 @@ jobs:
           cp akebi-https-server.exe ../thirdparty/Akebi/akebi-https-server.exe
           cp License.txt ../thirdparty/Akebi/
 
-      # FFmpeg・QSVEncC・NVEncC・VCEEncC のアーカイブのダウンロード
-      # 実際にビルドすると時間がかかりすぎるので、アーカイブをダウンロードして配置する
+      # FFmpeg・QSVEncC・NVEncC・VCEEncC のアーカイブの配置
+      # FFmpeg は先行 job のビルド成果物、HWEncC は公開済みアーカイブを使う
       - name: Download and Deploy Encoder Archives
         run: |
 
-          # FFmpeg のアーカイブのダウンロード
-          curl -fSLO https://github.com/BtbN/FFmpeg-Builds/releases/download/${{ env.FFMPEG_TAG }}/ffmpeg-n${{ env.FFMPEG_VERSION }}-win64-gpl-shared-${{ env.FFMPEG_MAJOR_VERSION }}.zip
-          7z x -y ffmpeg-n${{ env.FFMPEG_VERSION }}-win64-gpl-shared-${{ env.FFMPEG_MAJOR_VERSION }}.zip
+          # FFmpeg のビルド成果物を展開
+          7z x -y ffmpeg-mmt-win64.zip
           mkdir thirdparty/FFmpeg/
-          cp ffmpeg-n${{ env.FFMPEG_VERSION }}-win64-gpl-shared-${{ env.FFMPEG_MAJOR_VERSION }}/bin/* thirdparty/FFmpeg/
-          cp ffmpeg-n${{ env.FFMPEG_VERSION }}-win64-gpl-shared-${{ env.FFMPEG_MAJOR_VERSION }}/LICENSE.txt thirdparty/FFmpeg/License.txt
+          cp ffmpeg-*/bin/* thirdparty/FFmpeg/
+          cp ffmpeg-*/LICENSE.txt thirdparty/FFmpeg/License.txt
           rm thirdparty/FFmpeg/ffplay.exe
 
           # QSVEncC のアーカイブのダウンロード
@@ -187,6 +267,7 @@ jobs:
 
   # Linux 向けのサードパーティーライブラリのビルド
   build-linux:
+    needs: build-ffmpeg
     strategy:
       fail-fast: false  # 一つのビルドが失敗しても他のビルドは継続する
       matrix:
@@ -198,17 +279,28 @@ jobs:
             # ref: https://gregoryszorc.com/docs/python-build-standalone/main/running.html
             python_arch_name: x86_64_v2
             artifact_suffix: ''
+            ffmpeg_artifact_name: ffmpeg-mmt-linux64
+            ffmpeg_archive_name: ffmpeg-mmt-linux64.tar.xz
           # arm64 アーキテクチャ向けのビルド設定
           - arch: arm64
             runner: ubuntu-22.04-arm
             python_arch_name: aarch64
             artifact_suffix: '-arm'
+            ffmpeg_artifact_name: ffmpeg-mmt-linuxarm64
+            ffmpeg_archive_name: ffmpeg-mmt-linuxarm64.tar.xz
     runs-on: ${{ matrix.runner }}
     steps:
 
       # build_thirdparty.yaml から参照する script / patch を使うため、リポジトリをチェックアウト
       - name: Checkout Repository
         uses: actions/checkout@v4
+
+      # アーキテクチャごとの MMT/TLV 対応済み FFmpeg ビルド成果物をダウンロード
+      - name: Download Patched FFmpeg
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.ffmpeg_artifact_name }}
+          path: .
 
       # Docker Buildx のセットアップ
       - name: Set up Docker Buildx
@@ -326,13 +418,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y p7zip-full patchelf
 
-          # FFmpeg のアーカイブのダウンロード
-          curl -fSLO https://github.com/BtbN/FFmpeg-Builds/releases/download/${{ env.FFMPEG_TAG }}/ffmpeg-n${{ env.FFMPEG_VERSION }}-linux64-gpl-shared-${{ env.FFMPEG_MAJOR_VERSION }}.tar.xz
-          tar xvf ffmpeg-n${{ env.FFMPEG_VERSION }}-linux64-gpl-shared-${{ env.FFMPEG_MAJOR_VERSION }}.tar.xz
+          # FFmpeg のビルド成果物を展開
+          tar xvf ${{ matrix.ffmpeg_archive_name }}
           mkdir thirdparty/FFmpeg/
-          cp ffmpeg-n${{ env.FFMPEG_VERSION }}-linux64-gpl-shared-${{ env.FFMPEG_MAJOR_VERSION }}/bin/* thirdparty/FFmpeg/
-          cp -r ffmpeg-n${{ env.FFMPEG_VERSION }}-linux64-gpl-shared-${{ env.FFMPEG_MAJOR_VERSION }}/lib/* thirdparty/FFmpeg/
-          cp ffmpeg-n${{ env.FFMPEG_VERSION }}-linux64-gpl-shared-${{ env.FFMPEG_MAJOR_VERSION }}/LICENSE.txt thirdparty/FFmpeg/License.txt
+          cp ffmpeg-*/bin/* thirdparty/FFmpeg/
+          cp -r ffmpeg-*/lib/* thirdparty/FFmpeg/
+          cp ffmpeg-*/LICENSE.txt thirdparty/FFmpeg/License.txt
           rm -rf thirdparty/FFmpeg/pkgconfig
           mv thirdparty/FFmpeg/ffmpeg thirdparty/FFmpeg/ffmpeg.elf
           mv thirdparty/FFmpeg/ffprobe thirdparty/FFmpeg/ffprobe.elf
@@ -430,13 +521,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y p7zip-full patchelf
 
-          # FFmpeg のアーカイブのダウンロード
-          curl -fSLO https://github.com/BtbN/FFmpeg-Builds/releases/download/${{ env.FFMPEG_TAG }}/ffmpeg-n${{ env.FFMPEG_VERSION }}-linuxarm64-gpl-shared-${{ env.FFMPEG_MAJOR_VERSION }}.tar.xz
-          tar xvf ffmpeg-n${{ env.FFMPEG_VERSION }}-linuxarm64-gpl-shared-${{ env.FFMPEG_MAJOR_VERSION }}.tar.xz
+          # FFmpeg のビルド成果物を展開
+          tar xvf ${{ matrix.ffmpeg_archive_name }}
           mkdir thirdparty/FFmpeg/
-          cp ffmpeg-n${{ env.FFMPEG_VERSION }}-linuxarm64-gpl-shared-${{ env.FFMPEG_MAJOR_VERSION }}/bin/* thirdparty/FFmpeg/
-          cp -r ffmpeg-n${{ env.FFMPEG_VERSION }}-linuxarm64-gpl-shared-${{ env.FFMPEG_MAJOR_VERSION }}/lib/* thirdparty/FFmpeg/
-          cp ffmpeg-n${{ env.FFMPEG_VERSION }}-linuxarm64-gpl-shared-${{ env.FFMPEG_MAJOR_VERSION }}/LICENSE.txt thirdparty/FFmpeg/License.txt
+          cp ffmpeg-*/bin/* thirdparty/FFmpeg/
+          cp -r ffmpeg-*/lib/* thirdparty/FFmpeg/
+          cp ffmpeg-*/LICENSE.txt thirdparty/FFmpeg/License.txt
           rm -rf thirdparty/FFmpeg/pkgconfig
           mv thirdparty/FFmpeg/ffmpeg thirdparty/FFmpeg/ffmpeg.elf
           mv thirdparty/FFmpeg/ffprobe thirdparty/FFmpeg/ffprobe.elf
@@ -493,9 +583,11 @@ jobs:
           tar cvf thirdparty-linux${{ matrix.artifact_suffix }}.tar thirdparty
           7z a -txz -m0=LZMA2 -mx=9 -md=128m -mfb=128 -mmt=on thirdparty-linux${{ matrix.artifact_suffix }}.tar.xz thirdparty-linux${{ matrix.artifact_suffix }}.tar
 
-      # 7z で圧縮したサードパーティーライブラリを Artifact としてアップロード
+      # tar.xz で圧縮済みのサードパーティーライブラリを、Artifact 側で再圧縮せずにアップロード
       - name: Upload Thirdparty Libraries as Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: thirdparty-linux${{ matrix.artifact_suffix }}.tar.xz
           path: thirdparty-linux${{ matrix.artifact_suffix }}.tar.xz
+          if-no-files-found: error
+          archive: false
