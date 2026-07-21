@@ -573,7 +573,9 @@ async def GetThumbnailResponse(
         media_type = media_type,
         stat_result = stat_result,
         headers = {
-            'Cache-Control': 'public, no-transform, immutable, max-age=2592000',  # 30日間キャッシュ
+            # サムネイル再生成後も URL は変わらないため、immutable や長期間の fresh cache を指定してはいけない。
+            ## 毎回 ETag を再検証させることで、未変更時は 304 の軽量レスポンスを返し、再生成時だけ新しい画像を配信する。
+            'Cache-Control': 'public, no-transform, max-age=0, must-revalidate',
         },
     )
 
