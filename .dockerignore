@@ -13,6 +13,7 @@ server/data/*
 
 # サードパーティーライブラリ: Docker 側でファイルを準備するため不要
 server/thirdparty/
+server/debug_dump_nal.bin
 
 # ローカルビルド成果物・ログ・BuildKit キャッシュ: ビルドコンテキストへの再取り込みを防ぐ
 .build/
