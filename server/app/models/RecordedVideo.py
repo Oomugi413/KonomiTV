@@ -44,10 +44,10 @@ class RecordedVideo(TortoiseModel):
     video_resolution_height = fields.IntField()
     has_video_stream_changes = fields.BooleanField(default=False)
     primary_audio_codec = cast(TortoiseField[Literal['AAC-LC']], fields.CharField(255))
-    primary_audio_channel = cast(TortoiseField[Literal['Monaural', 'Stereo', '5.1ch']], fields.CharField(255))
+    primary_audio_channel = cast(TortoiseField[Literal['Monaural', 'Stereo', '3ch', '4ch', '5ch', '5.1ch', '6.1ch', '7.1ch', '10.2ch', '22.2ch']], fields.CharField(255))
     primary_audio_sampling_rate = fields.IntField()
     secondary_audio_codec = cast(TortoiseField[Literal['AAC-LC'] | None], fields.CharField(255, null=True))
-    secondary_audio_channel = cast(TortoiseField[Literal['Monaural', 'Stereo', '5.1ch'] | None], fields.CharField(255, null=True))
+    secondary_audio_channel = cast(TortoiseField[Literal['Monaural', 'Stereo', '3ch', '4ch', '5ch', '5.1ch', '6.1ch', '7.1ch', '10.2ch', '22.2ch'] | None], fields.CharField(255, null=True))
     secondary_audio_sampling_rate = cast(TortoiseField[int | None], fields.IntField(null=True))
     key_frames = cast(TortoiseField[list[KeyFrame]],
         fields.JSONField(default=[], encoder=lambda x: json.dumps(x, ensure_ascii=False)))  # type: ignore

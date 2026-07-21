@@ -168,10 +168,10 @@ class RecordedVideo(PydanticModel):
     def has_key_frames(self) -> bool:
         return self.status == 'Recorded'
     primary_audio_codec: Literal['AAC-LC']
-    primary_audio_channel: Literal['Monaural', 'Stereo', '5.1ch']
+    primary_audio_channel: Literal['Monaural', 'Stereo', '3ch', '4ch', '5ch', '5.1ch', '6.1ch', '7.1ch', '10.2ch', '22.2ch']
     primary_audio_sampling_rate: int
     secondary_audio_codec: Literal['AAC-LC'] | None = None
-    secondary_audio_channel: Literal['Monaural', 'Stereo', '5.1ch'] | None = None
+    secondary_audio_channel: Literal['Monaural', 'Stereo', '3ch', '4ch', '5ch', '5.1ch', '6.1ch', '7.1ch', '10.2ch', '22.2ch'] | None = None
     secondary_audio_sampling_rate: int | None = None
     cm_sections: list[CMSection] | None = None
     thumbnail_info: ThumbnailInfo | None = None

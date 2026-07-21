@@ -283,7 +283,7 @@ class MetadataAnalyzer:
         ## 取得に失敗した場合は KonomiTV で再生可能なファイルではないと判断し、None を返す
         result = self.__analyzeFFprobe()
         if result is None:
-            # FFprobe は BS4K/BS8K の MMT/TLV を直接扱えないため、MMT-SI から録画メタデータを復元する。
+            # FFprobe は BS4K の MMT/TLV を直接扱えないため、MMT-SI から録画メタデータを復元する。
             # ここでは従来の MPEG-TS / MP4 解析には一切触れず、MMT/TLV と probe できるファイルだけ専用解析へ進める。
             if MMTSInfoAnalyzer.probe(self.recorded_file_path) is True:
                 try:

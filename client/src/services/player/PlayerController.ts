@@ -43,16 +43,9 @@ class PlayerController {
     private static readonly LIVE_PLAYBACK_BUFFER_SECONDS = 4.0;
 
     // ライブ視聴: Raw MMTS 向けの再生開始待ちバッファ (秒単位)
-    // 入力側の揺らぎは stash buffer で吸収し、MediaSource 側は burst 時に 2 秒程度の余裕を維持する
-    private static readonly LIVE_MMTS_PLAYBACK_BUFFER_SECONDS = 2.0;
-
-    // ライブ視聴: BS4K Raw MMTS 向けの mpegts.js stash buffer サイズ
-    // BS4K は通常 1 トランスポンダーに 3 チャンネル程度多重されるため、BS8K 向け stash の 1/3 程度を確保する
-    private static readonly LIVE_BS4K_MMTS_STASH_INITIAL_SIZE = 10 * 1024 * 1024;
-
-    // ライブ視聴: BS8K Raw MMTS 向けの mpegts.js stash buffer サイズ
-    // BS8K は BS4K よりビットレートが高いため、同程度の時間幅を確保できるようさらに大きめにする
-    private static readonly LIVE_BS8K_MMTS_STASH_INITIAL_SIZE = 30 * 1024 * 1024;
+    // TLV/MMT の境界端数は demuxer 自身が保持できるため、低遅延時は大きな IO stash を置かず
+    // CRA から音声を含む再生可能範囲が短く揃う分だけ待つ。
+    private static readonly LIVE_MMTS_PLAYBACK_BUFFER_SECONDS = 0.75;
 
     // ライブ視聴: Raw MMTS 向けの SourceBuffer 保持時間 (秒単位)
     // ブラウザ側のメモリ肥大を避けつつ、多少の揺らぎや手動同期には耐えられるだけの後方バッファを残す
@@ -272,24 +265,6 @@ class PlayerController {
             return PlayerController.LIVE_MMTS_PLAYBACK_BUFFER_SECONDS;
         }
         return this.live_playback_buffer_seconds;
-    }
-
-
-    /**
-     * ライブ視聴: 現在のチャンネルに応じた Raw MMTS 向け stash buffer サイズ
-     */
-    private get live_mmts_stash_initial_size(): number {
-        const channels_store = useChannelsStore();
-
-        // NHK BS8K は HonomiTV 上では BS4K 種別として扱われるため、NID/SID で個別判定する
-        if (
-            this.playback_mode === 'Live' &&
-            channels_store.channel.current.network_id === 11 &&
-            channels_store.channel.current.service_id === 102
-        ) {
-            return PlayerController.LIVE_BS8K_MMTS_STASH_INITIAL_SIZE;
-        }
-        return PlayerController.LIVE_BS4K_MMTS_STASH_INITIAL_SIZE;
     }
 
 
@@ -579,11 +554,13 @@ class PlayerController {
             // Primary では渡さず、mmts.js 側で Primary/Secondary 映像を自動選択させる
             const current_quality = dplayer.quality as MMTSVideoQuality | null;
             if (current_quality?.type === 'mmts' && dplayer.options.live === true) {
-                // Raw MMTS は 4K HEVC をそのまま MSE に積むため、通常の MPEG-TS 向け低遅延設定ではバッファが薄くなりやすい
-                // ここでは latency chasing を止め、起動時 stash / SourceBuffer 保持を増やして多少の受信揺らぎを吸収する
+                // 10/30 MiB の generic IO stash は BS4K/8K では数秒分の遅延になる。
+                // TLV 境界端数は MMTSDemuxer が保持するため直接渡し、MSE には短い再生可能範囲だけ先行させる。
                 Object.assign(mpegts_config, {
-                    enableStashBuffer: true,
-                    stashInitialSize: this.live_mmts_stash_initial_size,
+                    enableStashBuffer: false,
+                    startupBufferDuration: PlayerController.LIVE_MMTS_PLAYBACK_BUFFER_SECONDS,
+                    mmtsLiveInitialBufferDuration: PlayerController.LIVE_MMTS_PLAYBACK_BUFFER_SECONDS,
+                    mseAppendBatchDuration: 0.15,
                     liveSync: false,
                     autoCleanupSourceBuffer: true,
                     autoCleanupMaxBackwardDuration: PlayerController.LIVE_MMTS_AUTO_CLEANUP_MAX_BACKWARD_DURATION,
@@ -685,8 +662,8 @@ class PlayerController {
             lang: 'ja-jp',
             // ライブモード (ビデオ視聴では無効)
             live: this.playback_mode === 'Live' ? true : false,
-            // Raw MMTS では DPlayer の play() 時自動 live sync が MediaSource 側のバッファを削りやすい
-            // 手動の Live バッジ同期は残しつつ、Raw MMTS だけ自動同期を止めて 2 秒程度の buffer remain を維持する
+            // Raw MMTS では DPlayer の play() 時自動 seek が映像の参照関係を壊しやすいため無効化する。
+            // 起動位置は短い startup gate で live edge 側に揃え、再生中は等速のまま維持する。
             syncWhenPlayingLive: is_bs4k_live_channel === false,
             // ライブモードで同期する際の最小バッファサイズ
             liveSyncMinBufferSize: (is_bs4k_live_channel === true ?
@@ -1815,7 +1792,7 @@ class PlayerController {
                     // 再生バッファが current_live_playback_buffer_seconds を超えるまで 0.1 秒おきに再生バッファをチェックする
                     // 再生バッファが current_live_playback_buffer_seconds を切ると再生が途切れやすくなるので (特に動きの激しい映像)、
                     // 再生開始までの時間を若干犠牲にして、再生バッファの調整と同期に時間を割く
-                    // Raw MMTS では通常 MPEG-TS より大きい値を使い、4K HEVC の burst に耐えられる余裕を作る
+                    // Raw MMTS は demuxer 側の短い startup gate と同じ値を使い、二重に数秒待たない
                     const live_playback_buffer_seconds = this.current_live_playback_buffer_seconds;  // 毎回取得すると負荷が掛かるのでキャッシュする
                     let current_playback_buffer_sec = this.getPlaybackBufferSeconds();
                     while (current_playback_buffer_sec < live_playback_buffer_seconds) {
