@@ -8,10 +8,7 @@ on:
       - master
     paths:
       - '.github/workflows/build_thirdparty.yaml'
-      - '.github/workflows/docker/nvencc-ubuntu24.04.Dockerfile'
-      - '.github/workflows/scripts/build_nvencc_local.sh'
       - '.github/workflows/scripts/build_intel_media_stack_standalone.sh'
-      - '.github/workflows/scripts/verify_nvencc.sh'
       - '.github/workflows/patches/**'
   workflow_call:
   workflow_dispatch:
@@ -34,16 +31,11 @@ env:
   FFMPEG_VERSION: '7.1.4-7-gadcf20da26'
   # QSVEncC・NVEncC・VCEEncC・rkmppenc のバージョン
   ## ref: https://github.com/rigaya/QSVEnc/releases
-  ## ref: https://github.com/rigaya/NVEnc/releases
+  ## ref: https://github.com/Oomugi413/NVEnc/releases
   ## ref: https://github.com/rigaya/VCEEnc/releases
   ## ref: https://github.com/rigaya/rkmppenc/releases
   QSVENCC_VERSION: '8.16'
-  NVENCC_VERSION: '9.25'
-  # NVEncC のビルドに使用する CUDA バージョン (12.8 以降)
-  NVENCC_CUDA_VERSION: '12.8.1'
-  # NVEncC 9.25 と互換性を確認済みの FFmpeg バージョン
-  ## build_scripts の既定ブランチが未対応の FFmpeg 開発版へ移行してもビルドを壊さないよう数値で固定する
-  NVENCC_FFMPEG_VERSION: '8.1.2'
+  NVENCC_VERSION: '9.25.1'
   VCEENCC_VERSION: '9.06'
   RKMPPENC_VERSION: '0.18'
   # QSVEncC 向け Intel Media Stack の固定バージョン
@@ -152,11 +144,11 @@ jobs:
           curl -fSL -o thirdparty/QSVEncC/License.txt https://raw.githubusercontent.com/rigaya/QSVEnc/master/license.txt
 
           # NVEncC のアーカイブのダウンロード
-          curl -fSLO https://github.com/rigaya/NVEnc/releases/download/${{ env.NVENCC_VERSION }}/NVEncC_${{ env.NVENCC_VERSION }}_x64.7z
+          curl -fSLO https://github.com/Oomugi413/NVEnc/releases/download/${{ env.NVENCC_VERSION }}/NVEncC_${{ env.NVENCC_VERSION }}_x64.7z
           7z x -y -o"thirdparty/NVEncC" NVEncC_${{ env.NVENCC_VERSION }}_x64.7z
           rm -Force thirdparty/NVEncC/hdr10plus_gen.exe -ErrorAction SilentlyContinue
           mv thirdparty/NVEncC/NVEncC64.exe thirdparty/NVEncC/NVEncC.exe
-          curl -fSL -o thirdparty/NVEncC/License.txt https://raw.githubusercontent.com/rigaya/NVEnc/master/NVEnc_license.txt
+          curl -fSL -o thirdparty/NVEncC/License.txt https://raw.githubusercontent.com/Oomugi413/NVEnc/master/NVEnc_license.txt
 
           # VCEEncC のアーカイブのダウンロード
           curl -fSLO https://github.com/rigaya/VCEEnc/releases/download/${{ env.VCEENCC_VERSION }}/VCEEncC_${{ env.VCEENCC_VERSION }}_x64.7z
@@ -221,23 +213,6 @@ jobs:
       # Docker Buildx のセットアップ
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
-      # upstream の Ubuntu 向け NVEncC は CUDA 11.2 でビルドされており、RTX 50 シリーズ向けの sm_120 を含まない。
-      # NVIDIA 公式の Ubuntu 24.04 / CUDA 12.8 以降の環境で再ビルドし、成果物内の CUDA コードと依存関係も検証する。
-      - name: Build NVEncC with configured CUDA (for x64)
-        if: matrix.arch == 'amd64'
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: .github/workflows/docker/nvencc-ubuntu24.04.Dockerfile
-          build-args: |
-            NVENCC_VERSION=${{ env.NVENCC_VERSION }}
-            NVENCC_CUDA_VERSION=${{ env.NVENCC_CUDA_VERSION }}
-            NVENCC_FFMPEG_VERSION=${{ env.NVENCC_FFMPEG_VERSION }}
-          target: artifact
-          outputs: type=local,dest=nvencc-build
-          cache-from: type=gha,scope=nvencc-ubuntu24.04-cuda-${{ env.NVENCC_CUDA_VERSION }}
-          cache-to: type=gha,scope=nvencc-ubuntu24.04-cuda-${{ env.NVENCC_CUDA_VERSION }},mode=max
 
       # Dockerfile を作成
       - name: Create Dockerfile
@@ -424,13 +399,14 @@ jobs:
           patchelf --set-rpath '$ORIGIN:$ORIGIN/../Library' thirdparty/QSVEncC/QSVEncC.elf
           curl -fSL -o thirdparty/QSVEncC/License.txt https://raw.githubusercontent.com/rigaya/QSVEnc/master/license.txt
 
-          # Ubuntu 24.04 / CUDA 12.8 以降で自前ビルドし、sm_120 を検証済みの NVEncC を配置
+          # NVEncC のアーカイブのダウンロード
+          curl -fSLO https://github.com/Oomugi413/NVEnc/releases/download/${{ env.NVENCC_VERSION }}/nvencc_${{ env.NVENCC_VERSION }}_amd64.deb
+          7z x -y nvencc_${{ env.NVENCC_VERSION }}_amd64.deb && tar xvf data.tar
           mkdir thirdparty/NVEncC/
-          cp nvencc-build/NVEncC.elf thirdparty/NVEncC/NVEncC.elf
-          cp nvencc-build/License.txt thirdparty/NVEncC/License.txt
-          cp nvencc-build/BuildInfo.txt thirdparty/NVEncC/BuildInfo.txt
+          cp usr/bin/nvencc thirdparty/NVEncC/NVEncC.elf
           chmod a+x thirdparty/NVEncC/NVEncC.elf
           patchelf --set-rpath '$ORIGIN:$ORIGIN/../lib:$ORIGIN/../Library' thirdparty/NVEncC/NVEncC.elf
+          curl -fSL -o thirdparty/NVEncC/License.txt https://raw.githubusercontent.com/Oomugi413/NVEnc/master/NVEnc_license.txt
 
           # VCEEncC のアーカイブのダウンロード
           curl -fSLO https://github.com/rigaya/VCEEnc/releases/download/${{ env.VCEENCC_VERSION }}/vceencc_${{ env.VCEENCC_VERSION }}_amd64.deb
