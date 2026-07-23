@@ -1,36 +1,38 @@
 # RTX 50 シリーズ向け NVEncC 対応まとめ
 
-- Codex セッション ID: `019f8353-44ae-7bb0-a00c-75d4f18ccdb8`
-- 対象: KonomiTV Linux x64 / Ubuntu 24.04 / NVIDIA GeForce RTX 50 シリーズ
-- 実装コミット: `0f031493 Build NVEncC 9.25 with configurable CUDA`
-- GitHub への push: 未実施（ローカルは `origin/master` より1コミット先行）
-
 ## 原因
 
-従来の NVEncC 9.17 / CUDA 11.2 ビルドは動作した一方、手動配置した新版は KonomiTV の「エンコードを開始しています」で停止した。RTX 50 シリーズ向けのネイティブ CUDA コードを含む、依存関係が整合したスタンドアローン版を作り直す必要があった。
+従来の NVEncC 配布バイナリでは、NVIDIA GeForce RTX 50 シリーズ（Blackwell）でエンコードが正常に進まない問題があった。
 
-## 修正内容
+## 現在の対応
 
-- `.github/workflows/build_thirdparty.yaml` の Linux amd64 Thirdparty ビルドで、NVEncC のソースビルドを配置・圧縮より前に実行するよう変更。
-- NVEncC は数値タグ `9.25`、FFmpeg は `8.1.2` に固定。SVT-AV1 の個別バージョン固定は撤廃し、SVT-AV1 4.1.0 でビルドを確認。
-- CUDA は `NVENCC_CUDA_VERSION` 一か所で変更可能にし、現在は `12.8.1`。厳密な CUDA バージョン一致検査は設けていない。
-- Ubuntu 24.04 の NVIDIA CUDA devel イメージでビルドし、`sm_120` cubin、NVEncC バージョン、共有ライブラリ依存を検証。
-- upstream `build_scripts` の Linux Vulkan Loader 静的リンク不備を Dockerfile 内で補正。
-- `.build/NVEncC/` に成果物・ログ・再利用可能な BuildKit キャッシュを保存し、Git/Docker コンテキストから除外。
-- ローカル再現用 `build_nvencc_local.sh` と成果物検証用 `verify_nvencc.sh` を追加。
+- Blackwell 対応を加えた [`Oomugi413/NVEnc`](https://github.com/Oomugi413/NVEnc) のリリースを使用する。
+- NVEncC のバージョンは `9.25.1` に固定する。
+- Windows x64 では `NVEncC_9.25.1_x64.7z`、Linux x64 では `nvencc_9.25.1_amd64.deb` をダウンロードする。
+- Windows / Linux ともに、ライセンスファイルを含めてフォークリポジトリから取得する。
+- `.github/workflows/build_thirdparty.yaml` で配布アーカイブを展開し、KonomiTV の Thirdparty アーカイブへ収録する。
+- Linux 版では、展開した `nvencc` を `NVEncC.elf` として配置し、同梱ライブラリを参照できるよう RPATH を設定する。
 
-## 検証結果
+## GitHub Actions の実行環境
 
-- NVEncC 9.25 / CUDA 12.8 / FFmpeg 8.1.2 の通しビルドに成功。
-- `sm_120` cubin を84個検出し、必須ライブラリの静的リンクを確認。
-- RTX 5070 Ti と実録画 TS を使った KonomiTV 相当のエンコード試験で、5,570フレームを約9秒・568.19fpsで処理し、正常終了（終了コード0）。
-- KonomiTV でのユーザーによる再生試験も成功。
-- `server/thirdparty/NVEncC/NVEncC.elf` を9.25へ更新し、旧9.17は `NVEncC.elf.old` に退避。
-- GitHub Actions の処理順が `NVEncC build → x64 deploy → Thirdparty compress → artifact upload` であること、および Dockerfile の BuildKit 静的検査が警告なしであることを再確認。
+- Windows x64: `windows-2025`
+- Linux x64: `ubuntu-26.04`
+- Linux arm64: `ubuntu-26.04-arm`
+- Ubuntu 26.04 では実パッケージ名の `7zip` と `patchelf` を明示的にインストールする。
+- Linux 向け成果物の実行環境互換性を維持するため、tsreadex・psisiarc・psisimux・Intel Media Stack などのビルドには、引き続き Ubuntu 20.04 ベースのコンテナを使用する。
 
-## 主なローカル成果物
+## Linux 版パッケージの展開
 
-- ビルド済みバイナリ: `.build/NVEncC/output/NVEncC.elf`
-- ビルド情報: `.build/NVEncC/output/BuildInfo.txt`
-- 成功した通しビルドログ: `.build/NVEncC/logs/build-20260721-213955.log`
-- 実 GPU 試験ログ: `.build/NVEncC/logs/runtime-smoke.log`
+`nvencc_9.25.1_amd64.deb` のデータアーカイブは `data.tar.zst` 形式で格納されている。
+
+GitHub Actions `Build Thirdparty Libraries #33` では、Ubuntu 22.04 の p7zip 16.02 が Zstandard を展開できず、直前に展開した QSVEncC の `data.tar` が再利用された。その結果、`usr/bin/nvencc` が作成されず、コピー処理が失敗した。
+
+Ubuntu 26.04 に収録される 7-Zip 26.00 は、この Debian パッケージ内の `data.tar.zst` を展開できる。これに合わせて Linux x64 / arm64 の runner を Ubuntu 26.04 へ更新した。
+
+## 検証状況
+
+- フォークリポジトリの Windows x64 / Linux x64 向け `9.25.1` リリースアセットが取得可能であることを確認済み。
+- Linux の Debian パッケージに `usr/bin/nvencc` が含まれることを確認済み。
+- Windows ジョブでは、NVEncC `9.25.1` のダウンロード・展開を含む Thirdparty アーカイブ生成に成功済み。
+- 7-Zip 26.00 で Linux の Debian パッケージを展開できることを確認済み。
+- Ubuntu 26.04 runner へ更新したワークフロー全体の完走確認は、次回の GitHub Actions 実行で行う。

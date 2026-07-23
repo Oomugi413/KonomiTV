@@ -60,7 +60,7 @@ jobs:
 
   # Windows 向けのサードパーティーライブラリのビルド
   build-windows:
-    runs-on: windows-2022
+    runs-on: windows-2025
     steps:
 
       # MSBuild を PATH に追加
@@ -193,14 +193,14 @@ jobs:
         include:
           # x64 アーキテクチャ向けのビルド設定
           - arch: amd64
-            runner: ubuntu-22.04
+            runner: ubuntu-26.04
             # x86_64_v2 にすると2008年以降の CPU に搭載されている SSE 命令が使える
             # ref: https://gregoryszorc.com/docs/python-build-standalone/main/running.html
             python_arch_name: x86_64_v2
             artifact_suffix: ''
           # arm64 アーキテクチャ向けのビルド設定
           - arch: arm64
-            runner: ubuntu-22.04-arm
+            runner: ubuntu-26.04-arm
             python_arch_name: aarch64
             artifact_suffix: '-arm'
     runs-on: ${{ matrix.runner }}
@@ -319,12 +319,12 @@ jobs:
         if: matrix.arch == 'amd64'
         run: |
 
-          # p7zip-full と patchelf のインストール
+          # 7zip と patchelf のインストール
           ## patchelf は ELF バイナリに埋め込まれている rpath (動的ライブラリの検索パス) を変更するツールで、
           ## QSV/NV/VCEEncC に rpath を追加するために使う
           ## ref: https://stackoverflow.com/questions/13769141/can-i-change-rpath-in-an-already-compiled-binary
           sudo apt-get update
-          sudo apt-get install -y p7zip-full patchelf
+          sudo apt-get install -y 7zip patchelf
 
           # FFmpeg のアーカイブのダウンロード
           curl -fSLO https://github.com/BtbN/FFmpeg-Builds/releases/download/${{ env.FFMPEG_TAG }}/ffmpeg-n${{ env.FFMPEG_VERSION }}-linux64-gpl-shared-${{ env.FFMPEG_MAJOR_VERSION }}.tar.xz
@@ -423,12 +423,12 @@ jobs:
         if: matrix.arch == 'arm64'
         run: |
 
-          # p7zip-full と patchelf のインストール
+          # 7zip と patchelf のインストール
           ## patchelf は ELF バイナリに埋め込まれている rpath (動的ライブラリの検索パス) を変更するツールで、
           ## rkmppenc に rpath を追加するために使う
           ## ref: https://stackoverflow.com/questions/13769141/can-i-change-rpath-in-an-already-compiled-binary
           sudo apt-get update
-          sudo apt-get install -y p7zip-full patchelf
+          sudo apt-get install -y 7zip patchelf
 
           # FFmpeg のアーカイブのダウンロード
           curl -fSLO https://github.com/BtbN/FFmpeg-Builds/releases/download/${{ env.FFMPEG_TAG }}/ffmpeg-n${{ env.FFMPEG_VERSION }}-linuxarm64-gpl-shared-${{ env.FFMPEG_MAJOR_VERSION }}.tar.xz
