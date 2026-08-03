@@ -31,11 +31,11 @@ env:
   FFMPEG_VERSION: '7.1.4-7-gadcf20da26'
   # QSVEncC・NVEncC・VCEEncC・rkmppenc のバージョン
   ## ref: https://github.com/rigaya/QSVEnc/releases
-  ## ref: https://github.com/rigaya/NVEnc/releases
+  ## ref: https://github.com/Oomugi413/NVEnc/releases
   ## ref: https://github.com/rigaya/VCEEnc/releases
   ## ref: https://github.com/rigaya/rkmppenc/releases
   QSVENCC_VERSION: '8.16'
-  NVENCC_VERSION: '9.19'
+  NVENCC_VERSION: '9.26.1'
   VCEENCC_VERSION: '9.06'
   RKMPPENC_VERSION: '0.18'
   # QSVEncC 向け Intel Media Stack の固定バージョン
@@ -60,7 +60,7 @@ jobs:
 
   # Windows 向けのサードパーティーライブラリのビルド
   build-windows:
-    runs-on: windows-2022
+    runs-on: windows-2025
     steps:
 
       # MSBuild を PATH に追加
@@ -144,11 +144,11 @@ jobs:
           curl -fSL -o thirdparty/QSVEncC/License.txt https://raw.githubusercontent.com/rigaya/QSVEnc/master/license.txt
 
           # NVEncC のアーカイブのダウンロード
-          curl -fSLO https://github.com/rigaya/NVEnc/releases/download/${{ env.NVENCC_VERSION }}/NVEncC_${{ env.NVENCC_VERSION }}_x64.7z
+          curl -fSLO https://github.com/Oomugi413/NVEnc/releases/download/${{ env.NVENCC_VERSION }}/NVEncC_${{ env.NVENCC_VERSION }}_x64.7z
           7z x -y -o"thirdparty/NVEncC" NVEncC_${{ env.NVENCC_VERSION }}_x64.7z
           rm -Force thirdparty/NVEncC/hdr10plus_gen.exe -ErrorAction SilentlyContinue
           mv thirdparty/NVEncC/NVEncC64.exe thirdparty/NVEncC/NVEncC.exe
-          curl -fSL -o thirdparty/NVEncC/License.txt https://raw.githubusercontent.com/rigaya/NVEnc/master/NVEnc_license.txt
+          curl -fSL -o thirdparty/NVEncC/License.txt https://raw.githubusercontent.com/Oomugi413/NVEnc/master/NVEnc_license.txt
 
           # VCEEncC のアーカイブのダウンロード
           curl -fSLO https://github.com/rigaya/VCEEnc/releases/download/${{ env.VCEENCC_VERSION }}/VCEEncC_${{ env.VCEENCC_VERSION }}_x64.7z
@@ -193,14 +193,14 @@ jobs:
         include:
           # x64 アーキテクチャ向けのビルド設定
           - arch: amd64
-            runner: ubuntu-22.04
+            runner: ubuntu-26.04
             # x86_64_v2 にすると2008年以降の CPU に搭載されている SSE 命令が使える
             # ref: https://gregoryszorc.com/docs/python-build-standalone/main/running.html
             python_arch_name: x86_64_v2
             artifact_suffix: ''
           # arm64 アーキテクチャ向けのビルド設定
           - arch: arm64
-            runner: ubuntu-22.04-arm
+            runner: ubuntu-26.04-arm
             python_arch_name: aarch64
             artifact_suffix: '-arm'
     runs-on: ${{ matrix.runner }}
@@ -319,12 +319,12 @@ jobs:
         if: matrix.arch == 'amd64'
         run: |
 
-          # p7zip-full と patchelf のインストール
+          # 7zip と patchelf のインストール
           ## patchelf は ELF バイナリに埋め込まれている rpath (動的ライブラリの検索パス) を変更するツールで、
           ## QSV/NV/VCEEncC に rpath を追加するために使う
           ## ref: https://stackoverflow.com/questions/13769141/can-i-change-rpath-in-an-already-compiled-binary
           sudo apt-get update
-          sudo apt-get install -y p7zip-full patchelf
+          sudo apt-get install -y 7zip patchelf
 
           # FFmpeg のアーカイブのダウンロード
           curl -fSLO https://github.com/BtbN/FFmpeg-Builds/releases/download/${{ env.FFMPEG_TAG }}/ffmpeg-n${{ env.FFMPEG_VERSION }}-linux64-gpl-shared-${{ env.FFMPEG_MAJOR_VERSION }}.tar.xz
@@ -400,13 +400,13 @@ jobs:
           curl -fSL -o thirdparty/QSVEncC/License.txt https://raw.githubusercontent.com/rigaya/QSVEnc/master/license.txt
 
           # NVEncC のアーカイブのダウンロード
-          curl -fSLO https://github.com/rigaya/NVEnc/releases/download/${{ env.NVENCC_VERSION }}/nvencc_${{ env.NVENCC_VERSION }}_amd64.deb
+          curl -fSLO https://github.com/Oomugi413/NVEnc/releases/download/${{ env.NVENCC_VERSION }}/nvencc_${{ env.NVENCC_VERSION }}_amd64.deb
           7z x -y nvencc_${{ env.NVENCC_VERSION }}_amd64.deb && tar xvf data.tar
           mkdir thirdparty/NVEncC/
           cp usr/bin/nvencc thirdparty/NVEncC/NVEncC.elf
           chmod a+x thirdparty/NVEncC/NVEncC.elf
           patchelf --set-rpath '$ORIGIN:$ORIGIN/../lib:$ORIGIN/../Library' thirdparty/NVEncC/NVEncC.elf
-          curl -fSL -o thirdparty/NVEncC/License.txt https://raw.githubusercontent.com/rigaya/NVEnc/master/NVEnc_license.txt
+          curl -fSL -o thirdparty/NVEncC/License.txt https://raw.githubusercontent.com/Oomugi413/NVEnc/master/NVEnc_license.txt
 
           # VCEEncC のアーカイブのダウンロード
           curl -fSLO https://github.com/rigaya/VCEEnc/releases/download/${{ env.VCEENCC_VERSION }}/vceencc_${{ env.VCEENCC_VERSION }}_amd64.deb
@@ -423,12 +423,12 @@ jobs:
         if: matrix.arch == 'arm64'
         run: |
 
-          # p7zip-full と patchelf のインストール
+          # 7zip と patchelf のインストール
           ## patchelf は ELF バイナリに埋め込まれている rpath (動的ライブラリの検索パス) を変更するツールで、
           ## rkmppenc に rpath を追加するために使う
           ## ref: https://stackoverflow.com/questions/13769141/can-i-change-rpath-in-an-already-compiled-binary
           sudo apt-get update
-          sudo apt-get install -y p7zip-full patchelf
+          sudo apt-get install -y 7zip patchelf
 
           # FFmpeg のアーカイブのダウンロード
           curl -fSLO https://github.com/BtbN/FFmpeg-Builds/releases/download/${{ env.FFMPEG_TAG }}/ffmpeg-n${{ env.FFMPEG_VERSION }}-linuxarm64-gpl-shared-${{ env.FFMPEG_MAJOR_VERSION }}.tar.xz
