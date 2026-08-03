@@ -45,7 +45,7 @@ class LiveEncodingTask:
     GOP_LENGTH_SECONDS_H264: ClassVar[float] = 0.5
 
     # H.265 再生時のエンコード後のストリームの GOP 長 (秒)
-    GOP_LENGTH_SECONDS_H265: ClassVar[float] = 0.5
+    GOP_LENGTH_SECONDS_H265: ClassVar[float] = float(1)
 
     # エンコードタスクの最大リトライ回数
     ## この数を超えた場合はエンコードタスクを再起動しない（無限ループを避ける）
@@ -110,10 +110,6 @@ class LiveEncodingTask:
         if network_id == 0x000B or network_id == 0x000C:
             return True
 
-        #BS4K,CS4K
-        if network_id >= 11:
-            return True
-
         return False
 
 
@@ -162,7 +158,7 @@ class LiveEncodingTask:
         # 映像
         ## コーデック
         if QUALITY[quality].is_hevc is True:
-            options.append('-vcodec libx265 -tag:v hvc1')  # H.265/HEVC (通信節約モード)
+            options.append('-vcodec libx265')  # H.265/HEVC (通信節約モード)
         else:
             options.append('-vcodec libx264')  # H.264
 
@@ -190,8 +186,8 @@ class LiveEncodingTask:
 
         ## BS4K は 60p (プログレッシブ) で放送されているので、インターレース解除を行わず 60fps でエンコードする
         if channel_type == "BS4K":
-            options.append(f'-vf vpp_qsv=deinterlace=0:w={video_width}:h={video_height}:framerate=60000/1001')
-            #options.append(f'-r 60000/1001 -g {int(gop_length_second * 60)}')
+            options.append(f'-vf scale={video_width}:{video_height}')
+            options.append(f'-r 60000/1001 -g {int(gop_length_second * 60)}')
         else:
             ## インターレース解除 (60i → 60p (フレームレート: 60fps))
             if QUALITY[quality].is_60fps is True:
@@ -319,7 +315,6 @@ class LiveEncodingTask:
         # ストリームのマッピング
         ## 音声切り替えのため、主音声・副音声両方をエンコード後の TS に含む
         ## 音声が 5.1ch かどうかに関わらず、ステレオにダウンミックスする
-        # options.append('--audio-stream 1?:stereo --data-copy timed_id3')
         options.append('--audio-stream 1?:stereo --audio-stream 2?:stereo --data-copy timed_id3')
 
         # フラグ
@@ -341,7 +336,7 @@ class LiveEncodingTask:
         # 映像
         ## コーデック
         if QUALITY[quality].is_hevc is True:
-            options.append('--codec hevc --video-tag hvc1')  # H.265/HEVC (通信節約モード)
+            options.append('--codec hevc')  # H.265/HEVC (通信節約モード)
         else:
             options.append('--codec h264')  # H.264
 
@@ -483,8 +478,8 @@ class LiveEncodingTask:
         #if channel_type == 'BS4K':
         #    fallback_channel_type = 'BS'
         #el
-        if channel_type == 'CATV':
-            fallback_channel_type = 'CS'
+        #if channel_type == 'CATV':
+        #    fallback_channel_type = 'CS'
 
         mirakurun_or_mirakc = 'Mirakurun'
         async with HTTPX_CLIENT() as client:
