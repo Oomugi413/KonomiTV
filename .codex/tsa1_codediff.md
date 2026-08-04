@@ -60,3 +60,5 @@ Pyright の warning 6 件は既存コードの FastAPI `on_event` / `asyncio.isc
 KonomiTV の再起動は実施していない。
 
 現在起動中の KonomiTV がリロードモードでなければ、今回の修正を実行中プロセスに反映するにはユーザー側で KonomiTV サーバーの再起動が必要。
+
+codex resume 019f0bb8-5b71-7420-8bb4-e5c3f8855534
