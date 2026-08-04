@@ -64,6 +64,10 @@ class PlayerController {
     // ライブ視聴: mpegts.js のバッファ詰まり対策で定期的に強制シークするインターバルをキャンセルする関数
     private live_force_seek_interval_timer_cancel: (() => void) | null = null;
 
+    // mpegts.js の MSE in Worker を有効化するかどうか
+    // Safari のライブ再生では WebKit 側の readyState / currentTime と Worker 側の MSE 状態がずれるため無効化する
+    private enable_worker_for_mse: boolean = true;
+
     // ビデオ視聴: ビデオストリームのアクティブ状態を維持するために Keep-Alive API にリクエストを送るインターバルのキャンセルする関数
     private video_keep_alive_interval_timer_cancel: (() => void) | null = null;
 
@@ -242,6 +246,11 @@ class PlayerController {
         // ブラウザが MSE in Worker での H.265 / HEVC 再生に対応しているかどうか
         const is_hevc_video_supported_in_worker = await mpegts.supportWorkerForMSEH265Playback();
 
+        // Safari のライブ MPEG-TS 再生では MSE in Worker 経路を使うと、短い一時停止・再生の後に
+        // buffered は残っていても後続フレームが提示されなくなることがあるため、main thread MSE 経路へ固定する
+        this.enable_worker_for_mse = (Utils.isSafari() === true && this.playback_mode === 'Live') ?
+            false : (is_hevc_playback === true && is_hevc_video_supported_in_worker === false) ? false : true;
+
         // 文字スーパーの表示設定
         // ライブ視聴とビデオ視聴で設定キーが異なる
         const is_show_superimpose = this.playback_mode === 'Live' ?
@@ -323,6 +332,8 @@ class PlayerController {
             live: this.playback_mode === 'Live' ? true : false,
             // ライブモードで同期する際の最小バッファサイズ
             liveSyncMinBufferSize: this.live_playback_buffer_seconds - 0.1,
+            // Safari では一時停止・再生直後の direct seek が WebKit のデコード再開と競合するため無効化する
+            syncWhenPlayingLive: Utils.isSafari() === true ? false : true,
             // ループ再生 (ライブ視聴では無効)
             loop: this.playback_mode === 'Live' ? false : true,
             // 自動再生
@@ -578,7 +589,7 @@ class PlayerController {
                         // メインスレッドから再生処理を分離することで、低スペック端末で DOM 描画の遅延が影響して映像再生が詰まる問題が解消される
                         // MSE in Worker が使えない環境では自動的に mpegts.js 側でフォールバックされるため、基本的に true を設定する
                         // ただし Windows 版 Microsoft Edge では MSE in Worker 有効時のみ H.265 / HEVC 再生が動作しないため、この場合のみ無効化する
-                        enableWorkerForMSE: (is_hevc_playback === true && is_hevc_video_supported_in_worker === false) ? false : true,
+                        enableWorkerForMSE: this.enable_worker_for_mse,
                         // 再生開始まで 2048KB のバッファを貯める (?)
                         // あまり大きくしすぎてもどうも効果がないようだが、小さくしたり無効化すると特に Safari で不安定になる
                         enableStashBuffer: true,
@@ -1013,7 +1024,11 @@ class PlayerController {
         if (this.playback_mode === 'Live') {
             try {
                 const buffered_range_count = this.player.video.buffered.length;
-                const buffer_remain = this.player.video.buffered.end(buffered_range_count - 1) - this.player.video.currentTime;
+                if (buffered_range_count === 0) return 0;
+                const current_time = Number.isFinite(this.player.video.currentTime) ?
+                    this.player.video.currentTime : this.player.video.buffered.start(0);
+                const buffer_remain = this.player.video.buffered.end(buffered_range_count - 1) - current_time;
+                if (Number.isFinite(buffer_remain) === false) return 0;
                 return Utils.mathFloor(buffer_remain, 3);
             } catch (error) {
                 return 0;
@@ -1021,6 +1036,96 @@ class PlayerController {
         } else {
             return 0;
         }
+    }
+
+
+    /**
+     * 指定した HTMLVideoElement で次の実フレームが提示されるまで待つ
+     * Safari では readyState や currentTime が再生実態と一致しない場合があるため、復旧判定には実フレームを利用する
+     * @param video 確認対象の HTMLVideoElement
+     * @param timeout_milliseconds 待機を打ち切るまでの時間 (ミリ秒)
+     * @returns 制限時間内に実フレームが提示されたかどうか
+     */
+    private waitForVideoFramePresentation(video: HTMLVideoElement, timeout_milliseconds: number): Promise<boolean> {
+        return new Promise((resolve) => {
+            let settled = false;
+            let frame_callback_handle: number | null = null;
+
+            // callback と timeout のうち、先に完了した方だけが結果を確定する
+            const finish = (is_frame_presented: boolean) => {
+                if (settled === true) return;
+                settled = true;
+                window.clearTimeout(timeout_id);
+                if (is_frame_presented === false && frame_callback_handle !== null) {
+                    video.cancelVideoFrameCallback(frame_callback_handle);
+                }
+                resolve(is_frame_presented);
+            };
+
+            const timeout_id = window.setTimeout(() => finish(false), timeout_milliseconds);
+            frame_callback_handle = video.requestVideoFrameCallback(() => {
+                // PlayerController の破棄・再作成後に古い video 要素のフレームを成功扱いしない
+                if (this.destroyed === true || this.player === null || this.player.video !== video) {
+                    finish(false);
+                    return;
+                }
+                finish(true);
+            });
+        });
+    }
+
+
+    /**
+     * Safari のライブ再生を、再生状態を追加で pause せずに復旧する
+     * @param video 復旧対象の HTMLVideoElement
+     * @returns 復旧操作後に実フレームが提示されたかどうか
+     */
+    private async recoverSafariLivePlayback(video: HTMLVideoElement): Promise<boolean> {
+
+        // まず現在の再生要求を維持したまま次のフレームを待つ
+        // 一時停止直後は readyState が一時的に低下するため、ここで pause() を重ねると進行中の play() が AbortError になる
+        if (await this.waitForVideoFramePresentation(video, 750)) return true;
+        if (this.player === null || this.player.video !== video) return false;
+
+        // WebKit に再生可能状態を再評価させるため play() を再要求するが、保留されることがあるので await しない
+        void video.play().catch((error) => {
+            if (this.player === null || this.player.video !== video) return;
+            console.warn('\u001b[31m[PlayerController] Safari live playback retry failed:', error);
+        });
+        if (await this.waitForVideoFramePresentation(video, 1000)) return true;
+        if (this.destroyed === true || this.player === null || this.player.video !== video) return false;
+
+        // buffered range があるのにフレームが再開しない場合だけ、ライブ末尾付近のランダムアクセスポイントへ移動する
+        // これにより、短い停止中に古くなったデコード位置を捨てつつ、通常時の pause / play には不要な seek を行わない
+        if (video.buffered.length > 0) {
+            const first_buffered_position = video.buffered.start(0);
+            const last_buffered_position = video.buffered.end(video.buffered.length - 1);
+            const seek_target = Math.max(
+                last_buffered_position - this.live_playback_buffer_seconds,
+                first_buffered_position + 0.1,
+                0.1,
+            );
+            console.warn('\u001b[31m[PlayerController] Safari live playback is still stalled. Seeking near the live edge.', {
+                current_time: video.currentTime,
+                first_buffered_position: first_buffered_position,
+                last_buffered_position: last_buffered_position,
+                seek_target: seek_target,
+            });
+
+            // mpegts.js 側の seek 経路を優先し、SourceBuffer とデコード位置を一緒に更新する
+            if (this.player.plugins.mpegts) {
+                this.player.plugins.mpegts.currentTime = seek_target;
+            } else {
+                video.currentTime = seek_target;
+            }
+            void video.play().catch((error) => {
+                if (this.player === null || this.player.video !== video) return;
+                console.warn('\u001b[31m[PlayerController] Safari live playback retry after seek failed:', error);
+            });
+            return await this.waitForVideoFramePresentation(video, 1500);
+        }
+
+        return false;
     }
 
 
@@ -1040,6 +1145,18 @@ class PlayerController {
         // Safari ではタイミングによっては this.player.video が null になる場合があるらしいので ? を付ける
         if (player_store.is_video_buffering === true && this.player?.video?.readyState < 3) {
             console.warn('\u001b[31m[PlayerController] Video still buffering. (HTMLVideoElement.readyState < HAVE_FUTURE_DATA) Trying to recover.');
+
+            // Safari のライブ再生では pause() が進行中の play() を AbortError にし、後続の映像・音声が停止する
+            // 実フレームを基準に非破壊的な復旧を行い、従来の pause() / play() 再試行へは入らない
+            if (Utils.isSafari() === true && this.playback_mode === 'Live') {
+                const video = this.player.video;
+                const is_recovered = await this.recoverSafariLivePlayback(video);
+                if (is_recovered === true && this.player !== null && this.player.video === video) {
+                    player_store.is_video_buffering = false;
+                    console.log('\u001b[31m[PlayerController] Safari live playback recovered without an additional pause().');
+                }
+                return;
+            }
 
             // 一旦停止して、0.25 秒間を置く
             this.player.video.pause();
@@ -1245,17 +1362,25 @@ class PlayerController {
                             console.warn(`\u001b[31m[PlayerController] Failed to start playback after ${maxAttempts} attempts.`);
                             return;
                         }
+                        if (this.player === null) return;
+
+                        // PlayerController 再作成後に、古い video 要素の保留中 play() を操作し続けないよう保持する
+                        const video = this.player.video;
                         try {
-                            await this.player?.video.play();
+                            await video.play();
+                            if (this.player === null || this.player.video !== video) return;
                             console.log('\u001b[31m[PlayerController] Playback started successfully.');
                         } catch (error) {
+                            if (this.player === null || this.player.video !== video) return;
                             console.warn(`\u001b[31m[PlayerController] Attempt ${attempts + 1} to start playback failed:`, error);
                             attempts++;
                             await Utils.sleep(attemptInterval);
                             await attemptPlay();
                         }
                     };
-                    await attemptPlay();
+                    // Safari では MSE 初期化中の play() が resolve / reject のどちらにも進まない場合がある
+                    // 完了を待つと canplay / MEDIA_INFO と復旧処理を登録できないため、起動試行はバックグラウンドで継続する
+                    void attemptPlay();
                 }
 
                 // 再生準備ができた段階で再生バッファを調整し、再生準備ができた段階でローディング中の背景写真を非表示にするイベントハンドラーを登録
@@ -1269,24 +1394,40 @@ class PlayerController {
                     this.player.video.oncanplaythrough = null;
                     on_canplay_called = true;
 
-                    // 再生バッファ調整のため、一旦停止させる
+                    // Safari 以外では再生バッファ調整のため、一旦停止させる
                     // this.player.video.pause() を使うとプレイヤーの UI アイコンが停止してしまうので、代わりに playbackRate を使う
                     console.log('\u001b[31m[PlayerController] Buffering...');
-                    this.player.video.playbackRate = 0;
+                    const is_safari = Utils.isSafari();
+                    if (is_safari === false) {
+                        this.player.video.playbackRate = 0;
 
-                    // 再生バッファが live_playback_buffer_seconds を超えるまで 0.1 秒おきに再生バッファをチェックする
-                    // 再生バッファが live_playback_buffer_seconds を切ると再生が途切れやすくなるので (特に動きの激しい映像)、
-                    // 再生開始までの時間を若干犠牲にして、再生バッファの調整と同期に時間を割く
-                    // live_playback_buffer_seconds の値は mpegts.js の liveSyncTargetLatency 設定に渡す値と共通
-                    const live_playback_buffer_seconds = this.live_playback_buffer_seconds;  // 毎回取得すると負荷が掛かるのでキャッシュする
-                    let current_playback_buffer_sec = this.getPlaybackBufferSeconds();
-                    while (current_playback_buffer_sec < live_playback_buffer_seconds) {
-                        await Utils.sleep(0.1);
-                        current_playback_buffer_sec = this.getPlaybackBufferSeconds();
+                        // 再生バッファが live_playback_buffer_seconds を超えるまで 0.1 秒おきに再生バッファをチェックする
+                        // 再生バッファが live_playback_buffer_seconds を切ると再生が途切れやすくなるので (特に動きの激しい映像)、
+                        // 再生開始までの時間を若干犠牲にして、再生バッファの調整と同期に時間を割く
+                        // live_playback_buffer_seconds の値は mpegts.js の liveSyncTargetLatency 設定に渡す値と共通
+                        const live_playback_buffer_seconds = this.live_playback_buffer_seconds;  // 毎回取得すると負荷が掛かるのでキャッシュする
+                        let current_playback_buffer_sec = this.getPlaybackBufferSeconds();
+                        while (current_playback_buffer_sec < live_playback_buffer_seconds) {
+                            if (this.destroyed === true || this.player === null) return;
+                            await Utils.sleep(0.1);
+                            current_playback_buffer_sec = this.getPlaybackBufferSeconds();
+                        }
+
+                        // 再生バッファ調整のため一旦停止していた再生を再び開始
+                        this.player.video.playbackRate = 1;
+                    } else {
+                        // Safari では playbackRate=0 と buffer目標待ちが再生開始を止めるため、通常速度のまま実フレーム確認へ進む
+                        const video = this.player.video;
+                        void video.play().catch((error) => {
+                            if (this.player === null || this.player.video !== video) return;
+                            console.warn('\u001b[31m[PlayerController] Safari playback retry after MSE initialization failed:', error);
+                        });
+                        const is_frame_presented = await this.waitForVideoFramePresentation(video, 2500);
+                        if (is_frame_presented === false && this.player !== null && this.player.video === video) {
+                            await this.recoverSafariLivePlayback(video);
+                        }
                     }
 
-                    // 再生バッファ調整のため一旦停止していた再生を再び開始
-                    this.player.video.playbackRate = 1;
                     console.log('\u001b[31m[PlayerController] Buffering completed.');
 
                     // ローディング状態を解除し、映像を表示する
