@@ -54,7 +54,7 @@ RUN yarn build
 ## NVEncC の動作には CUDA ライブラリが必要なため、CUDA 付きのイメージを使う
 ## RTX 5090 (Blackwell) 世代をサポートする最低バージョンである CUDA 12.8.0 を指定している
 ## cuda:x.x.x-runtime 系イメージだと NVEncC で使わない余計なライブラリが付属して重いので、base イメージを使う
-FROM nvidia/cuda:13.0.1-runtime-ubuntu22.04
+FROM nvidia/cuda:12.9.2-runtime-ubuntu22.04
 
 # タイムゾーンを東京に設定
 ENV TZ=Asia/Tokyo
@@ -93,7 +93,7 @@ RUN apt-get update && \
         # Intel GPU 関連のライブラリ
         intel-media-va-driver-non-free intel-opencl-icd libigfxcmrt7 libmfx1 libmfxgen1 libva-drm2 libva-x11-2 \
         # NVIDIA GPU 関連のライブラリ
-        cuda-nvrtc-12-8 libnpp-12-8 \
+        cuda-nvrtc-12-9 libnpp-12-9 \
         # AMD GPU 関連のライブラリ
         amf-amdgpu-pro libamdenc-amdgpu-pro libdrm2-amdgpu ocl-icd-libopencl1 rocm-opencl-runtime vulkan-amdgpu-pro \
         # Zendriver 用に Google Chrome と日本語フォントをインストール
