@@ -57,8 +57,10 @@ jobs:
           cd ../
 
           # リリースコミットを作成
+          ## 同じバージョンでクライアントのビルド結果にも差分がない場合でも、リリースを示す空コミットを作成する
+          ## これにより後続の Update Release Branch を実行し、現在の master ブランチの内容を release ブランチへ反映できる
           git add .
-          git commit -m 'Release: version ${{ github.event.inputs.version }}'
+          git commit --allow-empty -m 'Release: version ${{ github.event.inputs.version }}'
           git push -u origin master
 
       # release ブランチを現在の master ブランチの最新コミット (リリースコミット) に更新する
