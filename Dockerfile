@@ -18,10 +18,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends aria2 ca-certif
 ## サードパーティーライブラリは変更が少ないので、先にダウンロード処理を実行してビルドキャッシュを効かせる
 WORKDIR /
 ## リリース版用
-RUN aria2c -x10 https://github.com/tsukumijima/KonomiTV/releases/download/v0.14.1/thirdparty-linux.tar.xz
+RUN aria2c -x10 https://github.com/Oomugi413/KonomiTV/releases/download/v0.14.3/thirdparty-linux.tar.xz
 RUN tar xvf thirdparty-linux.tar.xz
-## 開発版 (0.xx.x-dev) 用
-# RUN aria2c -x10 https://nightly.link/tsukumijima/KonomiTV/actions/runs/27093421017/thirdparty-linux.tar.xz.zip
+## 開発版 (0.x.x-dev) 用
+# RUN aria2c -x10 https://nightly.link/Oomugi413/KonomiTV/workflows/build_thirdparty.yaml/master/thirdparty-linux.tar.xz.zip
 # RUN unzip thirdparty-linux.tar.xz.zip && tar xvf thirdparty-linux.tar.xz
 
 # --------------------------------------------------------------------------------------------------------------
@@ -54,7 +54,7 @@ RUN yarn build
 ## NVEncC の動作には CUDA ライブラリが必要なため、CUDA 付きのイメージを使う
 ## RTX 5090 (Blackwell) 世代をサポートする最低バージョンである CUDA 12.8.0 を指定している
 ## cuda:x.x.x-runtime 系イメージだと NVEncC で使わない余計なライブラリが付属して重いので、base イメージを使う
-FROM nvidia/cuda:12.8.0-base-ubuntu22.04
+FROM nvidia/cuda:12.9.2-runtime-ubuntu22.04
 
 # タイムゾーンを東京に設定
 ENV TZ=Asia/Tokyo
@@ -93,7 +93,7 @@ RUN apt-get update && \
         # Intel GPU 関連のライブラリ
         intel-media-va-driver-non-free intel-opencl-icd libigfxcmrt7 libmfx1 libmfxgen1 libva-drm2 libva-x11-2 \
         # NVIDIA GPU 関連のライブラリ
-        cuda-nvrtc-12-8 libnpp-12-8 \
+        cuda-nvrtc-12-9 libnpp-12-9 \
         # AMD GPU 関連のライブラリ
         amf-amdgpu-pro libamdenc-amdgpu-pro libdrm2-amdgpu ocl-icd-libopencl1 rocm-opencl-runtime vulkan-amdgpu-pro \
         # Zendriver 用に Google Chrome と日本語フォントをインストール
