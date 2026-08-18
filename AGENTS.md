@@ -28,6 +28,7 @@
 - `yarn dev` で起動するクライアントは、開発モード時のみ同じドメインの `:7000` のサーバー API を直接叩くようハードコードされています ([client/src/utils/Utils.ts](client/src/utils/Utils.ts) の `Utils.api_base_url` を参照)。Vite の proxy 設定は不要です
 - Chrome DevTools MCP からの検証時は `https://my.local.konomi.tv:7001` にアクセスしてください
 - クライアント開発サーバー経由で API リクエストが想定通りに動かない場合でも、**サーバーを立て直そうとしないでください**。まず `Utils.api_base_url` の DEV 分岐の挙動を読み直し、port 7000 で動いているサーバー側の状態を `ps -ef | grep KonomiTV` などで確認してください
+- 番組タイトルや番組概要を表示するときは必ず `ProgramUtils.decorateProgramInfo(program, 'field_name')` を使用してください
 
 ### Docker 版ステージング (port 7100、別物)
 
@@ -202,6 +203,7 @@ Windows では Windows サービス、Linux では pm2 サービスとして動�
 ## コーディング規約
 
 ### 全般
+- サービス名はコード・型・コメント・UI・文書のすべてで一貫して `Twitter` と表記する。`X` は `X Premium` などの正式な商品名、`x.com` などのホスト名、HTTP ヘッダー名のように原表記が技術的に必要な場合だけ使用する
 - コードをざっくり斜め読みした際の可読性を高めるため、日本語のコメントを多めに記述する
 - コードを変更する際、既存のコメントは、変更によりコメント内容がコードの記述と合わなくなった場合を除き、コメント量に関わらずそのまま保持する
 - ログメッセージに関しては文字化けを避けるため、必ず英語で記述する
@@ -237,6 +239,7 @@ Windows では Windows サービス、Linux では pm2 サービスとして動�
 ### Vue / TypeScript コード
 
 - **コードの編集後には、必ず `yarn lint; yarn typecheck` コマンドで、ESLint によるコードリンターと TypeScript による型チェッカーを実行すること**
+- **`window.confirm()` / `window.alert()` などのブラウザ標準ダイアログは絶対に使用しないこと。Vuetify で既存 UI と一貫したダイアログを実装する。標準ダイアログで済ませるのは妥協・甘え・ボケナス実装であり、KonomiTV の UI として許容しない**
 - 文字列にはシングルクォートを用いる
 - 新規で実装する箇所に関しては Vue 3 Composition API パターンに従う
   - Vue.js 2 から移行した関係で Options API で書かれているコンポーネントがあるが、それらは Options API のまま維持する
