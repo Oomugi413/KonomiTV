@@ -259,17 +259,17 @@ trio = ["trio (>=0.32.0)"]
 
 [[package]]
 name = "ariblib"
-version = "0.1.4"
+version = "0.1.5"
 description = "python implementation of arib-std-b10 and arib-std-b24"
 optional = false
 python-versions = "*"
 files = [
-    {file = "ariblib-0.1.4-py3-none-any.whl", hash = "sha256:ac3bb62ef2998811c23b00d6d9648dcde4c1df9d4e0c5a79385cb04b0bfb2310"},
+    {file = "ariblib-0.1.5-py3-none-any.whl", hash = "sha256:356a2101fe37ed5507aaf3d156bf01efd93e574265befa2148bedfded465edf4"},
 ]
 
 [package.source]
 type = "url"
-url = "https://github.com/tsukumijima/ariblib/releases/download/v0.1.4/ariblib-0.1.4-py3-none-any.whl"
+url = "https://github.com/Oomugi413/ariblib/releases/download/v0.1.5/ariblib-0.1.5-py3-none-any.whl"
 
 [[package]]
 name = "asyncclick"
@@ -4013,4 +4013,4 @@ websockets = ">=14.0"
 [metadata]
 lock-version = "2.0"
 python-versions = ">=3.11,<3.12"
-content-hash = "5c8b5811b746c84efee9b92b32ad54d1d6919e540f5c316363544f69119f1b69"
+content-hash = "f48411da0fde455dda59fbe7782a3a4b1ccb865d47a4900363a1812b929e2536"
