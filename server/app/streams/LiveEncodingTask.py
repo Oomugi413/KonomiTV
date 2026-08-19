@@ -269,6 +269,7 @@ class LiveEncodingTask:
         quality: QUALITY_TYPES,
         encoder_type: Literal['QSVEncC', 'NVEncC', 'VCEEncC', 'rkmppenc'],
         channel_type: Literal['GR', 'BS', 'CS', 'CATV', 'SKY', 'BS4K'],
+        service_id: int,
         is_fullhd_channel: bool,
     ) -> list[str]:
         """
@@ -278,6 +279,7 @@ class LiveEncodingTask:
             quality (QUALITY_TYPES): 映像の品質
             encoder_type (Literal['QSVEncC', 'NVEncC', 'VCEEncC', 'rkmppenc']): エンコーダー (QSVEncC or NVEncC or VCEEncC or rkmppenc)
             channel_type (Literal['GR', 'BS', 'CS', 'CATV', 'SKY', 'BS4K']): チャンネルの種類
+            service_id (int): サービス ID
             is_fullhd_channel (bool): フル HD 放送が実施されているチャンネルかどうか
 
         Returns:
@@ -313,9 +315,12 @@ class LiveEncodingTask:
             options.append('--avhw')
         ## 入力途中の解像度変更に備えて、デコーダー/入力サーフェスの最大確保解像度を指定する
         ## --output-res は出力側の固定解像度であり、こちらは入力側の上限なので併用する
-        ## BS4K は入力が 4K のため 3840×2160、それ以外のチャンネルは HD 上限の 1920×1080 とする
+        ## BS4K のうち NHK BS8K (service_id=102) は入力が 8K のため 7680×4320、
+        ## それ以外の BS4K は入力が 4K のため 3840×2160、それ以外のチャンネルは HD 上限の 1920×1080 とする
         ## (画質プリセットの出力解像度とは独立で、入力に現れうる最大解像度を確保する必要がある)
-        if channel_type == 'BS4K':
+        if channel_type == 'BS4K' and service_id == 102:
+            options.append('--adapt-resolution 7680x4320')
+        elif channel_type == 'BS4K':
             options.append('--adapt-resolution 3840x2160')
         else:
             options.append('--adapt-resolution 1920x1080')
@@ -693,7 +698,7 @@ class LiveEncodingTask:
         else:
 
             # オプションを取得
-            encoder_options = self.buildHWEncCOptions(self.live_stream.quality, ENCODER_TYPE, channel.type, is_fullhd_channel)
+            encoder_options = self.buildHWEncCOptions(self.live_stream.quality, ENCODER_TYPE, channel.type, channel.service_id, is_fullhd_channel)
             logging.info(f'{self.live_stream.log_prefix} {ENCODER_TYPE} Commands:\n{ENCODER_TYPE} {" ".join(encoder_options)}')
 
             # エンコーダープロセスを非同期で作成・実行
