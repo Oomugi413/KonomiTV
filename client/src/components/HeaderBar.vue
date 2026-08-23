@@ -77,6 +77,14 @@ onMounted(() => {
 // ルートの変更を監視して検索クエリを更新
 watch(() => route.fullPath, initializeSearchQuery);
 
+// 録画番組関連ページ (マイリスト・視聴履歴・オフライン保存を含む) かどうか
+const isVideoSection = (path: string) => {
+    return path.startsWith('/videos') ||
+        path.startsWith('/mylist') ||
+        path.startsWith('/watched-history') ||
+        path.startsWith('/offline-videos');
+};
+
 const searchPlaceholder = computed(() => {
     if (route.path.startsWith('/series')) {
         return 'シリーズを検索...';
