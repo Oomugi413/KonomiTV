@@ -27,20 +27,23 @@
                     </span>
                 </div>
                 <v-select class="offline-download-dialog__select settings__item-form mt-7" v-model="selectedQuality" :items="qualityItems"
-                    label="保存画質" color="primary" variant="outlined" hide-details :density="selectDensity" />
-                <div class="offline-download-dialog__switch mt-6" :class="{'offline-download-dialog__switch--disabled': isHEVCSupported === false}">
+                    label="保存形式・画質" color="primary" variant="outlined" hide-details :density="selectDensity" />
+                <div class="offline-download-dialog__switch mt-6"
+                    :class="{'offline-download-dialog__switch--disabled': isHEVCSupported === false || isCopyMode}">
                     <div>
                         <div class="font-weight-bold mb-1" style="font-size: 15px;">通信節約モード (H.265 / HEVC)</div>
                         <div class="text-text-darken-1">画質はほぼそのまま、保存容量を 50% ~ 70% 抑えて保存できます。</div>
                     </div>
-                    <v-switch v-model="isDataSaverMode" color="primary" hide-details :disabled="isHEVCSupported === false" />
+                    <v-switch v-model="isDataSaverMode" color="primary" hide-details
+                        :disabled="isHEVCSupported === false || isCopyMode" />
                 </div>
-                <div class="offline-download-dialog__switch mt-3">
+                <div class="offline-download-dialog__switch mt-3"
+                    :class="{'offline-download-dialog__switch--disabled': isCopyMode}">
                     <div>
                         <div class="font-weight-bold mb-1" style="font-size: 15px;">24fps モード</div>
                         <div class="text-text-darken-1">映画やアニメなど 24fps で制作された映像を検出し、本来の動きに近づけます。</div>
                     </div>
-                    <v-switch v-model="is24fpsMode" color="primary" hide-details />
+                    <v-switch v-model="is24fpsMode" color="primary" hide-details :disabled="isCopyMode" />
                 </div>
                 <div class="offline-download-dialog__switch mt-3"
                     :class="{'offline-download-dialog__switch--disabled': isBackgroundFetchSupported !== true}">
@@ -147,6 +150,29 @@ const isShown = computed({
     set: value => emit('update:show', value),
 });
 const isHEVCSupported = computed(() => PlayerUtils.isHEVCVideoSupported());
+const isCopyMode = computed(() => selectedQuality.value === 'copy');
+const isCopyModeAvailable = computed(() => {
+    const recordedVideo = props.program.recorded_video;
+
+    // MMT/TLV 録画では、従来どおり元の映像を HLS へ再多重化できる
+    if (recordedVideo.container_format === 'MMT/TLV') return true;
+
+    // 通常の MPEG-TS 録画は、通常再生と同じ条件でブラウザが元の映像を直接デコードできる場合だけ対象にする
+    if (
+        recordedVideo.status !== 'Recorded' ||
+        recordedVideo.container_format !== 'MPEG-TS' ||
+        recordedVideo.video_scan_type !== 'Progressive' ||
+        recordedVideo.has_video_stream_changes === true
+    ) {
+        return false;
+    }
+    if (recordedVideo.video_codec === 'H.264') {
+        return recordedVideo.video_codec_profile !== 'High 10';
+    }
+    return recordedVideo.video_codec === 'H.265' &&
+        isHEVCSupported.value === true &&
+        (recordedVideo.video_codec_profile !== 'Main 10' || isHEVC10bitSupported.value === true);
+});
 const isMeteredConnection = computed(() => {
     const connection = navigator.connection;
     return connection !== undefined && (connection.saveData === true || ['slow-2g', '2g', '3g'].includes(connection.effectiveType ?? ''));
@@ -156,10 +182,19 @@ const selectDensity = computed(() => Utils.isSmartphoneHorizontal() ? 'compact' 
 /** 通信節約モードの状態に応じて、画質ごとの見積もり容量付き選択肢を組み立てる */
 const qualityItems = computed(() => {
     const isHEVC = isDataSaverMode.value === true && isHEVCSupported.value === true;
-    return OfflineVideos.BASE_QUALITY_VALUES.map(baseQuality => ({
+    const items: Array<{title: string; value: string}> = OfflineVideos.BASE_QUALITY_VALUES.map(baseQuality => ({
         title: OfflineVideos.formatQualitySelectLabel(baseQuality, props.program.recorded_video.duration, isHEVC),
         value: baseQuality,
     }));
+
+    // 元の映像をブラウザが直接デコードできる録画では、再エンコードなしで HLS へ再多重化する保存形式も選べるようにする
+    if (isCopyModeAvailable.value === true) {
+        items.unshift({
+            title: `HLS (オリジナル・再エンコードなし / 約${Utils.formatBytes(props.program.recorded_video.file_size)})`,
+            value: 'copy',
+        });
+    }
+    return items;
 });
 
 /** 現在の UI 設定から API 画質を組み立てる */

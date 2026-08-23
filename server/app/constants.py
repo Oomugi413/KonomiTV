@@ -21,6 +21,11 @@ VERSION = '0.14.4'
 ## KonomiTV は日本向けのアプリケーションのため、日時は JST で統一して扱う
 JST = ZoneInfo('Asia/Tokyo')
 
+# 「一部のみ録画」フラグを立てる際の許容誤差 (秒)
+## チューナー確保や録画プロセス起動、放送波の時刻情報の粒度による数秒程度のずれは、
+## 番組本編が欠けていなくても録画開始・終了時刻の比較に現れるため、部分録画とは扱わない
+PARTIALLY_RECORDED_TOLERANCE_SECONDS = 5.0
+
 # ベースディレクトリ
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -224,6 +229,33 @@ QUALITY_TYPES = Literal[
     '240p-hevc',
 ]
 
+# 録画ストリーミング専用の品質の種類 (型定義)
+## copy は既に H.264 / H.265 へ変換済みの MPEG-TS を、FFmpeg で再エンコードせず HLS へ再多重化する特殊な品質。
+VIDEO_QUALITY_TYPES = QUALITY_TYPES | Literal['copy']
+
+# ライブストリーミング専用の品質の種類 (型定義)
+## raw-mmts は BS4K の MMTS を Mirakurun から decode=0 で受け取り、そのままブラウザへ配信する特殊な品質。
+## エンコードを行わないため QUALITY には含めず、ライブストリーム側だけで扱う。
+LIVE_QUALITY_TYPES = Literal[
+    '1080p-60fps',
+    '1080p-60fps-hevc',
+    '1080p',
+    '1080p-hevc',
+    '810p',
+    '810p-hevc',
+    '720p',
+    '720p-hevc',
+    '540p',
+    '540p-hevc',
+    '480p',
+    '480p-hevc',
+    '360p',
+    '360p-hevc',
+    '240p',
+    '240p-hevc',
+    'raw-mmts',
+]
+
 # 映像と音声の品質
 QUALITY: dict[QUALITY_TYPES, Quality] = {
     '1080p-60fps': Quality(
@@ -402,6 +434,15 @@ BLUESKY_ACCOUNT_SESSION_FERNET_KEY = base64.urlsafe_b64encode(
 )
 # Bluesky セッション文字列の暗号化に使う Fernet のインスタンス
 BLUESKY_ACCOUNT_SESSION_FERNET = Fernet(BLUESKY_ACCOUNT_SESSION_FERNET_KEY)
+
+# 暗号化された Bangumi 個人アクセストークンの接頭辞
+BANGUMI_ACCESS_TOKEN_ENCRYPTION_PREFIX = 'enc:'
+# Bangumi 個人アクセストークンの暗号化に使う Fernet の暗号化キー
+BANGUMI_ACCESS_TOKEN_FERNET_KEY = base64.urlsafe_b64encode(
+    hashlib.sha256(f'bangumi:{JWT_SECRET_KEY}'.encode()).digest(),
+)
+# Bangumi 個人アクセストークンの暗号化に使う Fernet のインスタンス
+BANGUMI_ACCESS_TOKEN_FERNET = Fernet(BANGUMI_ACCESS_TOKEN_FERNET_KEY)
 
 # パスワードハッシュ化のための設定
 PASSWORD_CONTEXT = CryptContext(

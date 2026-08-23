@@ -76,7 +76,20 @@ export default defineComponent({
 
             // オフライン保存ページから開いた場合は保存時点の番組情報を使い、通常再生の通信失敗時だけ保存版へ切り替える
             let offline_video = this.$route.query.source === 'offline' ? await OfflineVideos.getVideo(video_id) : null;
-            let recorded_program = offline_video?.program ?? await Videos.fetchVideo(video_id);
+            let recorded_program = offline_video?.program ?? null;
+            if (recorded_program === null) {
+                try {
+                    recorded_program = await Videos.fetchVideo(video_id);
+                } catch (error) {
+                    // 一時的なサーバーエラーや通信断では保存版へフォールバックし、保存版もなければ現在のページに留まる
+                    offline_video = await OfflineVideos.getVideo(video_id);
+                    recorded_program = offline_video?.program ?? null;
+                    if (recorded_program === null) {
+                        console.warn('[Video-Watch] Failed to fetch recorded program. Keep current route.', error);
+                        return;
+                    }
+                }
+            }
             if (recorded_program === null && offline_video === null) {
                 offline_video = await OfflineVideos.getVideo(video_id);
                 recorded_program = offline_video?.program ?? null;
@@ -89,9 +102,22 @@ export default defineComponent({
             this.playerStore.is_offline_playback = offline_video !== null;
             this.playerStore.offline_video = offline_video;
 
+            // Series のキーフレームプレビューなどから秒数が明示された場合は、視聴履歴より優先して再生を開始する。
+            // 不正な値は無視し、従来通り PlayerController 側の視聴履歴・録画開始マージンの順で復帰させる。
+            const seek_query = Array.isArray(this.$route.query.t) ? this.$route.query.t[0] : this.$route.query.t;
+            const requested_seek_seconds = typeof seek_query === 'string' ? Number(seek_query) : null;
+            const seek_seconds = requested_seek_seconds !== null && Number.isFinite(requested_seek_seconds) &&
+                requested_seek_seconds >= 0
+                ? Math.min(requested_seek_seconds, recorded_program.recorded_video.duration)
+                : null;
+
             // PlayerController を初期化
             player_controller = new PlayerController('Video');
-            await player_controller.init();
+            await player_controller.init({
+                default_quality: null,
+                playback_rate: null,
+                seek_seconds,
+            });
         },
 
         // 再生セッションを破棄する

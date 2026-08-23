@@ -11,6 +11,7 @@
                 v-model="searchQuery" @keydown="handleKeyDown">
             <Icon class="search-input__icon" icon="fluent:search-20-filled" height="24px" @click="doSearch" />
         </div>
+        <RemoteDeviceActivator class="ml-2" />
         <v-btn v-show="isButtonDisplay && !isTimeTablePage" variant="flat" class="pwa-install-button"
             @click="pwaInstallHandler.install()">
             <Icon icon="material-symbols:install-desktop-rounded" height="20px" class="mr-1" />
@@ -24,6 +25,8 @@
 import { pwaInstallHandler } from 'pwa-install-handler';
 import { onMounted, ref, computed, watch } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
+
+import RemoteDeviceActivator from '@/components/RemoteDeviceActivator.vue';
 
 const props = defineProps<{
     searchQuery?: string;
@@ -83,13 +86,19 @@ const isVideoSection = (path: string) => {
 };
 
 const searchPlaceholder = computed(() => {
-    return isVideoSection(route.path)
+    if (route.path.startsWith('/series')) {
+        return 'シリーズを検索...';
+    }
+    return route.path.startsWith('/videos') || route.path.startsWith('/mylist') || route.path.startsWith('/watched-history')
         ? '録画番組を検索...'
         : '放送予定の番組を検索...';
 });
 
 const getSearchPath = () => {
-    return isVideoSection(route.path)
+    if (route.path.startsWith('/series')) {
+        return '/series/';
+    }
+    return route.path.startsWith('/videos') || route.path.startsWith('/mylist') || route.path.startsWith('/watched-history')
         ? '/videos/search'
         : '/tv/search';
 };

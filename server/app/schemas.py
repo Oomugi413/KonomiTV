@@ -152,7 +152,12 @@ class RecordedVideo(PydanticModel):
     recording_start_time: datetime | None
     recording_end_time: datetime | None
     duration: float
-    container_format: Literal['MPEG-TS', 'MPEG-4']
+    # Bangumi 連携を含む各クライアントが同じ時刻で視聴完了を判定できるよう、サーバー側で算出した値を返す。
+    @computed_field
+    @property
+    def playback_completion_threshold(self) -> float:
+        return GetPlaybackCompletionThreshold(self.duration, self.cm_sections)
+    container_format: Literal['MPEG-TS', 'MPEG-4', 'MMT/TLV']
     video_codec: Literal['MPEG-2', 'H.264', 'H.265']
     video_codec_profile: Literal['High', 'High 10', 'Main', 'Main 10', 'Baseline', 'Constrained Baseline']
     video_scan_type: Literal['Interlaced', 'Progressive']
@@ -160,11 +165,18 @@ class RecordedVideo(PydanticModel):
     video_resolution_width: int
     video_resolution_height: int
     has_video_stream_changes: bool = False
+    # Backward-compatible API field for clients that still use this as the
+    # "metadata analysis completed" signal. Key frame data itself is no longer
+    # returned or preserved after segment_map migration.
+    @computed_field
+    @property
+    def has_key_frames(self) -> bool:
+        return self.status == 'Recorded'
     primary_audio_codec: Literal['AAC-LC']
-    primary_audio_channel: Literal['Monaural', 'Stereo', '5.1ch']
+    primary_audio_channel: Literal['Monaural', 'Stereo', '3ch', '4ch', '5ch', '5.1ch', '6.1ch', '7.1ch', '10.2ch', '22.2ch']
     primary_audio_sampling_rate: int
     secondary_audio_codec: Literal['AAC-LC'] | None = None
-    secondary_audio_channel: Literal['Monaural', 'Stereo', '5.1ch'] | None = None
+    secondary_audio_channel: Literal['Monaural', 'Stereo', '3ch', '4ch', '5ch', '5.1ch', '6.1ch', '7.1ch', '10.2ch', '22.2ch'] | None = None
     secondary_audio_sampling_rate: int | None = None
     cm_sections: list[CMSection] | None = None
     thumbnail_info: ThumbnailInfo | None = None
@@ -183,6 +195,45 @@ class SegmentMapEntry(TypedDict):
 class CMSection(TypedDict):
     start_time: float
     end_time: float
+
+
+def GetPlaybackCompletionThreshold(duration: float, cm_sections: list[CMSection] | None) -> float:
+    """
+    録画番組を視聴完了とみなす再生位置を算出する。
+
+    Args:
+        duration (float): 録画ファイル全体の再生時間 (秒)。
+        cm_sections (list[CMSection] | None): 検出済みの CM 区間。
+
+    Returns:
+        float: 録画先頭基準の視聴完了位置 (秒)。
+    """
+
+    normalized_sections: list[CMSection] = []
+    for section in cm_sections or []:
+        # 不正な区間を除外し、録画時間外へはみ出した値をプレイヤーと同じ時間軸へ収める。
+        start_time = max(0.0, min(float(section['start_time']), duration))
+        end_time = max(0.0, min(float(section['end_time']), duration))
+        if start_time >= end_time:
+            continue
+        normalized_sections.append(CMSection(start_time=start_time, end_time=end_time))
+    normalized_sections.sort(key=lambda section: (section['start_time'], section['end_time']))
+
+    merged_sections: list[CMSection] = []
+    for section in normalized_sections:
+        previous_section = merged_sections[-1] if len(merged_sections) > 0 else None
+        # CM 間の 1 分未満の提供・スポンサー表示は番組本編ではないため、完了判定時だけ同じ CM 群として扱う。
+        if previous_section is not None and section['start_time'] - previous_section['end_time'] < 60.0:
+            previous_section['end_time'] = max(previous_section['end_time'], section['end_time'])
+            continue
+        merged_sections.append(section)
+
+    # CM が検出済みなら最後の CM 群を番組終了側の境界とし、その 3 分前から視聴完了とみなす。
+    if len(merged_sections) > 0:
+        return max(merged_sections[-1]['start_time'] - 3 * 60, 0.0)
+
+    # CM 未解析・未検出の録画は従来どおりファイル全体の 90% を完了位置とする。
+    return max(duration, 0.0) * 0.9
 
 class ThumbnailInfo(TypedDict):
     version: int
@@ -224,6 +275,8 @@ class RecordedProgram(PydanticModel):
     series_title: str | None = None  # 番組タイトル解析に成功した場合のみセット
     episode_number: str | None = None  # 番組タイトル解析に成功した場合のみセット
     subtitle: str | None = None  # 番組タイトル解析に成功した場合のみセット
+    bangumi_subject_id: int | None = None  # Bangumi 条目との照合に成功した場合のみセット
+    bangumi_episode_id: int | None = None  # Bangumi エピソードとの照合に成功した場合のみセット
     description: str = '番組概要を取得できませんでした。'
     detail: dict[str, str] = {}
     start_time: datetime
@@ -254,11 +307,55 @@ class OfflineVideoStreamMetadata(BaseModel):
 
 # ***** シリーズ *****
 
+class SeriesSummary(PydanticModel):
+    id: int
+    title: str
+    description: str
+    genres: list[Genre]
+    thumbnail_recorded_program_ids: list[int]
+    channel_ids: list[str]
+    official_website_url: str | None
+    bangumi_subject_id: int | None
+    bangumi_subject_name: str | None
+    bangumi_subject_name_cn: str | None
+    bangumi_subject_summary: str | None
+    bangumi_subject_image_url: str | None
+    recorded_programs_count: int
+    created_at: datetime
+    updated_at: datetime
+
+class SeriesSummaryList(BaseModel):
+    total: int
+    series_list: list[SeriesSummary]
+
+class SeriesListPosition(BaseModel):
+    page: int
+
+class OnAirSeries(BaseModel):
+    id: int
+    title: str
+    thumbnail_recorded_program_ids: list[int]
+    channel_ids: list[str]
+    recorded_episodes_count: int
+    missing_episodes_count: int
+    partially_recorded_episodes_count: int
+    weekday: Annotated[int, Field(ge=0, le=6)]
+    broadcast_time: str
+    latest_broadcast_at: datetime
+
+class OnAirSeriesList(BaseModel):
+    series_list: list[OnAirSeries]
+
 class Series(PydanticModel):
     id: int
     title: str
     description: str
     genres: list[Genre]
+    bangumi_subject_id: int | None
+    bangumi_subject_name: str | None
+    bangumi_subject_name_cn: str | None
+    bangumi_subject_summary: str | None
+    bangumi_subject_image_url: str | None
     broadcast_periods: list[SeriesBroadcastPeriod]
     created_at: datetime
     updated_at: datetime
@@ -282,6 +379,10 @@ class User(PydanticModel):
     niconico_user_id: int | None
     niconico_user_name: str | None
     niconico_user_premium: bool | None
+    bangumi_user_id: int | None
+    bangumi_user_name: str | None
+    bangumi_user_nickname: str | None
+    bangumi_user_avatar_url: str | None
     twitter_accounts: list[TwitterAccount]  # 追加カラム
     bluesky_accounts: list[BlueskyAccount]  # 追加カラム
     account_links: list[AccountLink]  # 追加カラム
@@ -297,6 +398,75 @@ class AccountLink(PydanticModel):
 
 class Users(RootModel[list[User]]):
     pass
+
+
+class WatchedHistoryItem(BaseModel):
+    video_id: int
+    last_playback_position: Annotated[float, Field(ge=0)]
+    created_at: Annotated[float, Field(gt=0)]
+    updated_at: Annotated[float, Field(gt=0)]
+
+
+class WatchedHistory(BaseModel):
+    items: list[WatchedHistoryItem]
+
+
+class DeviceAuthCreateRequest(BaseModel):
+    device_name: Annotated[str, Field(min_length=1, max_length=100)]
+
+
+class DeviceAuthRequest(BaseModel):
+    device_code: str
+    user_code: str
+    verification_url: str
+    expires_in: int
+    interval: int
+
+
+class DeviceAuthApprovalRequest(BaseModel):
+    user_code: Annotated[str, Field(min_length=8, max_length=8)]
+
+
+class DeviceAuthTokenRequest(BaseModel):
+    device_code: Annotated[str, Field(min_length=32, max_length=100)]
+
+# ***** Komorebi リモートコントロール *****
+
+class RemoteDevice(BaseModel):
+    device_id: str
+    device_name: str
+    last_seen_at: datetime
+    state: dict[str, object] | None
+
+class RemoteDeviceList(BaseModel):
+    devices: list[RemoteDevice]
+
+class RemoteCommandOpenLive(BaseModel):
+    type: Literal['OpenLive']
+    display_channel_id: Annotated[str, Field(min_length=1)]
+
+class RemoteCommandOpenRecording(BaseModel):
+    type: Literal['OpenRecording']
+    recorded_program_id: int
+    position_seconds: Annotated[float, Field(ge=0)] = 0
+
+class RemoteCommandPlayback(BaseModel):
+    type: Literal['Play', 'Pause', 'Stop']
+
+class RemoteCommandSeekRelative(BaseModel):
+    type: Literal['SeekRelative']
+    delta_seconds: float
+
+class RemoteCommandVolume(BaseModel):
+    type: Literal['VolumeUp', 'VolumeDown', 'VolumeMute']
+
+RemoteCommand = Annotated[
+    RemoteCommandOpenLive | RemoteCommandOpenRecording | RemoteCommandPlayback | RemoteCommandSeekRelative | RemoteCommandVolume,
+    Field(discriminator='type'),
+]
+
+class RemoteCommandAccepted(BaseModel):
+    command_id: str
 
 # ***** Twitter / Bluesky 連携 *****
 
@@ -371,6 +541,11 @@ class ReservationConditionUpdateRequest(BaseModel):
     program_search_condition: ProgramSearchCondition
     # 録画設定
     record_settings: RecordSettings
+
+# ***** メンテナンス *****
+
+class ManualScanRequest(BaseModel):
+    path: str
 
 # ***** ユーザー *****
 
@@ -702,6 +877,18 @@ class JikkyoComments(BaseModel):
 class ThirdpartyAuthURL(BaseModel):
     authorization_url: str
 
+# ***** Bangumi 連携 *****
+
+class BangumiAuthRequest(BaseModel):
+    access_token: Annotated[str, Field(min_length=1, max_length=512)]
+
+class BangumiPlaybackProgressRequest(BaseModel):
+    playback_position: Annotated[float, Field(ge=0)]
+    duration: Annotated[float, Field(gt=0)]
+
+class BangumiPlaybackProgressResponse(BaseModel):
+    status: Literal['Completed', 'AlreadyCompleted', 'Pending', 'NotEligible']
+
 # ***** Twitter 連携 *****
 
 class Tweet(BaseModel):
@@ -774,5 +961,5 @@ class VersionInformation(BaseModel):
     version: str
     latest_version: str | None
     environment: Literal['Windows', 'Linux', 'Linux-Docker', 'Linux-ARM']
-    backend: Literal['EDCB', 'Mirakurun']
+    backend: Literal['EDCB', 'Mirakurun', 'EPGStation']
     encoder: Literal['FFmpeg', 'QSVEncC', 'NVEncC', 'VCEEncC', 'rkmppenc']

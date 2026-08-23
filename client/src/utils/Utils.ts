@@ -17,6 +17,9 @@ export default class Utils {
     // Worker からも参照できるように self.location を使う
     static readonly api_base_url = (() => {
         if (import.meta.env.DEV === true) {
+            if (import.meta.env.VITE_KONOMITV_API_BASE_URL) {
+                return import.meta.env.VITE_KONOMITV_API_BASE_URL.replace(/\/$/, '');
+            }
             // デバッグ時はポートを 7000 に強制する
             return `${self.location.protocol}//${self.location.hostname}:7000/api`;
         } else {

@@ -1,22 +1,29 @@
 
 import asyncio
 import json
+import pathlib
 import struct
 import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from sse_starlette.sse import EventSourceResponse
 from starlette.background import BackgroundTask
 
 from app import logging
+from app.metadata.RecordedScanTask import (
+    RecordedFileMetadataNotStableError,
+    RecordedFileMetadataRefreshError,
+    RecordedScanTask,
+)
 from app.models.RecordedProgram import RecordedProgram
 from app.schemas import OfflineVideoStreamMetadata
 from app.streams.StreamEncodingOptions import (
     SplitQualityAndEncodingOptions,
     StreamQualityWithOptions,
 )
+from app.streams.VideoSourceTimeline import VideoSourceTimelineResolver
 from app.streams.VideoStream import VideoStream
 
 
@@ -44,6 +51,42 @@ async def ValidateVideoID(video_id: Annotated[int, Path(description='録画番�
             detail = 'Specified video_id was not found',
         )
 
+    # 詳細 API を経由せずストリームへ直接アクセスした場合も、古いコーデック情報でセッションを生成しないよう同期する。
+    ## 同じファイルの並行リクエストは RecordedScanTask 側で 1 個の再解析タスクへ合流する。
+    try:
+        is_refreshed = await RecordedScanTask().refreshRecordedFileMetadataIfNeeded(recorded_program.recorded_video)
+    except RecordedFileMetadataNotStableError as ex:
+        logging.warning(
+            f'[VideoStreamsRouter][ValidateVideoID] Recorded file is still being updated. [video_id: {video_id}]'
+        )
+        raise HTTPException(
+            status_code = status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail = 'Recorded video file is still being updated. Please retry shortly.',
+            headers = {'Retry-After': str(RecordedScanTask.RECORDING_COMPLETE_SECONDS)},
+        ) from ex
+    except RecordedFileMetadataRefreshError as ex:
+        logging.error(
+            f'[VideoStreamsRouter][ValidateVideoID] Failed to refresh recorded file metadata. [video_id: {video_id}]',
+            exc_info = ex,
+        )
+        raise HTTPException(
+            status_code = status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail = 'Failed to refresh recorded video metadata. Please retry shortly.',
+            headers = {'Retry-After': '5'},
+        ) from ex
+
+    # 再解析後の ORM インスタンスを返し、新しく生成される VideoStream が必ず最新の技術情報を保持するようにする。
+    if is_refreshed is True:
+        refreshed_recorded_program = await RecordedProgram.filter(id=video_id).get_or_none() \
+            .select_related('recorded_video') \
+            .select_related('channel')
+        if refreshed_recorded_program is None:
+            raise HTTPException(
+                status_code = status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail = 'Specified video_id was not found after metadata refresh',
+            )
+        recorded_program = refreshed_recorded_program
+
     return recorded_program
 
 
@@ -61,6 +104,100 @@ async def ValidateQuality(quality: Annotated[str, Path(description='映像の品
         )
 
     return stream_quality
+
+
+def ValidateVideoCopyQuality(recorded_program: RecordedProgram, stream_quality: StreamQualityWithOptions) -> None:
+    """
+    再エンコードなしの HLS 再多重化を利用できる録画か検証する
+
+    Args:
+        recorded_program (RecordedProgram): 配信対象の録画番組
+        stream_quality (StreamQualityWithOptions): リクエストされた録画ストリーミング品質
+
+    Returns:
+        None
+    """
+
+    # 通常の再エンコード品質では追加の制約を設けない
+    if stream_quality.quality != 'copy':
+        return
+
+    recorded_video = recorded_program.recorded_video
+    is_copy_compatible = recorded_video.status == 'Recorded' and (
+        recorded_video.container_format == 'MMT/TLV' or (
+            recorded_video.container_format == 'MPEG-TS' and
+            recorded_video.video_codec in ['H.264', 'H.265'] and
+            recorded_video.video_scan_type == 'Progressive' and
+            recorded_video.has_video_stream_changes is False
+        )
+    )
+    if is_copy_compatible is False:
+        logging.error(
+            f'[VideoStreamsRouter][ValidateVideoCopyQuality] Specified video is not compatible with stream copy. '
+            f'[video_id: {recorded_program.id}, status: {recorded_video.status}, '
+            f'container_format: {recorded_video.container_format}, video_codec: {recorded_video.video_codec}, '
+            f'video_scan_type: {recorded_video.video_scan_type}, '
+            f'has_video_stream_changes: {recorded_video.has_video_stream_changes}]'
+        )
+        raise HTTPException(
+            status_code = status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail = 'Specified video is not compatible with stream copy',
+        )
+
+
+@router.get(
+    '/{video_id}/raw-mmts/mpegts',
+    summary = '録画番組 Raw MMTS ストリーム API',
+    response_class = FileResponse,
+    responses = {
+        status.HTTP_200_OK: {
+            'description': '録画ファイルに保存されている MMT/TLV データ。',
+            'content': {'video/mp2t': {}},
+        },
+        status.HTTP_422_UNPROCESSABLE_ENTITY: {
+            'description': '指定された録画番組は Raw MMTS 直通配信に対応していない。',
+        },
+    },
+)
+async def VideoRawMMTSStreamAPI(
+    recorded_program: Annotated[RecordedProgram, Depends(ValidateVideoID)],
+):
+    """
+    MMT/TLV 形式で保存されている録画ファイルを、変換せずにそのまま配信する。<br>
+    ブラウザ側では mpegts.js の MMTS demuxer がこのストリームを直接解析する。
+    """
+
+    # Raw MMTS 直通配信は MMT/TLV の録画ファイル専用の経路
+    # MPEG-TS / MPEG-4 は既存の HLS エンコード経路で扱う
+    if recorded_program.recorded_video.container_format != 'MMT/TLV':
+        logging.error(
+            f'[VideoStreamsRouter][VideoRawMMTSStreamAPI] Specified video_id is not an MMT/TLV file. '
+            f'[video_id: {recorded_program.id}, container_format: {recorded_program.recorded_video.container_format}]'
+        )
+        raise HTTPException(
+            status_code = status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail = 'Specified video is not an MMT/TLV file',
+        )
+
+    # 録画ファイルの存在を確認する
+    file_path = pathlib.Path(recorded_program.recorded_video.file_path)
+    if file_path.is_file() is False:
+        logging.error(
+            f'[VideoStreamsRouter][VideoRawMMTSStreamAPI] Recorded video file was not found. '
+            f'[video_id: {recorded_program.id}, file_path: {file_path}]'
+        )
+        raise HTTPException(
+            status_code = status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail = 'Recorded video file was not found',
+        )
+
+    return FileResponse(
+        path = file_path,
+        media_type = 'video/mp2t',
+        headers = {
+            'Cache-Control': 'no-store',
+        },
+    )
 
 
 @router.get(
@@ -85,6 +222,9 @@ async def VideoHLSPlaylistAPI(
     この M3U8 プレイリストは仮想的なもので、すべてのセグメントデータがエンコード済みとは限らない。セグメントはリクエストされ次第随時生成される。
     """
 
+    # MPEG-TS パススルー品質では、元映像をそのまま配信できる録画だけを受け付ける
+    ValidateVideoCopyQuality(recorded_program, stream_quality)
+
     # 品質とオプション指定に対応する録画視聴セッションを作成または取得
     video_stream = VideoStream(
         session_id,
@@ -94,8 +234,27 @@ async def VideoHLSPlaylistAPI(
         is_new_session_allowed = True,
     )
 
+    # 中断した MMT/TLV 録画をそのまま連結すると libaribtlv の demux 状態が壊れるため、
+    ## HLS（オリジナル）の各入力区間を別々に再多重化する仮想時間軸を構成する。
+    ## 原始 TLV のダウンロード API はこの経路を通らず、従来どおり単一ファイルだけを返す。
+    if (
+        stream_quality.quality == 'copy' and
+        recorded_program.recorded_video.container_format == 'MMT/TLV'
+    ):
+        source_recorded_programs = [
+            source_recorded_program
+            for source_recorded_program in await VideoSourceTimelineResolver.findCandidates(recorded_program)
+            if source_recorded_program.recorded_video.container_format == 'MMT/TLV'
+        ]
+        if recorded_program.is_partially_recorded is True or len(source_recorded_programs) > 1:
+            source_timeline = VideoSourceTimelineResolver.buildFromRecordedPrograms(
+                recorded_program,
+                source_recorded_programs,
+            )
+            video_stream.configureSourceTimeline(source_timeline, source_recorded_programs)
+
     # 仮想 HLS M3U8 プレイリストを取得
-    virtual_playlist = video_stream.getVirtualPlaylist(cache_key)
+    virtual_playlist = await video_stream.getVirtualPlaylist(cache_key)
     return Response(
         content = virtual_playlist,
         media_type = 'application/vnd.apple.mpegurl',
@@ -128,6 +287,9 @@ async def VideoHLSSegmentAPI(
     呼び出された時点でエンコードされていない場合は既存のエンコードタスクが終了され、<br>
     sequence の HLS セグメントが含まれる範囲から新たにエンコードタスクが開始される。
     """
+
+    # MPEG-TS パススルー品質では、元映像をそのまま配信できる録画だけを受け付ける
+    ValidateVideoCopyQuality(recorded_program, stream_quality)
 
     # 品質とオプション指定に対応する録画視聴セッションを取得
     video_stream = VideoStream(session_id, recorded_program, stream_quality.quality, stream_quality.encoding_options)
@@ -181,6 +343,9 @@ async def VideoHLSBufferAPI(
     どのイベントでも配信される JSON 構造は同じ。<br>
     エンコードタスクが終了した場合は、接続を終了する。
     """
+
+    # MPEG-TS パススルー品質では、元映像をそのまま配信できる録画だけを受け付ける
+    ValidateVideoCopyQuality(recorded_program, stream_quality)
 
     # 品質とオプション指定に対応する録画視聴セッションを取得
     video_stream = VideoStream(session_id, recorded_program, stream_quality.quality, stream_quality.encoding_options)
@@ -243,6 +408,9 @@ async def VideoHLSKeepAliveAPI(
     この API が定期的に呼び出されなくなった場合、一定時間後にストリーミング用 HLS セグメントの生成が停止され、メモリ上のデータが破棄される。
     """
 
+    # MPEG-TS パススルー品質では、元映像をそのまま配信できる録画だけを受け付ける
+    ValidateVideoCopyQuality(recorded_program, stream_quality)
+
     # 品質とオプション指定に対応する録画視聴セッションを取得
     video_stream = VideoStream(session_id, recorded_program, stream_quality.quality, stream_quality.encoding_options)
 
@@ -282,6 +450,9 @@ async def VideoOfflineStreamAPI(
             detail = 'Recording video cannot be saved for offline playback',
         )
 
+    # copy 品質はコンテナを HLS 向け MPEG-TS へ詰め替えるだけなので、対応する録画形式かを通常再生と同じ条件で検証する
+    ValidateVideoCopyQuality(recorded_program, stream_quality)
+
     # 待機中のリクエストは HTTP 応答を開始せず、クライアント側で Waiting と表示できる状態を維持する
     await OFFLINE_VIDEO_STREAM_SEMAPHORE.acquire()
     video_stream: VideoStream | None = None
@@ -295,7 +466,7 @@ async def VideoOfflineStreamAPI(
             stream_quality.encoding_options,
             is_new_session_allowed = True,
         )
-        video_stream.getVirtualPlaylist()
+        await video_stream.getVirtualPlaylist()
 
         # Pydantic を通して、クライアントへ渡す JSON の型とフィールドを固定する
         metadata = OfflineVideoStreamMetadata(

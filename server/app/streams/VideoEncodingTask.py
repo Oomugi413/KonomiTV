@@ -89,6 +89,7 @@ class VideoEncodingTask:
     def buildFFmpegOptions(self,
         quality: QUALITY_TYPES,
         output_ts_offset: float,
+        mmt_seek_seconds: float | None = None,
     ) -> list[str]:
         """
         FFmpeg に渡すオプションを組み立てる
@@ -96,6 +97,7 @@ class VideoEncodingTask:
         Args:
             quality (QUALITY_TYPES): 映像の品質
             output_ts_offset (float): 出力 TS のタイムスタンプオフセット (秒)
+            mmt_seek_seconds (float | None): MMT/TLV 入力のシーク位置 (秒)。MPEG-TS 入力では None
 
         Returns:
             list[str]: FFmpeg に渡すオプションが連なる配列
@@ -110,13 +112,25 @@ class VideoEncodingTask:
             # MPEG-2 以外のコーデックでは入力ストリームの解析時間を長めにする (その方がうまくいく)
             analyzeduration += 1000000
 
-        # 入力
-        ## -analyzeduration をつけることで、ストリームの分析時間を短縮できる
-        options.append(f'-f mpegts -analyzeduration {analyzeduration} -i pipe:0')
+        # MMT/TLV は libaribtlv 対応 FFmpeg に元ファイルを直接開かせ、RecordingIndex による input seek を利用する
+        ## MPEG-TS / MPEG-4 は従来どおり tsreadex が正規化した MPEG-TS を標準入力から受け取る
+        if mmt_seek_seconds is not None:
+            options.extend([
+                '-f', 'libaribtlv',
+                '-ss', str(mmt_seek_seconds),
+                '-i', self.video_stream.recorded_program.recorded_video.file_path,
+            ])
+        else:
+            # -analyzeduration をつけることで、ストリームの分析時間を短縮できる
+            options.append(f'-f mpegts -analyzeduration {analyzeduration} -i pipe:0')
 
         # ストリームのマッピング
         ## 音声切り替えのため、主音声・副音声両方をエンコード後の TS に含む
-        options.append('-map 0:v:0 -map 0:a:0 -map 0:a:1 -map 0:d? -ignore_unknown')
+        if mmt_seek_seconds is not None:
+            # MMT/TLV 録画では副音声が存在するとは限らず、字幕は現時点で MPEG-TS 出力へ変換できないため映像と音声だけを選ぶ
+            options.append('-map 0:v:0 -map 0:a:0 -map 0:a:1? -ignore_unknown')
+        else:
+            options.append('-map 0:v:0 -map 0:a:0 -map 0:a:1 -map 0:d? -ignore_unknown')
 
         # フラグ
         ## 主に FFmpeg の起動を高速化するための設定
@@ -187,9 +201,77 @@ class VideoEncodingTask:
         # オプションをスペースで区切って配列にする
         result: list[str] = []
         for option in options:
-            result += option.split(' ')
+            # MMT/TLV の入力ファイル名は空白を含む可能性があるため、subprocess の1引数としてそのまま保持する
+            if mmt_seek_seconds is not None and option == self.video_stream.recorded_program.recorded_video.file_path:
+                result.append(option)
+            else:
+                result += option.split(' ')
 
         return result
+
+
+    def buildFFmpegCopyOptions(
+        self,
+        output_ts_offset: float,
+        mmt_seek_seconds: float | None = None,
+        mmt_input_file_path: str | None = None,
+    ) -> list[str]:
+        """
+        再エンコードせず MPEG-TS を再多重化する FFmpeg オプションを組み立てる
+
+        Args:
+            output_ts_offset (float): 出力 TS のタイムスタンプオフセット (秒)
+            mmt_seek_seconds (float | None): MMT/TLV 入力のシーク位置 (秒)。MPEG-TS 入力では None
+            mmt_input_file_path (str | None): MMT/TLV 入力ファイル。MPEG-TS 入力では None
+
+        Returns:
+            list[str]: FFmpeg に渡すオプションが連なる配列
+        """
+
+        # MMT/TLV は元ファイルを libaribtlv で直接開き、映像は再エンコードせず MPEG-TS へ再多重化する
+        # MMT/TLV の音声は AAC-LATM のため、HLS で扱える通常の AAC へ変換する
+        if mmt_seek_seconds is not None:
+            if mmt_input_file_path is None:
+                raise ValueError('MMT/TLV input file path is required for stream copy.')
+            options = [
+                '-f', 'libaribtlv',
+                '-i', mmt_input_file_path,
+                # stream copy では input seek 後の RAP から要求時刻までをデコードして破棄できないため、output seek で時刻以前のパケットを除外する
+                '-ss', str(mmt_seek_seconds),
+                '-map', '0:v:0',
+                '-map', '0:a:0',
+                '-map', '0:a:1?',
+                '-ignore_unknown',
+                '-codec:v', 'copy',
+                '-acodec', 'aac',
+                '-aac_coder', 'twoloop',
+                '-ac', '2',
+                '-ab', '192K',
+                '-ar', '48000',
+                '-af', 'volume=2.0',
+                '-output_ts_offset', str(output_ts_offset),
+                '-y',
+                '-f', 'mpegts',
+                'pipe:1',
+            ]
+        else:
+            # tsreadex で単一サービス化・音声正規化・字幕 ID3 化した全ストリームをそのまま再多重化する
+            options = [
+                '-f', 'mpegts',
+                '-analyzeduration', '1500000',
+                '-i', 'pipe:0',
+                '-map', '0:v:0',
+                '-map', '0:a:0',
+                '-map', '0:a:1',
+                '-map', '0:d?',
+                '-ignore_unknown',
+                '-codec', 'copy',
+                '-output_ts_offset', str(output_ts_offset),
+                '-y',
+                '-f', 'mpegts',
+                'pipe:1',
+            ]
+        return options
 
 
     def buildHWEncCOptions(self,
@@ -412,14 +494,26 @@ class VideoEncodingTask:
         CONFIG = Config()
         ENCODER_TYPE = CONFIG.general.encoder
 
+        # MPEG-TS パススルーでは、設定されたハードウェアエンコーダーを使わず FFmpeg の stream copy に固定する
+        ## tsreadex と後段の HLS 分割処理は維持し、映像・音声・字幕の再エンコードだけを行わない
+        if self.video_stream.quality == 'copy':
+            ENCODER_TYPE = 'FFmpeg'
+
+        # 処理対象の VideoStreamSegment と、その区間を供給する録画ファイルを取得する。
+        ## 仮想時間軸ではセッションの基準録画と実際の入力ファイルが異なるため、以降は必ずこの値を参照する。
+        current_sequence = start_sequence
+        current_segment: VideoStreamSegment = self.video_stream.segments[current_sequence]
+        if current_segment.is_gap is True:
+            raise RuntimeError(f'Cannot encode an unrecorded timeline gap. [sequence: {current_sequence}]')
+        source_recorded_program = self.video_stream.getSourceRecordedProgram(current_sequence)
+        recorded_video = source_recorded_program.recorded_video
+
         # 新しいエンコードタスクを起動させた時点で既にエンコード済みのセグメントは使えなくなるので、すべてリセットする
         for segment in self.video_stream.segments:
             if segment.encode_status != 'Pending':
                 await segment.resetState()
 
         # 処理対象の VideoStreamSegment を取得し、エンコード中状態に設定
-        current_sequence = start_sequence
-        current_segment: VideoStreamSegment = self.video_stream.segments[current_sequence]
         current_segment.encode_status = 'Encoding'
         logging.info(f'{self.video_stream.log_prefix}[Segment {current_sequence}] Starting the Encoder...')
 
@@ -432,14 +526,14 @@ class VideoEncodingTask:
         # MPEG-TS 形式の場合のみ、録画ファイルを開く
         # それ以外の場合は一旦 None とする
         file = None
-        if self.video_stream.recorded_program.recorded_video.container_format == 'MPEG-TS':
+        if recorded_video.container_format == 'MPEG-TS':
             # 再生しながらのキーフレーム収集は補助的な高速化なので、初期化に失敗しても再生本体は続ける
             ## 既存の segment_map から開始位置を解決済みの録画では、PAT/PMT や先頭 DTS の再探索が失敗してもエンコード自体は可能
             try:
                 await self.video_stream.ensureTSKeyFrameContext()
             except Exception as ex:
                 logging.warning(f'{self.video_stream.log_prefix} Failed to initialize input keyframe collector context:', exc_info=ex)
-            file = open(self.video_stream.recorded_program.recorded_video.file_path, 'rb')
+            file = open(recorded_video.file_path, 'rb')
 
         # 入力 TS を tsreadex に渡すついでに見つけたキーフレームを保持する
         ## ワーカースレッドでは DB を触らず、イベントループ側が節目ごとに segment_map へ変換して保存する
@@ -459,6 +553,10 @@ class VideoEncodingTask:
             """
 
             nonlocal last_segment_map_flush_keyframe_count
+
+            # segment_map は元 MPEG-TS 上のファイル位置を保存するキャッシュであり、MMT/TLV / MPEG-4 では利用しない
+            if recorded_video.container_format != 'MPEG-TS':
+                return
 
             # キューからワーカースレッドが追加した新着キーフレームを全てローカルリストへ移す
             ## get_nowait() はブロックしないため、イベントループを止めずに済む
@@ -624,7 +722,11 @@ class VideoEncodingTask:
                 tsreadex_read_pipe = None
                 # MPEG-TS のすべてのセグメントで PAT/PMT を確実に取得するための前処理用
                 initial_pat_pmt_data: bytes | None = None
-                if self.video_stream.recorded_program.recorded_video.container_format == 'MPEG-4':
+                tsreadex_service_id = '-1'
+                if recorded_video.container_format == 'MMT/TLV':
+                    # MMT/TLV は tsreadex を通さず、後段で FFmpeg が録画ファイルを直接開く
+                    pass
+                elif recorded_video.container_format == 'MPEG-4':
                     assert file is None
                     # MP4 では psisimux で単一サービスの MPEG-TS を合成して tsreadex -> エンコーダーへの入力とする
                     ## この時、チャンネル情報があれば `-b <NID>/<TSID>/<SID>` の指定に実値を使う
@@ -835,13 +937,18 @@ class VideoEncodingTask:
                     '-',
                 ]
 
-                # tsreadex の読み込み用パイプと書き込み用パイプを作成
-                tsreadex_read_pipe, tsreadex_write_pipe = os.pipe()
+                # MMT/TLV は FFmpeg が元ファイルを直接開くため、tsreadex と接続用パイプを作らない
+                tsreadex_write_pipe: int | None = None
+                if recorded_video.container_format != 'MMT/TLV':
+                    tsreadex_read_pipe, tsreadex_write_pipe = os.pipe()
 
                 try:
+                    if recorded_video.container_format == 'MMT/TLV':
+                        pass
                     # MPEG-TS を処理する場合で、直前に PAT/PMT を抽出できた場合
                     # PAT/PMT を先頭に加えて tsreadex に入力する
-                    if initial_pat_pmt_data is not None:
+                    elif initial_pat_pmt_data is not None:
+                        assert tsreadex_write_pipe is not None
                         # PAT/PMT を先頭に加えた TS データ用の読み込み用パイプと書き込み用パイプを作成
                         tsreadex_stdin_read, tsreadex_stdin_write = os.pipe()
                         tsreadex_stdin_write_generation_token = self.__registerTSReadExInputPipe(tsreadex_stdin_write)
@@ -968,6 +1075,7 @@ class VideoEncodingTask:
                         loop = asyncio.get_running_loop()
                         self._tsreadex_feed_task = loop.run_in_executor(None, FeedTSStream)
                     else:
+                        assert tsreadex_write_pipe is not None
                         # tsreadex のプロセスを作成・実行
                         try:
                             self._tsreadex_process = await asyncio.subprocess.create_subprocess_exec(
@@ -983,31 +1091,61 @@ class VideoEncodingTask:
                                 psisimux_read_pipe = None
                 finally:
                     # tsreadex の書き込み用パイプは子プロセスに渡したので、親プロセス側では必ずクローズする
-                    os.close(tsreadex_write_pipe)
+                    if tsreadex_write_pipe is not None:
+                        os.close(tsreadex_write_pipe)
 
                 # FFmpeg
                 if ENCODER_TYPE == 'FFmpeg':
                     # オプションを取得
-                    encoder_options = self.buildFFmpegOptions(self.video_stream.quality, output_ts_offset)
+                    if self.video_stream.quality == 'copy':
+                        encoder_options = self.buildFFmpegCopyOptions(
+                            output_ts_offset,
+                            mmt_seek_seconds = (
+                                current_segment.source_start_seconds
+                                if recorded_video.container_format == 'MMT/TLV'
+                                else None
+                            ),
+                            mmt_input_file_path = (
+                                recorded_video.file_path
+                                if recorded_video.container_format == 'MMT/TLV'
+                                else None
+                            ),
+                        )
+                    elif recorded_video.container_format == 'MMT/TLV':
+                        encoder_options = self.buildFFmpegOptions(
+                            self.video_stream.quality,
+                            output_ts_offset,
+                            mmt_seek_seconds = current_segment.playlist_start_seconds,
+                        )
+                    else:
+                        encoder_options = self.buildFFmpegOptions(self.video_stream.quality, output_ts_offset)
                     logging.info(f'{self.video_stream.log_prefix} FFmpeg Commands:\nffmpeg {" ".join(encoder_options)}')
 
                     # エンコーダープロセスを作成・実行
                     try:
                         self._encoder_process = await asyncio.subprocess.create_subprocess_exec(
                             LIBRARY_PATH['FFmpeg'], *encoder_options,
-                            stdin = tsreadex_read_pipe,  # tsreadex からの入力
+                            stdin = (
+                                asyncio.subprocess.DEVNULL
+                                if recorded_video.container_format == 'MMT/TLV'
+                                else tsreadex_read_pipe
+                            ),
                             stdout = asyncio.subprocess.PIPE,  # ストリーム出力
                             stderr = asyncio.subprocess.PIPE,  # ストリーム出力
                         )
                     finally:
                         # tsreadex の read 側は子プロセスに渡したので、親プロセス側でクローズする
-                        os.close(tsreadex_read_pipe)
-                        tsreadex_read_pipe = None
+                        if tsreadex_read_pipe is not None:
+                            os.close(tsreadex_read_pipe)
+                            tsreadex_read_pipe = None
 
                 # HWEncC
                 else:
                     # オプションを取得
-                    encoder_options = self.buildHWEncCOptions(self.video_stream.quality, ENCODER_TYPE, output_ts_offset)
+                    quality = self.video_stream.quality
+                    assert quality != 'copy'
+                    assert tsreadex_read_pipe is not None
+                    encoder_options = self.buildHWEncCOptions(quality, ENCODER_TYPE, output_ts_offset)
                     logging.info(f'{self.video_stream.log_prefix} {ENCODER_TYPE} Commands:\n{ENCODER_TYPE} {" ".join(encoder_options)}')
 
                     # エンコーダープロセスを作成・実行
@@ -1054,6 +1192,9 @@ class VideoEncodingTask:
                 yield_packet_count = 0
                 # セグメント境界をランダムアクセスフレームに合わせるためのフラグ
                 is_split_pending = False
+                # 仮想時間軸上で入力ファイルが切り替わる地点に到達したことを、
+                # PES パーサーの内側から TS 読み取りループへ伝えるためのフラグ
+                is_reached_virtual_source_boundary = False
 
                 # PTS/DTS の 33bit ラップアラウンドを展開して、DB に保存されている ffprobe の単調増加 DTS に合わせる
                 ## ffmpeg/ffprobe は 2^33 を超えた場合も内部的に単調増加の DTS として扱うため、
@@ -1152,7 +1293,7 @@ class VideoEncodingTask:
                                         # H.265 映像 PES を解析できるようパーサーを差し替える
                                         video_parser = PESParser(H265PES)
                                         logging.debug(f'{self.video_stream.log_prefix} H.265 PID: 0x{elementary_pid:04x}')
-                                elif stream_type == 0x0F:  # AAC
+                                elif stream_type in (0x0F, 0x11):  # AAC (ADTS / LATM)
                                     if audio_pid is None:
                                         audio_pid = elementary_pid
                                         logging.debug(f'{self.video_stream.log_prefix} AAC PID: 0x{elementary_pid:04x}')
@@ -1253,6 +1394,21 @@ class VideoEncodingTask:
                                         logging.info(f'{self.video_stream.log_prefix} Reached the final segment.')
                                         break
 
+                                    # MMT/TLV の別ファイルや欠落区間へ到達したら、現在の FFmpeg はここで終了する。
+                                    ## 次のセグメント要求が新しい libaribtlv demux コンテキストを開始し、HLS の discontinuity と対応する。
+                                    next_segment = self.video_stream.segments[current_sequence]
+                                    if (
+                                        next_segment.is_gap is True or
+                                        next_segment.source_recorded_program_id != current_segment.source_recorded_program_id
+                                    ):
+                                        is_reached_virtual_source_boundary = True
+                                        await FlushCollectedSegmentMap()
+                                        logging.info(
+                                            f'{self.video_stream.log_prefix} Reached a virtual source boundary. '
+                                            f'[next_sequence: {current_sequence}]'
+                                        )
+                                        break
+
                                     # 新しいセグメント用のデータと状態を初期化
                                     ## ここで encoded_segment は空の bytearray にリセットされる
                                     logging.info(f'{self.video_stream.log_prefix}[Segment {current_sequence}] Encoding...')
@@ -1302,7 +1458,10 @@ class VideoEncodingTask:
                         await asyncio.sleep(0)
 
                     # 最終セグメントの場合はループを抜ける
-                    if current_sequence >= len(self.video_stream.segments):
+                    if (
+                        current_sequence >= len(self.video_stream.segments) or
+                        is_reached_virtual_source_boundary is True
+                    ):
                         break
 
                 # エンコーダープロセスを終了

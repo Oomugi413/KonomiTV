@@ -62,6 +62,9 @@ export interface ILocalClientSettings extends IClientSettings {
         created_at: number;
         updated_at: number;
     }[];
+    selected_remote_device_id: string | null;
+    remote_control_menu_pinned: boolean;
+    video_auto_skip_cm: boolean;
     lshaped_screen_crop_enabled: boolean;
     lshaped_screen_crop_zoom_level: number;
     lshaped_screen_crop_x_position: number;
@@ -80,6 +83,7 @@ export interface ILocalClientSettings extends IClientSettings {
     tv_channel_selection_requires_alt_key: boolean;
     use_28hour_clock: boolean;
     show_original_broadcast_time_during_playback: boolean;
+    video_playback_start_position: 'FileStart' | 'ProgramStart';
     panel_display_state: 'RestorePreviousState' | 'AlwaysDisplay' | 'AlwaysFold';
     tv_panel_active_tab: 'Program' | 'Channel' | 'Comment' | 'Twitter';
     video_panel_active_tab: 'RecordedProgram' | 'Series' | 'Comment' | 'Twitter';
@@ -130,6 +134,7 @@ export interface ILocalClientSettings extends IClientSettings {
     twitter_active_tab: 'Search' | 'Timeline' | 'Capture';
     tweet_hashtag_position: 'Prepend' | 'Append' | 'PrependWithLineBreak' | 'AppendWithLineBreak';
     tweet_capture_watermark_position: 'None' | 'TopLeft' | 'TopRight' | 'BottomLeft' | 'BottomRight';
+    is_cloudflare_zerotrust: boolean | null;
 }
 
 /**
@@ -166,6 +171,12 @@ export const ILocalClientSettingsDefault: ILocalClientSettings = {
     mylist: [],
     // 「ビデオをみる」の視聴履歴
     watched_history: [],
+    // 最後に選択した Komorebi テレビ。ブラウザ更新後も投げ先を維持する (同期無効)
+    selected_remote_device_id: null,
+    // テレビ操作メニューを右上に開いたまま表示する (同期無効)
+    remote_control_menu_pinned: false,
+    // 録画再生時に CM 区間を自動でスキップする (Default: オフ) (同期無効)
+    video_auto_skip_cm: false,
 
     // ***** L字画面のクロップ設定 *****
 
@@ -228,6 +239,8 @@ export const ILocalClientSettingsDefault: ILocalClientSettings = {
     use_28hour_clock: false,
     // 録画番組の再生中に元の放送時刻を表示する (Default: オフ)
     show_original_broadcast_time_during_playback: false,
+    // 視聴履歴がない録画番組の再生開始位置 (Default: 番組の開始時刻)
+    video_playback_start_position: 'ProgramStart',
     // デフォルトのパネルの表示状態 (Default: 前回の状態を復元する)
     panel_display_state: 'RestorePreviousState',
     // テレビをみるときにデフォルトで表示されるパネルのタブ (Default: 番組情報タブ)
@@ -359,6 +372,9 @@ export const ILocalClientSettingsDefault: ILocalClientSettings = {
     tweet_hashtag_position: 'Append',
     // ツイートするキャプチャに番組名の透かしを描画する (Default: 透かしを描画しない)
     tweet_capture_watermark_position: 'None',
+
+    // CFZT 判定
+    is_cloudflare_zerotrust: null,
 };
 
 // 同期対象の設定データのキーのみを列挙した配列
@@ -370,6 +386,9 @@ export const SYNCABLE_SETTINGS_KEYS: (keyof IClientSettings)[] = [
     // twitter_panel_post_targets: 同期無効
     // twitter_reply_thread_states: 同期無効
     // bluesky_reply_thread_states: 同期無効
+    // selected_remote_device_id: 同期無効
+    // remote_control_menu_pinned: 同期無効
+    // video_auto_skip_cm: 同期無効
     'saved_twitter_hashtags',
     'mylist',
     'watched_history',
@@ -391,6 +410,7 @@ export const SYNCABLE_SETTINGS_KEYS: (keyof IClientSettings)[] = [
     'tv_channel_selection_requires_alt_key',
     'use_28hour_clock',
     'show_original_broadcast_time_during_playback',
+    'video_playback_start_position',
     'panel_display_state',
     'tv_panel_active_tab',
     'video_panel_active_tab',
@@ -453,6 +473,7 @@ export const ENVIRONMENT_SPECIFIC_SETTINGS_KEYS: (keyof ILocalClientSettings)[] 
     'mylist',
     'watched_history',
     'selected_twitter_panel_account',
+    'selected_remote_device_id',
 ];
 
 

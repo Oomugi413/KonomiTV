@@ -2,6 +2,9 @@
 
 import { createRouter, createWebHistory } from 'vue-router';
 
+import Message from '@/message';
+import RemoteControl, { type RemoteCommand } from '@/services/RemoteControl';
+import useSettingsStore from '@/stores/SettingsStore';
 import Utils from '@/utils';
 
 
@@ -50,6 +53,25 @@ const router = createRouter({
             component: () => import('@/views/Videos/Programs.vue'),
         },
         {
+            path: '/videos/series/:series_id',
+            redirect: to => `/series/${to.params.series_id}`,
+        },
+        {
+            path: '/series/on-air/:series_id?',
+            name: 'On Air Series',
+            component: () => import('@/views/Series/OnAir.vue'),
+        },
+        {
+            path: '/series/:series_id?',
+            name: 'Series Home',
+            component: () => import('@/views/Series/Home.vue'),
+        },
+        {
+            path: '/videos/recording',
+            name: 'Videos Recording',
+            component: () => import('@/views/Videos/Recording.vue'),
+        },
+        {
             path: '/videos/watch/:video_id',
             name: 'Videos Watch',
             component: () => import('@/views/Videos/Watch.vue'),
@@ -83,6 +105,11 @@ const router = createRouter({
             path: '/watched-history/',
             name: 'Watched History',
             component: () => import('@/views/WatchedHistory.vue'),
+        },
+        {
+            path: '/offline-videos/',
+            name: 'Offline Videos',
+            component: () => import('@/views/OfflineVideos.vue'),
         },
         {
             path: '/mypage/',
@@ -139,6 +166,11 @@ const router = createRouter({
             component: () => import('@/views/Settings/Jikkyo.vue'),
         },
         {
+            path: '/settings/bangumi',
+            name: 'Settings Bangumi',
+            component: () => import('@/views/Settings/Bangumi.vue'),
+        },
+        {
             path: '/settings/twitter',
             name: 'Settings Twitter',
             component: () => import('@/views/Settings/Twitter.vue'),
@@ -152,6 +184,11 @@ const router = createRouter({
             path: '/login/',
             name: 'Login',
             component: () => import('@/views/Login.vue'),
+        },
+        {
+            path: '/pair/',
+            name: 'Device Pairing',
+            component: () => import('@/views/Pair.vue'),
         },
         {
             path: '/register/',
@@ -170,6 +207,12 @@ const router = createRouter({
         if (savedPosition) {
             // 戻る/進むボタンが押されたときは保存されたスクロール位置を使う
             return savedPosition;
+        } else if (to.name === 'Series Home' && from.name === 'Series Home') {
+            // 同じシリーズ一覧上で展開状態だけを切り替える場合は、カードの画面内位置を維持する
+            return false;
+        } else if (to.name === 'On Air Series' && from.name === 'On Air Series') {
+            // 放送中一覧でも、展開状態だけの切り替えではスクロール位置を変えない
+            return false;
         } else {
             // それ以外は常に先頭にスクロールする
             return {top: 0, left: 0};
@@ -179,7 +222,37 @@ const router = createRouter({
 
 // ルーティングの変更時に View Transitions API を適用する
 // ref: https://developer.mozilla.org/ja/docs/Web/API/View_Transitions_API
-router.beforeResolve((to, from, next) => {
+router.beforeResolve(async (to, from, next) => {
+    // テレビが選択されている間は視聴ページをローカルで開かず、選択中の Komorebi へ再生対象だけを送る。
+    const selectedDeviceId = useSettingsStore().settings.selected_remote_device_id;
+    let remoteCommand: Extract<RemoteCommand, {type: 'OpenLive' | 'OpenRecording'}> | null = null;
+    if (selectedDeviceId !== null && to.name === 'TV Watch' && typeof to.params.display_channel_id === 'string') {
+        remoteCommand = {type: 'OpenLive', display_channel_id: to.params.display_channel_id};
+    } else if (selectedDeviceId !== null && to.name === 'Videos Watch' && typeof to.params.video_id === 'string') {
+        const recordedProgramId = Number(to.params.video_id);
+        if (Number.isInteger(recordedProgramId)) {
+            const seekQuery = Array.isArray(to.query.t) ? to.query.t[0] : to.query.t;
+            const requestedSeekSeconds = typeof seekQuery === 'string' ? Number(seekQuery) : null;
+            const positionSeconds = requestedSeekSeconds !== null && Number.isFinite(requestedSeekSeconds) &&
+                requestedSeekSeconds >= 0
+                ? requestedSeekSeconds
+                : 0;
+            remoteCommand = {
+                type: 'OpenRecording',
+                recorded_program_id: recordedProgramId,
+                position_seconds: positionSeconds,
+            };
+        }
+    }
+    if (selectedDeviceId !== null && remoteCommand !== null) {
+        const sent = await RemoteControl.sendOpenCommand(selectedDeviceId, remoteCommand);
+        if (sent === true) {
+            Message.success('テレビへ再生を送信しました。');
+            next(false);
+            return;
+        }
+    }
+
     // View Transition API を適用しないルートの prefix
     // to と from の両方のパスがこの prefix で始まる場合は View Transition API を適用しない
     const no_transition_routes = [

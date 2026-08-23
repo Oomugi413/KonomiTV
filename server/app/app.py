@@ -20,9 +20,11 @@ from app.constants import (
     VERSION,
 )
 from app.metadata.RecordedScanTask import RecordedScanTask
+from app.metadata.SeriesIndexer import SeriesIndexer
 from app.models.Channel import Channel
 from app.models.Program import Program
 from app.routers import (
+    BangumiRouter,
     BlueskyRouter,
     CapturesRouter,
     ChannelsRouter,
@@ -32,6 +34,7 @@ from app.routers import (
     NiconicoRouter,
     ProgramsRouter,
     RecordingPresetsRouter,
+    RemoteControlRouter,
     ReservationConditionsRouter,
     ReservationsRouter,
     SeriesRouter,
@@ -43,8 +46,14 @@ from app.routers import (
     VideoStreamsRouter,
 )
 from app.streams.LiveStream import LiveStream
+from app.utils.BangumiClient import BangumiClient
 from app.utils.edcb.EDCBTuner import EDCBTuner
+from app.utils.EventLoopBlockDetector import (
+    StartEventLoopBlockDetector,
+    StopEventLoopBlockDetector,
+)
 from app.utils.FastAPITaskUtil import repeat_every
+from app.utils.HardwareDevice import InitializeVAAPIHardwareDevices
 
 
 # もし Config() の実行時に AssertionError が発生した場合は、LoadConfig() を実行してサーバー設定データをロードする
@@ -76,9 +85,11 @@ app.include_router(VideoStreamsRouter.router)
 app.include_router(ReservationsRouter.router)
 app.include_router(ReservationConditionsRouter.router)
 app.include_router(RecordingPresetsRouter.router)
+app.include_router(RemoteControlRouter.router)
 app.include_router(CapturesRouter.router)
 app.include_router(DataBroadcastingRouter.router)
 app.include_router(NiconicoRouter.router)
+app.include_router(BangumiRouter.router)
 app.include_router(TwitterRouter.router)
 app.include_router(BlueskyRouter.router)
 app.include_router(UsersRouter.router)
@@ -148,8 +159,11 @@ def Root(file: str):
 
     # 存在しない静的ファイルが指定された場合
     else:
-        if file.startswith('api/') or file.startswith('local/'):
-            # サーバー側に存在しない API または Service Worker が提供する仮想 URL へ直接アクセスされた場合は 404 Not Found を返す
+        if (file.startswith('api/') or file.startswith('local/') or
+            file == 'data-broadcast' or file.startswith('data-broadcast/')):
+            # API・オフライン動画の仮想 URL・ARIB データ放送用 VFS は SPA の管理外なので、404 Not Found を返す。
+            # /data-broadcast/ を index.html へ fallback させると、VFS Worker がリソースを
+            # 解決できなかった際に KonomiTV 本体がデータ放送 iframe 内で起動してしまう。
             return JSONResponse({'detail': 'Not Found'}, status_code = status.HTTP_404_NOT_FOUND)
         else:
             # パスに api/ が前方一致で含まれていなければ、index.html を返す
@@ -223,6 +237,9 @@ recorded_scan_task: RecordedScanTask | None = None
 async def Startup():
     global recorded_scan_task
 
+    # Linux の DRI render node を起動時に一度だけ検証し、CM 解析で共有する。
+    await InitializeVAAPIHardwareDevices()
+
     # チャンネル情報を更新
     await Channel.update()
 
@@ -232,16 +249,25 @@ async def Startup():
     # 番組情報を更新
     await Program.update()
 
+    # 既存録画も含めて確定的に解析できる作品を Series へ関連付ける
+    ## EDCB / EPGStation 構成では RecordedScanTask の起動時一括スキャンが動かないため、バックエンドに依存せずここで実行する。
+    await SeriesIndexer.rebuild()
+
     # 全てのチャンネル&品質のライブストリームを初期化する
     for channel in await Channel.filter(is_watchable=True).order_by('channel_number'):
         for quality in QUALITY:
             LiveStream(channel.display_channel_id, quality)
 
-    # 録画フォルダ監視・メタデータ更新/同期タスクを開始
-    ## 録画ファイルの量次第では録画ファイルの更新確認に時間がかかるため、非同期で実行する
-    # ref: https://docs.astral.sh/ruff/rules/asyncio-dangling-task/
+    # 録画バックエンドの有無に応じて、ローカル監視とバックエンド同期を明確に分離して開始する。
     recorded_scan_task = RecordedScanTask()
-    await recorded_scan_task.start()
+    if CONFIG.general.backend == 'Mirakurun':
+        # Mirakurun は録画バックエンドを持たないため、録画フォルダの一括スキャンと変更監視を開始する。
+        # 録画ファイルの量次第では更新確認に時間がかかるため、start() 内で非同期タスクとして実行する。
+        # ref: https://docs.astral.sh/ruff/rules/asyncio-dangling-task/
+        await recorded_scan_task.start()
+    else:
+        # EDCB / EPGStation はバックエンド API が返した録画だけを同期し、録画フォルダの全件スキャン・変更監視は開始しない。
+        await recorded_scan_task.startBackendRecordingSync()
 
 # サーバー設定で指定された時間 (デフォルト: 15分) ごとに1回、チャンネル情報と番組情報を更新する
 # チャンネル情報は頻繁に変わるわけではないけど、手動で再起動しなくても自動で変更が適用されてほしい
@@ -263,6 +289,18 @@ async def UpdateChannelAndProgram():
 async def UpdateChannelJikkyoStatus():
     await Channel.updateJikkyoStatus()
 
+# 30分に1回、連携済み Bangumi アカウントの在看・看過一覧から Series の条目情報を更新する。
+## 条目検索を Series ごとに行わず、アカウントごとの收藏一覧を候補プールとして一括照合する。
+@app.on_event('startup')
+@repeat_every(seconds=30 * 60, wait_first=10, logger=logging.logger)
+async def UpdateBangumiCollections():
+    await BangumiClient.syncAllLinkedUsers()
+
+# 通常の起動処理が完了してからイベントループの応答性を監視し、実行中の同期ブロックを次回発生時に捕捉する。
+@app.on_event('startup')
+async def StartEventLoopBlockDetection():
+    StartEventLoopBlockDetector()
+
 # サーバーの終了時に実行する
 cleanup = False
 @app.on_event('shutdown')
@@ -273,6 +311,9 @@ async def Shutdown():
     if cleanup is True:
         return
     cleanup = True
+
+    # 意図したシャットダウン待機をイベントループ停止として記録しないよう、他の終了処理より先に監視を止める。
+    await StopEventLoopBlockDetector()
 
     # 全てのライブストリームを終了する
     for live_stream in LiveStream.getAllLiveStreams():
@@ -293,5 +334,17 @@ async def Shutdown():
     await asyncio.sleep(0.5)
 
 # shutdown イベントが発火しない場合も想定し、アプリケーションの終了時に Shutdown() が確実に呼ばれるように
-# atexit は同期関数しか実行できないので、asyncio.run() でくるむ
-atexit.register(asyncio.run, Shutdown())
+# atexit は同期関数しか実行できないので、終了時に asyncio.run() でくるむ
+## asyncio.run(Shutdown()) を直接 register() に渡すと登録時点で coroutine オブジェクトが作られ、
+## ProcessPoolExecutor の fork 子プロセス終了時に未 await の coroutine として警告が出る
+def RunShutdownAtExit() -> None:
+    """
+    atexit からサーバー終了処理を実行する
+
+    Returns:
+        None
+    """
+
+    asyncio.run(Shutdown())
+
+atexit.register(RunShutdownAtExit)

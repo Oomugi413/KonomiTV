@@ -18,7 +18,11 @@ from app.constants import HTTPX_CLIENT, JST, LOGO_DIR, VERSION
 from app.models.Channel import Channel
 from app.routers.UsersRouter import GetCurrentUser
 from app.streams.LiveStream import LiveStream
-from app.utils import GetMirakurunAPIEndpointURL, ParseDatetimeStringToJST
+from app.utils import (
+    GetBackendForChannelAndProgram,
+    GetMirakurunAPIEndpointURL,
+    ParseDatetimeStringToJST,
+)
 from app.utils.edcb.CtrlCmdUtil import CtrlCmdUtil
 from app.utils.edcb.EDCBUtil import EDCBUtil
 from app.utils.JikkyoClient import JikkyoClient
@@ -434,8 +438,8 @@ async def ChannelLogoAPI(
             if logo is not None and len(logo) > 0:
                 return (logo, logo_media_type)
 
-        # Mirakurun バックエンドの場合
-        elif Config().general.backend == 'Mirakurun':
+        # Mirakurun / EPGStation バックエンドの場合
+        elif GetBackendForChannelAndProgram() == 'Mirakurun':
 
             # Mirakurun 形式のサービス ID
             # NID と SID を 5 桁でゼロ埋めした上で int に変換する

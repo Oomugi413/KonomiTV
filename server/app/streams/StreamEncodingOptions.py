@@ -3,7 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.config import Config
-from app.constants import QUALITY, QUALITY_TYPES
+from app.constants import (
+    LIVE_QUALITY_TYPES,
+    QUALITY,
+    QUALITY_TYPES,
+    VIDEO_QUALITY_TYPES,
+)
 
 
 @dataclass(frozen=True)
@@ -91,16 +96,35 @@ class StreamQualityWithOptions:
     API パスの品質指定を、ベース画質と追加エンコードオプションへ分解した結果を表す
 
     Args:
-        quality (QUALITY_TYPES): ベース画質
+        quality (VIDEO_QUALITY_TYPES): 録画ストリーミングで利用する画質
         encoding_options (StreamEncodingOptions): ベース画質に追加するエンコードオプション
     """
 
-    # QUALITY に定義されているベース画質
-    ## API パスには 720p-hevc-10bit-24fps のようにオプション付きの品質が渡されるが、エンコード処理にはこの値だけを渡す
-    quality: QUALITY_TYPES
+    # 録画ストリーミングで利用する画質
+    ## copy は QUALITY に含まれず、FFmpeg stream copy を使う録画専用の特殊な品質として扱う
+    quality: VIDEO_QUALITY_TYPES
 
     # ベース画質に追加するエンコードオプション
     ## HEVC 10bit や 24fps モードは、ベース画質から分けてストリーム ID やエンコード引数へ渡す
+    encoding_options: StreamEncodingOptions
+
+
+@dataclass(frozen=True)
+class LiveStreamQualityWithOptions:
+    """
+    ライブ API パスの品質指定を、ベース画質と追加エンコードオプションへ分解した結果を表す
+
+    Args:
+        quality (LIVE_QUALITY_TYPES): ライブストリームで利用する画質
+        encoding_options (StreamEncodingOptions): ベース画質に追加するエンコードオプション
+    """
+
+    # ライブストリームで利用する画質
+    ## raw-mmts は BS4K の MMTS 透過配信専用の特殊な品質で、QUALITY には存在しない
+    quality: LIVE_QUALITY_TYPES
+
+    # ベース画質に追加するエンコードオプション
+    ## raw-mmts ではエンコードを行わないため、常にデフォルト値のまま使われる
     encoding_options: StreamEncodingOptions
 
 
@@ -114,6 +138,14 @@ def SplitQualityAndEncodingOptions(quality: str) -> StreamQualityWithOptions | N
     Returns:
         StreamQualityWithOptions | None: 分解結果 (不正な品質指定の場合は None)
     """
+
+    # MPEG-TS パススルーは画質変換を一切行わない録画専用の品質として扱う
+    ## エンコードオプションは元映像の変換を要求する値なので、常にデフォルト値のまま使う
+    if quality == 'copy':
+        return StreamQualityWithOptions(
+            quality = 'copy',
+            encoding_options = StreamEncodingOptions(),
+        )
 
     # -10bit / -24fps は buildSuffix() と同じ順序でのみ受け付ける
     ## 末尾から剥がすことで、1080p-60fps-hevc のようにベース画質自体が -hevc を含むケースを安全に扱う
@@ -142,4 +174,34 @@ def SplitQualityAndEncodingOptions(quality: str) -> StreamQualityWithOptions | N
     return StreamQualityWithOptions(
         quality = base_quality,
         encoding_options = encoding_options,
+    )
+
+
+def SplitLiveQualityAndEncodingOptions(quality: str) -> LiveStreamQualityWithOptions | None:
+    """
+    ライブ API パスの品質指定を、ベース画質と追加オプションに分解する
+
+    Args:
+        quality (str): API パスで指定された品質
+
+    Returns:
+        LiveStreamQualityWithOptions | None: 分解結果 (不正な品質指定の場合は None)
+    """
+
+    # BS4K Raw MMTS はエンコードを伴わないライブ専用品質として扱う
+    ## 既存の QUALITY はエンコード引数を組み立てるためのメタデータなので、raw-mmts はそこへ含めない
+    if quality == 'raw-mmts':
+        return LiveStreamQualityWithOptions(
+            quality = 'raw-mmts',
+            encoding_options = StreamEncodingOptions(),
+        )
+
+    # 通常のライブ品質は録画配信と同じ分解ロジックを利用する
+    stream_quality = SplitQualityAndEncodingOptions(quality)
+    if stream_quality is None or stream_quality.quality == 'copy':
+        return None
+
+    return LiveStreamQualityWithOptions(
+        quality = stream_quality.quality,
+        encoding_options = stream_quality.encoding_options,
     )

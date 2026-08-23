@@ -4,6 +4,7 @@
         'watch-player--virtual-keyboard-display': playerStore.is_virtual_keyboard_display && Utils.hasActiveElementClass('dplayer-comment-input'),
         'watch-player--video': playback_mode === 'Video',
         'watch-player--pure-black': settingsStore.settings.use_pure_black_player_background,
+        'watch-player--data-broadcasting': playerStore.is_data_broadcasting_display,
     }">
         <div class="watch-player__background-wrapper">
             <div class="watch-player__background" :class="{
@@ -33,8 +34,9 @@
                 <Icon class="switch-button-icon" icon="fluent:ios-arrow-left-24-filled" width="32px" style="transform: rotate(90deg)" />
             </div>
             <div v-ripple class="switch-button switch-button-panel"
-                :class="{'switch-button-panel--open': playerStore.is_panel_display}"
-                @click="playerStore.is_panel_display = !playerStore.is_panel_display">
+                :class="{'switch-button-panel--open': playerStore.is_data_broadcasting_display ?
+                    playerStore.is_data_broadcasting_panel_display : playerStore.is_panel_display}"
+                @click="togglePanel">
                 <Icon class="switch-button-icon" icon="fluent:navigation-16-filled" width="32px" />
             </div>
             <div v-ripple class="switch-button switch-button-down"
@@ -67,6 +69,15 @@ const channelsStore = useChannelsStore();
 const playerStore = usePlayerStore();
 const settingsStore = useSettingsStore();
 
+const togglePanel = () => {
+    // データ放送中は通常のパネル設定を変更せず、今回のアプリケーション表示中だけ開閉状態を切り替える
+    if (playerStore.is_data_broadcasting_display) {
+        playerStore.is_data_broadcasting_panel_display = !playerStore.is_data_broadcasting_panel_display;
+        return;
+    }
+    playerStore.is_panel_display = !playerStore.is_panel_display;
+};
+
 // watch-player__dplayer-setting-cover がクリックされたとき、設定パネルを閉じる
 const handleSettingCoverClick = () => {
     const dplayer_mask = document.querySelector<HTMLDivElement>('.dplayer-mask');
@@ -81,14 +92,36 @@ const handleSettingCoverClick = () => {
 
 // DPlayer のデフォルトスタイルを上書き
 .watch-player__dplayer {
-    svg circle, svg path {
+    @include smartphone-vertical {
+        overflow: visible !important;
+    }
+    svg:not(.dplayer-aribb62-subtitle *) circle,
+    svg:not(.dplayer-aribb62-subtitle *) path {
         fill: rgb(var(--v-theme-text)) !important;
     }
     .dplayer-video-wrap {
         background: transparent !important;
+
+        // ARIB HTML5 の iframe / receiver 背景 / external video plane が共有する描画領域を、
+        // 右パネルの開閉やウインドウ比率にかかわらず親要素内へ 16:9 で contain する。
+        &:has(> .dplayer-video-wrap-aspect > .dplayer-tlv-data-broadcast) {
+            container-type: size;
+
+            .dplayer-video-wrap-aspect {
+                width: min(100cqw, calc(100cqh * 16 / 9));
+                height: min(100cqh, calc(100cqw * 9 / 16));
+            }
+        }
+
         .dplayer-video-wrap-aspect {
             transition: opacity 0.2s cubic-bezier(0.4, 0.38, 0.49, 0.94);
             opacity: 1;
+        }
+        // ARIB STD-B62 字幕・文字スーパーは、receiver 背景 (z=0)・外部映像面 (z=1)・
+        // application canvas / HDR → SDR 変換 canvas (z=2) のすべてより手前に表示する。
+        // DPlayer が実行時に生成する要素の DOM 順序には依存せず、放送映像の合成順を明示する。
+        .dplayer-tlv-media-plane > .dplayer-aribb62-subtitle {
+            z-index: 3;
         }
         .dplayer-danmaku {
             max-width: 100%;
@@ -118,6 +151,10 @@ const handleSettingCoverClick = () => {
             // ローディング表示は自前でやるため不要
             display: none !important;
         }
+    }
+    // データ放送の外部 video plane より DPlayer 自身の情報パネルを常に手前に表示する
+    .dplayer-info-panel {
+        z-index: 3;
     }
     .dplayer-controller-mask {
         height: 82px !important;
@@ -332,6 +369,9 @@ const handleSettingCoverClick = () => {
     }
     .dplayer-setting-box {
         z-index: 10 !important;
+        &.dplayer-setting-box-audio {
+            clip-path: inset(calc(100% - var(--tlv-audio-panel-height, 114px)) 0 0 round 7px) !important;
+        }
         @include tablet-vertical {
             height: calc(100% - 60px) !important;
         }
@@ -344,15 +384,6 @@ const handleSettingCoverClick = () => {
                 // Document Picture-in-Picture ウインドウでは非表示
                 @media all and (display-mode: picture-in-picture) {
                     display: none;
-                }
-            }
-        }
-        .dplayer-setting-audio-panel {
-            // 副音声がない番組で副音声を選択できないように
-            .dplayer-setting-audio-item.dplayer-setting-audio-item--disabled {
-                pointer-events: none;  // クリックイベントを無効化
-                .dplayer-label {
-                    color: #AAAAAA;  // グレーアウト
                 }
             }
         }
@@ -543,6 +574,7 @@ _::-webkit-full-page-media, _:future, :root .dplayer-subtitle-icon[aria-label='�
         left: 0;
         width: 100%;
         height: 100%;
+        pointer-events: none;
 
         .watch-player__background {
             position: relative;
@@ -618,6 +650,26 @@ _::-webkit-full-page-media, _:future, :root .dplayer-subtitle-icon[aria-label='�
 
     .watch-player__dplayer {
         width: 100%;
+    }
+
+    // データ放送中は、BML / video / 字幕の内部レイヤー構成を崩さず、
+    // DPlayer 全体を外側の切局・パネルボタンより手前に置く。
+    // 右パネルのリモコンは z-index: 20 のため、引き続き最前面に残る。
+    &.watch-player--data-broadcasting .watch-player__dplayer {
+        position: relative;
+        z-index: 1;
+    }
+
+    // データ放送 iframe はリモコンキー入力専用で pointer-events: none のため、切局・パネル操作を含む
+    // プレイヤー側の操作ボタンは application canvas より前に置く。
+    &.watch-player--data-broadcasting .watch-player__button {
+        z-index: 2;
+    }
+
+    // TLV の調谐中は application canvas が先に生成されるため、通常の GR / BS / CS と同じ
+    // ローディング背景を一時的にその手前へ表示する。再生準備完了後は従来の背面へ戻る。
+    &.watch-player--loading.watch-player--data-broadcasting .watch-player__background-wrapper {
+        z-index: 2;
     }
 
     .watch-player__button {

@@ -7,7 +7,7 @@ import sys
 import threading
 import time
 from collections.abc import Coroutine
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, cast
 
 import anyio
 import psutil
@@ -208,14 +208,32 @@ async def BatchScanAPI():
     ## asyncio.create_task() で実行することで、API への HTTP コネクションが切断されてもタスクが継続される
     if batch_scan_task is None:
         batch_scan_task = asyncio.create_task(BatchScan())
-        # タスクの実行が完了するまで待機
-        await batch_scan_task
     else:
         logging.warning('[MaintenanceRouter][BatchScanAPI] Batch scan of recording folders is already running.')
         raise HTTPException(
             status_code = status.HTTP_429_TOO_MANY_REQUESTS,
             detail = 'Batch scan of recording folders is already running',
         )
+
+
+@router.post(
+    '/scan-file',
+    summary = '録画ファイル手動スキャン API',
+    status_code = status.HTTP_204_NO_CONTENT,
+)
+async def ManualScanFileAPI(
+    request: schemas.ManualScanRequest,
+    current_user: Annotated[User, Depends(GetCurrentAdminUser)],
+):
+    """
+    指定されたパスの録画ファイルを手動でスキャンし、メタデータを解析して DB に永続化する。<br>
+    force_update=True で既存レコードの強制更新を行う。<br>
+    JWT エンコードされたアクセストークンがリクエストの Authorization: Bearer に設定されていて、かつ管理者アカウントでないとアクセスできない。
+    """
+
+    # RecordedScanTask のインスタンスを取得し、指定されたファイルをスキャン
+    scan_task = RecordedScanTask()
+    await scan_task.scanSingleFile(request.path, force_update=True)
 
 
 @router.post(
@@ -244,6 +262,7 @@ async def BackgroundAnalysisAPI():
             'file_path',
             'file_hash',
             'duration',
+            'container_format',
             'cm_sections',
         )
 
@@ -261,12 +280,24 @@ async def BackgroundAnalysisAPI():
                 tasks: list[Coroutine[Any, Any, None]] = []
 
                 # CM 区間情報が未解析の場合、タスクに追加
-                ## cm_sections が [] の時は「解析はしたが CM 区間がなかった/検出に失敗した」ことを表している
-                ## CM 区間解析はかなり計算コストが高い処理のため、一度解析に失敗した録画ファイルは再解析しない
-                if video_row['cm_sections'] is None:
+                ## cm_sections が [] の時は「正常に解析したが CM 区間がなかった」ことを表す。
+                ## None は未解析または解析失敗なので、ランタイム導入・修復後に再実行できる。
+                container_format = cast(Literal['MPEG-TS', 'MPEG-4', 'MMT/TLV'], video_row['container_format'])
+                if (
+                    video_row['cm_sections'] is None and
+                    CMSectionsDetector.shouldAnalyze(
+                        container_format,
+                        Config().video.enable_mmt_tlv_cm_analysis,
+                    )
+                ):
+                    db_recorded_program = await RecordedProgram.all() \
+                        .select_related('recorded_video') \
+                        .get_or_none(id=video_row['recorded_program_id'])
                     tasks.append(CMSectionsDetector(
                         file_path = anyio.Path(video_row['file_path']),
                         duration_sec = video_row['duration'],
+                        container_format = container_format,
+                        service_id = db_recorded_program.service_id if db_recorded_program is not None else None,
                     ).detectAndSave())
 
                 # サムネイルが未生成の場合、タスクに追加
@@ -300,8 +331,6 @@ async def BackgroundAnalysisAPI():
     ## asyncio.create_task() で実行することで、API への HTTP コネクションが切断されてもタスクが継続される
     if background_analysis_task is None:
         background_analysis_task = asyncio.create_task(BackgroundAnalysis())
-        # タスクの実行が完了するまで待機
-        await background_analysis_task
     else:
         logging.warning('[MaintenanceRouter][BackgroundAnalysisAPI] Background analysis task is already running.')
         raise HTTPException(
@@ -379,3 +408,59 @@ def ServerShutdownAPI(
 
     # バックグラウンドでサーバー終了を開始
     threading.Thread(target=Shutdown).start()
+
+
+@router.post(
+    '/test-notification',
+    summary = '通知設定テスト API',
+    status_code = status.HTTP_204_NO_CONTENT,
+)
+async def TestNotificationAPI():
+    """
+    最新の録画ファイル1件でテスト通知を送信する。<br>
+    通知設定が正しく機能しているか確認するために使用。<br>
+    JWT エンコードされたアクセストークンがリクエストの Authorization: Bearer に設定されていて、かつ管理者アカウントでないとアクセスできない。
+    """
+
+    from app.utils.NotificationService import NotificationManager
+
+    # 最新の録画を取得
+    db_recorded_program = await RecordedProgram.all() \
+        .select_related('recorded_video') \
+        .select_related('channel') \
+        .order_by('-id').first()
+
+    if db_recorded_program is None:
+        raise HTTPException(
+            status_code = status.HTTP_404_NOT_FOUND,
+            detail = 'No recorded programs found for testing',
+        )
+
+    # 通知サービスが設定されているかチェック
+    config = Config()
+    if len(config.notifications.services) == 0:
+        raise HTTPException(
+            status_code = status.HTTP_400_BAD_REQUEST,
+            detail = 'No notification services are configured',
+        )
+
+    # 有効な通知サービスがあるかチェック
+    enabled_services = [svc for svc in config.notifications.services if svc.enabled]
+    if len(enabled_services) == 0:
+        raise HTTPException(
+            status_code = status.HTTP_400_BAD_REQUEST,
+            detail = 'No notification services are enabled',
+        )
+
+    # RecordedProgram モデルを schemas.RecordedProgram に変換
+    recorded_program = schemas.RecordedProgram.model_validate(db_recorded_program, from_attributes=True)
+
+    # テスト通知を送信
+    notification_manager = NotificationManager(config.notifications.services)
+    try:
+        await notification_manager.send_test(recorded_program)
+    except Exception as ex:
+        raise HTTPException(
+            status_code = status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail = f'Failed to send test notification: {ex!s}',
+        )
