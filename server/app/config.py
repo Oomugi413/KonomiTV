@@ -6,7 +6,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Annotated, Any, Literal, cast
+from typing import Annotated, Any, Literal, Self, cast
 
 import httpx
 import psutil
@@ -23,6 +23,7 @@ from pydantic import (
     ValidationInfo,
     confloat,
     field_validator,
+    model_validator,
 )
 from pydantic_core import Url
 
@@ -81,6 +82,7 @@ class ClientSettings(BaseModel):
     tv_channel_selection_requires_alt_key: bool = False
     use_28hour_clock: bool = False
     show_original_broadcast_time_during_playback: bool = False
+    video_playback_start_position: Literal['FileStart', 'ProgramStart'] = 'ProgramStart'
     panel_display_state: Literal['RestorePreviousState', 'AlwaysDisplay', 'AlwaysFold'] = 'RestorePreviousState'
     tv_panel_active_tab: Literal['Program', 'Channel', 'Comment', 'Twitter'] = 'Program'
     video_panel_active_tab: Literal['RecordedProgram', 'Series', 'Comment', 'Twitter'] = 'RecordedProgram'
@@ -139,14 +141,23 @@ class ClientSettings(BaseModel):
 # config.yaml のバリデーションは設定データをこの Pydantic モデルに通すことで行う
 
 class _ServerSettingsGeneral(BaseModel):
-    backend: Literal['EDCB', 'Mirakurun'] = 'EDCB'
+    backend: Literal['EDCB', 'Mirakurun', 'EPGStation'] = 'EDCB'
     always_receive_tv_from_mirakurun: bool = False
     edcb_url: Annotated[Url, UrlConstraints(allowed_schemes=['tcp'])] = Url('tcp://127.0.0.1:4510/')
     mirakurun_url: Annotated[Url, UrlConstraints(allowed_schemes=['http', 'https'])] = Url('http://127.0.0.1:40772/')
+    epgstation_url: Annotated[Url, UrlConstraints(allowed_schemes=['http', 'https'])] = Url('http://127.0.0.1:8888/')
     encoder: Literal['FFmpeg', 'QSVEncC', 'NVEncC', 'VCEEncC', 'rkmppenc'] = 'FFmpeg'
     program_update_interval: Annotated[float, confloat(ge=0.1)] = 5.0
     debug: bool = False
     debug_encoder: bool = False
+
+    @model_validator(mode='after')
+    def force_mirakurun_receive_for_epgstation(self) -> Self:
+        # EPGStation は放送波の直接受信 API を提供しないため、視聴・チャンネル・番組表更新は Mirakurun / mirakc に透過的に委譲する。
+        # その前提を設定値にも反映し、UI や後続処理から常に一貫した値として扱えるようにする。
+        if self.backend == 'EPGStation':
+            self.always_receive_tv_from_mirakurun = True
+        return self
 
     @field_validator('edcb_url')
     def validate_edcb_url(cls, edcb_url: Url, info: ValidationInfo) -> Url:
@@ -183,6 +194,18 @@ class _ServerSettingsGeneral(BaseModel):
             logging.info(f'Backend: EDCB ({edcb_url}) Status: {result}')
         return edcb_url
 
+    @field_validator('epgstation_url')
+    def validate_epgstation_url(cls, epgstation_url: Url, info: ValidationInfo) -> Url:
+        # URL を末尾のスラッシュありに統一
+        epgstation_url = Url(str(epgstation_url).rstrip('/') + '/')
+        # EPGStation は録画/予約状態を補完するバックエンドで、環境によっては常駐していないことがある。
+        # 起動時の疎通確認で KonomiTV 全体を落とさないよう、ここでは URL 形式の検証と正規化だけ行う。
+        if not (type(info.context) is dict and info.context.get('bypass_validation') is True):
+            if info.data.get('backend') == 'EPGStation':
+                from app import logging
+                logging.info(f'Backend: EPGStation ({epgstation_url})')
+        return epgstation_url
+
     @field_validator('mirakurun_url')
     def validate_mirakurun_url(cls, mirakurun_url: Url, info: ValidationInfo) -> Url:
         # URL を末尾のスラッシュありに統一
@@ -193,7 +216,7 @@ class _ServerSettingsGeneral(BaseModel):
         if type(info.context) is dict and info.context.get('bypass_validation') is True:
             return mirakurun_url
         # Mirakurun バックエンドの接続確認
-        if info.data.get('backend') == 'Mirakurun' or info.data.get('always_receive_tv_from_mirakurun') is True:
+        if info.data.get('backend') in ['Mirakurun', 'EPGStation'] or info.data.get('always_receive_tv_from_mirakurun') is True:
             # 試しにリクエストを送り、200 (OK) が返ってきたときだけ有効な URL とみなす
             try:
                 response = httpx.get(
@@ -231,7 +254,10 @@ class _ServerSettingsGeneral(BaseModel):
                     f'{mirakurun_or_mirakc} の URL を間違えている可能性があります。'
                 )
             from app import logging
-            logging.info(f'Backend: {mirakurun_or_mirakc} {version_info} ({mirakurun_url})')
+            if info.data.get('backend') == 'Mirakurun':
+                logging.info(f'Backend: {mirakurun_or_mirakc} {version_info} ({mirakurun_url})')
+            else:
+                logging.info(f'Receive source: {mirakurun_or_mirakc} {version_info} ({mirakurun_url})')
             if info.data.get('always_receive_tv_from_mirakurun') is True:
                 logging.info(f'Always receive TV from {mirakurun_or_mirakc}.')
         return mirakurun_url
@@ -350,9 +376,35 @@ class _ServerSettingsTV(BaseModel):
 class _ServerSettingsVideo(BaseModel):
     recorded_folders: list[DirectoryPath] = []
     exclude_scan_paths: list[str] = []
+    enable_mmt_tlv_cm_analysis: bool = False
+    # チャンネル選択設定
+    channel_selection_mode: Literal['auto', 'prefer_main', 'first_found', 'filename_based'] = 'auto'
+    enable_filename_based_channel_selection: bool = True
 
 class _ServerSettingsCapture(BaseModel):
     upload_folders: list[DirectoryPath] = []
+
+
+class WatchUrlConfig(BaseModel):
+    text: str
+    base_url: str
+    type: Literal['watch_url'] = 'watch_url'
+
+
+class _ServerSettingsNotificationService(BaseModel):
+    type: Literal['Telegram', 'Slack'] = 'Telegram'
+    enabled: bool = False
+    # Telegram設定
+    bot_token: str | None = None
+    chat_id: str | None = None
+    # Slack設定（将来用）
+    webhook_url: str | None = None
+    # 視聴URL設定
+    watch_urls: list[WatchUrlConfig] = []
+
+
+class _ServerSettingsNotifications(BaseModel):
+    services: list[_ServerSettingsNotificationService] = []
 
 class ServerSettings(BaseModel):
     general: _ServerSettingsGeneral = _ServerSettingsGeneral()
@@ -360,6 +412,7 @@ class ServerSettings(BaseModel):
     tv: _ServerSettingsTV = _ServerSettingsTV()
     video: _ServerSettingsVideo = _ServerSettingsVideo()
     capture: _ServerSettingsCapture = _ServerSettingsCapture()
+    notifications: _ServerSettingsNotifications = _ServerSettingsNotifications()
 
 
 # サーバー設定データと読み込み・保存用の関数
@@ -528,8 +581,8 @@ def SaveConfig(config: ServerSettings) -> None:
     yaml = ruamel.yaml.YAML()
     yaml.default_flow_style = None  # None を使うと、スカラー以外のものはブロックスタイルになる
     yaml.preserve_quotes = True
-    yaml.width = 20
-    yaml.indent(mapping=4, sequence=4, offset=4)
+    yaml.width = 4096  # 幅を大きくしてスカラー値の改行を防ぐ
+    yaml.indent(mapping=4, sequence=4, offset=2)
     try:
         with open(_CONFIG_YAML_PATH, encoding='utf-8') as file:
             config_raw = yaml.load(file)
@@ -555,7 +608,38 @@ def SaveConfig(config: ServerSettings) -> None:
                 if type(config_raw[key][sub_key]) is ruamel.yaml.CommentedSeq:
                     config_raw[key][sub_key].clear()
                     for item in config_dict[key][sub_key]:
-                        config_raw[key][sub_key].append(ruamel.yaml.scalarstring.SingleQuotedScalarString(item))
+                        # 文字列の場合は SingleQuotedScalarString に変換
+                        if type(item) is str:
+                            config_raw[key][sub_key].append(ruamel.yaml.scalarstring.SingleQuotedScalarString(item))
+                        # 辞書（オブジェクト）の場合は再帰的に処理
+                        elif type(item) is dict:
+                            processed_dict = ruamel.yaml.CommentedMap()
+                            for dict_key, dict_value in item.items():
+                                # ネストした辞書内の文字列も SingleQuotedScalarString に変換
+                                if type(dict_value) is str:
+                                    processed_dict[dict_key] = ruamel.yaml.scalarstring.SingleQuotedScalarString(dict_value)
+                                # ネストした辞書内のリストも処理
+                                elif type(dict_value) is list:
+                                    nested_list = ruamel.yaml.CommentedSeq()
+                                    for nested_item in dict_value:
+                                        if type(nested_item) is str:
+                                            nested_list.append(ruamel.yaml.scalarstring.SingleQuotedScalarString(nested_item))
+                                        elif type(nested_item) is dict:
+                                            nested_dict = ruamel.yaml.CommentedMap()
+                                            for nested_dict_key, nested_dict_value in nested_item.items():
+                                                if type(nested_dict_value) is str:
+                                                    nested_dict[nested_dict_key] = ruamel.yaml.scalarstring.SingleQuotedScalarString(nested_dict_value)
+                                                else:
+                                                    nested_dict[nested_dict_key] = nested_dict_value
+                                            nested_list.append(nested_dict)
+                                        else:
+                                            nested_list.append(nested_item)
+                                    processed_dict[dict_key] = nested_list
+                                else:
+                                    processed_dict[dict_key] = dict_value
+                            config_raw[key][sub_key].append(processed_dict)
+                        else:
+                            config_raw[key][sub_key].append(item)
                 else:
                     config_raw[key][sub_key] = ruamel.yaml.CommentedSeq(config_dict[key][sub_key])
             # 文字列は明示的に SingleQuotedScalarString に変換する

@@ -9,10 +9,10 @@
                     <Breadcrumbs :crumbs="[
                         { name: 'ホーム', path: '/' },
                         { name: 'ビデオをみる', path: '/videos/' },
-                        { name: '録画番組一覧', path: '/videos/programs', disabled: true },
+                        { name: '録画済み', path: '/videos/programs', disabled: true },
                     ]" />
                     <RecordedProgramList
-                        title="録画番組一覧"
+                        title="録画済み"
                         :programs="programs"
                         :total="total_programs"
                         :page="current_page"
@@ -56,9 +56,9 @@ const current_page = ref(1);
 // 並び順
 const sort_order = ref<'desc' | 'asc'>('desc');
 
-// 録画番組を取得
+// 録画済み番組を取得
 const fetchPrograms = async () => {
-    const result = await Videos.fetchVideos(sort_order.value, current_page.value);
+    const result = await Videos.fetchVideos(sort_order.value, current_page.value, null, 'Recorded');
     if (result) {
         programs.value = result.recorded_programs;
         total_programs.value = result.total;

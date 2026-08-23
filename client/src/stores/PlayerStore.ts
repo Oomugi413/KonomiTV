@@ -110,6 +110,13 @@ const usePlayerStore = defineStore('player', {
             }
         })(),
 
+        // データ放送アプリケーションが表示されているか
+        is_data_broadcasting_display: false,
+
+        // データ放送中の視聴パネルを表示するか
+        // 通常時の is_panel_display とは分離し、データ放送のために開いたパネルでユーザー設定を上書きしない
+        is_data_broadcasting_panel_display: true,
+
         // ライブ視聴: 表示されるパネルのタブ
         tv_panel_active_tab: useSettingsStore().settings.tv_panel_active_tab,
 
@@ -223,6 +230,7 @@ const usePlayerStore = defineStore('player', {
             this.is_virtual_keyboard_display = false;
             this.is_fullscreen = false;
             this.is_document_pip = false;
+            this.is_data_broadcasting_panel_display = true;
             this.is_control_display = true;
             this.is_panel_display = (() => {
                 const settings_store = useSettingsStore();
@@ -235,6 +243,7 @@ const usePlayerStore = defineStore('player', {
                         return settings_store.settings.showed_panel_last_time;
                 }
             })();
+            this.is_data_broadcasting_display = false;
             this.tv_panel_active_tab = useSettingsStore().settings.tv_panel_active_tab;
             this.video_panel_active_tab = useSettingsStore().settings.video_panel_active_tab;
             this.twitter_active_tab = useSettingsStore().settings.twitter_active_tab;

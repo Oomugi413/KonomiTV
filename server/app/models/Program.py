@@ -22,7 +22,11 @@ from app.config import Config, LoadConfig
 from app.constants import DATABASE_CONFIG, HTTPX_CLIENT, JST
 from app.models.Channel import Channel
 from app.schemas import Genre
-from app.utils import GetMirakurunAPIEndpointURL, ShutdownProcessPoolExecutor
+from app.utils import (
+    GetBackendForChannelAndProgram,
+    GetMirakurunAPIEndpointURL,
+    ShutdownProcessPoolExecutor,
+)
 from app.utils.edcb.CtrlCmdUtil import CtrlCmdUtil
 from app.utils.edcb.EDCBUtil import EDCBUtil
 from app.utils.TSInformation import TSInformation
@@ -84,12 +88,12 @@ class Program(TortoiseModel):
             executor = concurrent.futures.ProcessPoolExecutor(max_workers=1)
             should_wait_executor = True
             try:
-                # Mirakurun バックエンド
-                if Config().general.backend == 'Mirakurun':
+                # Mirakurun / EPGStation バックエンド
+                if GetBackendForChannelAndProgram() == 'Mirakurun':
                     await loop.run_in_executor(executor, cls.updateFromMirakurunForMultiProcess)
 
                 # EDCB バックエンド
-                elif Config().general.backend == 'EDCB':
+                elif GetBackendForChannelAndProgram() == 'EDCB':
                     await loop.run_in_executor(executor, cls.updateFromEDCBForMultiProcess)
 
             # タスクキャンセル時は子プロセスの終了を待たず、イベントループを即座に呼び出し元へ返す
@@ -117,12 +121,12 @@ class Program(TortoiseModel):
         # 番組情報をシングルプロセスで更新する
         else:
             try:
-                # Mirakurun バックエンド
-                if Config().general.backend == 'Mirakurun':
+                # Mirakurun / EPGStation バックエンド
+                if GetBackendForChannelAndProgram() == 'Mirakurun':
                     await cls.updateFromMirakurun()
 
                 # EDCB バックエンド
-                elif Config().general.backend == 'EDCB':
+                elif GetBackendForChannelAndProgram() == 'EDCB':
                     await cls.updateFromEDCB()
             except Exception as ex:
                 logging.error('Failed to update programs:', exc_info=ex)

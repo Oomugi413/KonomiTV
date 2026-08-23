@@ -23,12 +23,12 @@
             <div class="settings__item">
                 <div class="settings__item-heading">利用するバックエンド</div>
                 <div class="settings__item-label">
-                    EDCB・Mirakurun のいずれかを選択してください。<br>
-                    バックエンドに Mirakurun が選択されているときは、録画予約機能は利用できません。<br>
+                    EDCB・Mirakurun・EPGStation のいずれかを選択してください。<br>
+                    バックエンドに Mirakurun または EPGStation が選択されているときは、EDCB 専用の録画予約機能は利用できません。<br>
                 </div>
                 <v-select class="settings__item-form" color="primary" variant="outlined" hide-details
                     :density="is_form_dense ? 'compact' : 'default'"
-                    :items="['EDCB', 'Mirakurun']" v-model="server_settings.general.backend">
+                    :items="['EDCB', 'Mirakurun', 'EPGStation']" v-model="server_settings.general.backend">
                 </v-select>
             </div>
             <div class="settings__item">
@@ -58,6 +58,16 @@
                 <v-text-field class="settings__item-form" color="primary" variant="outlined" hide-details
                     :density="is_form_dense ? 'compact' : 'default'"
                     v-model="server_settings.general.mirakurun_url">
+                </v-text-field>
+            </div>
+            <div class="settings__item">
+                <div class="settings__item-heading">EPGStation の HTTP API の URL</div>
+                <div class="settings__item-label">
+                    バックエンドに EPGStation が選択されているとき、録画中判定などに利用されます。<br>
+                </div>
+                <v-text-field class="settings__item-form" color="primary" variant="outlined" hide-details
+                    :density="is_form_dense ? 'compact' : 'default'"
+                    v-model="server_settings.general.epgstation_url">
                 </v-text-field>
             </div>
             <div class="settings__item">
@@ -152,13 +162,15 @@
                 <label class="settings__item-heading" for="always_receive_tv_from_mirakurun">常に Mirakurun / mirakc から放送波を受信する</label>
                 <label class="settings__item-label" for="always_receive_tv_from_mirakurun">
                     利用するバックエンドが EDCB のとき、常に Mirakurun / mirakc から放送波を受信するかを設定します。
-                    バックエンドに Mirakurun が選択されているときは効果がありません。<br>
+                    バックエンドに Mirakurun が選択されているときは効果がありません。
+                    バックエンドに EPGStation が選択されているときは常に有効になります。<br>
                 </label>
                 <label class="settings__item-label mt-1" for="always_receive_tv_from_mirakurun">
                     KonomiTV から EDCB と Mirakurun / mirakc 両方にアクセスできる必要があります。<br>
                     EDCB はチューナー起動やチャンネル切り替えに時間がかかるため、Mirakurun / mirakc が利用できる環境であれば、この設定を有効にするとより快適に使えます。<br>
                 </label>
                 <v-switch class="settings__item-switch" color="primary" id="always_receive_tv_from_mirakurun" hide-details
+                    :disabled="server_settings.general.backend === 'EPGStation'"
                     v-model="server_settings.general.always_receive_tv_from_mirakurun">
                 </v-switch>
             </div>
@@ -293,6 +305,143 @@
                     <span class="ml-1">保存先フォルダを追加</span>
                 </v-btn>
             </div>
+            <div class="settings__content-heading mt-6">
+                <Icon icon="fluent:alert-16-filled" width="22px" />
+                <span class="ml-2">通知</span>
+            </div>
+            <div class="settings__item-label">
+                新しい録画ファイルが検出された時に外部サービスへ通知を送信します。<br>
+                複数の通知サービスを同時に有効にできます。<br>
+            </div>
+            <div v-for="(service, index) in server_settings.notifications.services" :key="'notification-service-' + index">
+                <div class="settings__item mt-4" style="border: 1px solid rgb(var(--v-theme-background-lighten-2)); border-radius: 8px; padding: 24px;">
+                    <div class="d-flex align-center mb-4">
+                        <div class="settings__item-heading" style="margin: 0; flex: 1;">通知サービス #{{ index + 1 }}</div>
+                        <button v-ripple class="settings__item-delete-button"
+                            @click="server_settings.notifications.services.splice(index, 1)">
+                            <svg class="iconify iconify--fluent" width="20px" height="20px" viewBox="0 0 16 16">
+                                <path fill="currentColor" d="M7 3h2a1 1 0 0 0-2 0ZM6 3a2 2 0 1 1 4 0h4a.5.5 0 0 1 0 1h-.564l-1.205 8.838A2.5 2.5 0 0 1 9.754 15H6.246a2.5 2.5 0 0 1-2.477-2.162L2.564 4H2a.5.5 0 0 1 0-1h4Zm1 3.5a.5.5 0 0 0-1 0v5a.5.5 0 0 0 1 0v-5ZM9.5 6a.5.5 0 0 0-.5.5v5a.5.5 0 0 0 1 0v-5a.5.5 0 0 0-.5-.5Z"></path>
+                            </svg>
+                        </button>
+                    </div>
+
+                    <div class="settings__item settings__item--switch mb-3">
+                        <label class="settings__item-heading" :for="'notification-enabled-' + index">この通知サービスを有効にする</label>
+                        <v-switch class="settings__item-switch" color="primary" hide-details
+                            :density="is_form_dense ? 'compact' : 'default'"
+                            :id="'notification-enabled-' + index"
+                            v-model="service.enabled">
+                        </v-switch>
+                    </div>
+
+                    <div class="settings__item mb-3">
+                        <div class="settings__item-heading">通知サービスの種類</div>
+                        <v-select class="settings__item-form" color="primary" variant="outlined" hide-details
+                            :density="is_form_dense ? 'compact' : 'default'"
+                            :items="[
+                                {title: 'Telegram', value: 'Telegram'},
+                                {title: 'Slack（将来実装予定）', value: 'Slack', disabled: true}
+                            ]"
+                            v-model="service.type">
+                        </v-select>
+                    </div>
+
+                    <template v-if="service.type === 'Telegram'">
+                        <div class="settings__item mb-3">
+                            <div class="settings__item-heading">Bot Token</div>
+                            <div class="settings__item-label">
+                                Telegram の BotFather から取得した Bot Token を入力してください。<br>
+                            </div>
+                            <v-text-field class="settings__item-form" color="primary" variant="outlined" hide-details
+                                placeholder="例: 123456789:ABCDEFghijklmnopQRSTUVwxyz"
+                                :density="is_form_dense ? 'compact' : 'default'"
+                                v-model="service.bot_token">
+                            </v-text-field>
+                        </div>
+                        <div class="settings__item">
+                            <div class="settings__item-heading">Chat ID</div>
+                            <div class="settings__item-label">
+                                通知を送信する先の Chat ID を入力してください。<br>
+                                個人チャットの場合は数字、グループチャットの場合は負の数字になります。<br>
+                            </div>
+                            <v-text-field class="settings__item-form" color="primary" variant="outlined" hide-details
+                                placeholder="例: 123456789 または -987654321"
+                                :density="is_form_dense ? 'compact' : 'default'"
+                                v-model="service.chat_id">
+                            </v-text-field>
+                        </div>
+                        <div class="settings__item">
+                            <div class="settings__item-heading">視聴ボタンの設定</div>
+                            <div class="settings__item-label">
+                                通知メッセージに表示される視聴ボタンを設定できます。<br>
+                                複数のボタンを設定可能です。未設定の場合、視聴ボタンは表示されません。<br>
+                            </div>
+                            <div v-if="!service.watch_urls">
+                                <v-btn class="mt-3" color="background-lighten-2" variant="flat" height="40px"
+                                    @click="service.watch_urls = []">
+                                    <Icon icon="fluent:add-12-filled" height="17px" />
+                                    <span class="ml-1">視聴ボタンを追加</span>
+                                </v-btn>
+                            </div>
+                            <div v-else>
+                                <div v-for="(watch_url, watch_url_index) in service.watch_urls" :key="'watch-url-' + watch_url_index">
+                                    <div class="d-flex align-center mt-3" style="gap: 12px;">
+                                        <v-text-field class="flex-grow-1" color="primary" variant="outlined" hide-details
+                                            label="ボタンテキスト"
+                                            placeholder="例: 🏠 ローカルで視聴"
+                                            :density="is_form_dense ? 'compact' : 'default'"
+                                            v-model="watch_url.text">
+                                        </v-text-field>
+                                        <v-text-field class="flex-grow-1" color="primary" variant="outlined" hide-details
+                                            label="ベースURL"
+                                            placeholder="例: https://internal.example.com"
+                                            :density="is_form_dense ? 'compact' : 'default'"
+                                            v-model="watch_url.base_url">
+                                        </v-text-field>
+                                        <button v-ripple class="settings__item-delete-button"
+                                            @click="service.watch_urls.splice(watch_url_index, 1)">
+                                            <svg class="iconify iconify--fluent" width="20px" height="20px" viewBox="0 0 16 16">
+                                                <path fill="currentColor" d="M7 3h2a1 1 0 0 0-2 0ZM6 3a2 2 0 1 1 4 0h4a.5.5 0 0 1 0 1h-.564l-1.205 8.838A2.5 2.5 0 0 1 9.754 15H6.246a2.5 2.5 0 0 1-2.477-2.162L2.564 4H2a.5.5 0 0 1 0-1h4Zm1 3.5a.5.5 0 0 0-1 0v5a.5.5 0 0 0 1 0v-5ZM9.5 6a.5.5 0 0 0-.5.5v5a.5.5 0 0 0 1 0v-5a.5.5 0 0 0-.5-.5Z"></path>
+                                            </svg>
+                                        </button>
+                                    </div>
+                                </div>
+                                <v-btn class="mt-3" color="background-lighten-2" variant="flat" height="40px"
+                                    @click="service.watch_urls.push({text: '', base_url: '', type: 'watch_url'})">
+                                    <Icon icon="fluent:add-12-filled" height="17px" />
+                                    <span class="ml-1">視聴ボタンを追加</span>
+                                </v-btn>
+                            </div>
+                        </div>
+                    </template>
+
+                    <template v-if="service.type === 'Slack'">
+                        <div class="settings__item">
+                            <div class="settings__item-heading">Webhook URL</div>
+                            <div class="settings__item-label">
+                                Slack の Incoming Webhook URL を入力してください。<br>
+                            </div>
+                            <v-text-field class="settings__item-form" color="primary" variant="outlined" hide-details
+                                placeholder="例: https://hooks.slack.com/services/..."
+                                :density="is_form_dense ? 'compact' : 'default'"
+                                v-model="service.webhook_url">
+                            </v-text-field>
+                        </div>
+                    </template>
+                </div>
+            </div>
+            <div class="d-flex align-center mt-3">
+                <v-btn color="background-lighten-2" variant="flat" height="40px"
+                    @click="addNotificationService()">
+                    <Icon icon="fluent:add-12-filled" height="17px" />
+                    <span class="ml-1">通知サービスを追加</span>
+                </v-btn>
+                <v-btn class="ml-3" color="background-lighten-2" variant="flat" height="40px"
+                    @click="testNotification()" :disabled="!hasEnabledNotificationServices">
+                    <Icon icon="fluent:speaker-2-16-filled" height="17px" />
+                    <span class="ml-1">テスト通知を送信</span>
+                </v-btn>
+            </div>
             <v-btn class="settings__save-button bg-secondary mt-6" variant="flat" @click="updateServerSettings()">
                 <Icon icon="fluent:save-16-filled" class="mr-2" height="23px" />サーバー設定を更新
             </v-btn>
@@ -413,7 +562,7 @@
 </template>
 <script lang="ts" setup>
 
-import { ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 
 import AccountManageSettings from '@/components/Settings/AccountManageSettings.vue';
 import ServerLogDialog from '@/components/Settings/ServerLogDialog.vue';
@@ -503,8 +652,19 @@ Settings.fetchServerSettings().then((settings) => {
     }
 });
 
+watch(() => server_settings.value.general.backend, (backend) => {
+    if (backend === 'EPGStation') {
+        server_settings.value.general.always_receive_tv_from_mirakurun = true;
+    }
+});
+
 // サーバー設定を更新する関数
 async function updateServerSettings() {
+
+    // EPGStation バックエンドでは放送波受信を必ず Mirakurun / mirakc に委譲する
+    if (server_settings.value.general.backend === 'EPGStation') {
+        server_settings.value.general.always_receive_tv_from_mirakurun = true;
+    }
 
     // custom_https_certificate と custom_https_private_key が空文字列の場合は null に変換
     if (server_settings.value.server.custom_https_certificate === '') {
@@ -589,5 +749,35 @@ async function shutdownServer() {
     }
 }
 
-</script>
+// 通知サービスを追加する関数
+function addNotificationService() {
+    server_settings.value.notifications.services.push({
+        type: 'Telegram',
+        enabled: false,
+        bot_token: '',
+        chat_id: '',
+        webhook_url: '',
+        watch_urls: []
+    });
+}
 
+// 有効な通知サービスが存在するかを計算
+const hasEnabledNotificationServices = computed(() => {
+    return server_settings.value.notifications.services.some(service => service.enabled);
+});
+
+// テスト通知を送信する関数
+async function testNotification() {
+    if (!hasEnabledNotificationServices.value) {
+        Message.error('有効な通知サービスが設定されていません。');
+        return;
+    }
+
+    Message.show('テスト通知を送信しています...');
+    const result = await Maintenance.testNotification();
+    if (result === true) {
+        Message.success('テスト通知を送信しました。');
+    }
+}
+
+</script>

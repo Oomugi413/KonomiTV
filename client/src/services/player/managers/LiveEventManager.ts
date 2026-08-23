@@ -51,6 +51,15 @@ class LiveEventManager implements PlayerManager {
 
 
     /**
+     * LiveEventManager が破棄済みかどうかを返す
+     * @returns 破棄済みなら true
+     */
+    private isDestroyed(): boolean {
+        return this.destroyed;
+    }
+
+
+    /**
      * サーバー側のライブストリームステータス API (Server-Sent Events) に接続し、ライブストリームのステータス監視を開始する
      */
     public async init(): Promise<void> {
@@ -176,6 +185,11 @@ class LiveEventManager implements PlayerManager {
                     if (this.destroyed === false) {
                         await Utils.sleep(1);
                     }
+                    // 待機中にプレイヤーが破棄された場合、古い LiveEventManager から現在の PlayerStore を更新してはならない
+                    // チャンネル切り替えやプレイヤー再起動後に、旧インスタンスが新しいプレイヤーへ不要な再起動を要求してしまうため
+                    if (this.isDestroyed() === true) {
+                        return;
+                    }
 
                     // 本来誰も視聴していないことを示す Idling ステータスを受信している場合、何らかの理由で
                     // ライブストリーミング API への接続が切断された可能性が高いので、PlayerController にプレイヤーの再起動を要求する
@@ -294,6 +308,12 @@ class LiveEventManager implements PlayerManager {
 
             // 3秒待機
             await Utils.sleep(3);
+
+            // 待機中にプレイヤーが破棄された場合、古い LiveEventManager から現在の PlayerStore を更新してはならない
+            // 多重 reload 時に旧インスタンスの遅延処理が残ると、再生開始済みの新しいプレイヤー上に Progress Circular だけが残り続ける
+            if (this.isDestroyed() === true) {
+                return;
+            }
 
             // まだ接続できていなかった場合
             if (is_eventsource_opened === false) {

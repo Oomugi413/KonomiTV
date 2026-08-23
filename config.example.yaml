@@ -103,6 +103,10 @@ video:
     # 例えば、'E:\TV-Record\Temp' を指定すると、そのサブフォルダ以下の録画ファイルはスキャン対象から除外されます。
     exclude_scan_paths: []
 
+    # BS4K / BS8K の MMT/TLV 録画でも CM 解析を行うか
+    # MMT/TLV の CM 解析は非常に大きな CPU・GPU・ストレージ負荷が掛かるため、デフォルトでは無効です。
+    enable_mmt_tlv_cm_analysis: false
+
 # =============================== キャプチャの設定 ===============================
 capture:
 
@@ -113,4 +117,35 @@ capture:
     # Docker でインストールした場合も、ホストマシン側のフォルダの絶対パスを指定してください。
     upload_folders: [
         'E:\TV-Capture',
+    ]
+
+# =============================== 通知設定 ===============================
+notifications:
+    # 通知サービスのリスト（複数設定可能）
+    services: [
+        # Telegram 通知の例
+        # {
+        #     'type': 'Telegram',
+        #     'enabled': false,
+        #     'bot_token': '',  # BotFatherから取得したトークン
+        #     'chat_id': '',    # 通知先のチャットID
+        #     'watch_urls': [   # 視聴ボタンの設定（オプション）
+        #         {
+        #             'text': '🏠 ローカルで視聴',
+        #             'base_url': 'https://internal.example.com',
+        #             'type': 'watch_url'
+        #         },
+        #         {
+        #             'text': '🌐 外部から視聴',
+        #             'base_url': 'https://external.example.com',
+        #             'type': 'watch_url'
+        #         }
+        #     ]
+        # },
+        # Slack 通知の例（将来実装予定）
+        # {
+        #     'type': 'Slack',
+        #     'enabled': false,
+        #     'webhook_url': '',  # Slack Webhook URL
+        # },
     ]

@@ -1,4 +1,5 @@
 
+import { readFileSync } from 'node:fs';
 import { fileURLToPath, URL } from 'node:url';
 
 import vue from '@vitejs/plugin-vue';
@@ -6,6 +7,34 @@ import { defineConfig } from 'vite';
 import { comlink } from 'vite-plugin-comlink';
 import { VitePWA } from 'vite-plugin-pwa';
 import vuetify, { transformAssetUrls } from 'vite-plugin-vuetify';
+
+import { patchARIBVFSWorkerSource } from './vite.arib-vfs-worker.mts';
+
+const aribVfsWorkerPath = fileURLToPath(new URL('./node_modules/libaribhtml5/dist/sdk/arib-vfs-sw.js', import.meta.url));
+const readableStreamBrowserPath = fileURLToPath(new URL(
+    './node_modules/@tsukumijima/aribts/node_modules/readable-stream/lib/ours/browser.js',
+    import.meta.url,
+));
+
+const loadARIBVFSWorkerSource = () => patchARIBVFSWorkerSource(readFileSync(aribVfsWorkerPath, 'utf-8'));
+
+const aribVfsWorkerPlugin = {
+    name: 'konomitv-arib-vfs-worker',
+    configureServer(server: {middlewares: {use: (path: string, handler: (request: unknown, response: any) => void) => void}}) {
+        server.middlewares.use('/data-broadcast/arib-vfs-sw.js', (_request, response) => {
+            response.statusCode = 200;
+            response.setHeader('Content-Type', 'text/javascript; charset=utf-8');
+            response.end(loadARIBVFSWorkerSource());
+        });
+    },
+    generateBundle(this: {emitFile: (asset: {type: 'asset'; fileName: string; source: string | Uint8Array}) => void}) {
+        this.emitFile({
+            type: 'asset',
+            fileName: 'data-broadcast/arib-vfs-sw.js',
+            source: loadARIBVFSWorkerSource(),
+        });
+    },
+};
 
 
 // Vite の設定
@@ -33,7 +62,12 @@ export default defineConfig({
         },
     },
     resolve: {
-        alias: {'@': fileURLToPath(new URL('./src', import.meta.url))},
+        alias: {
+            '@': fileURLToPath(new URL('./src', import.meta.url)),
+            // @tsukumijima/aribts の readable-stream@4 が Node の stream を参照しないよう、
+            // パッケージに同梱されたブラウザ実装へ固定する。
+            stream: readableStreamBrowserPath,
+        },
         extensions: ['.js', '.json', '.jsx', '.mjs', '.ts', '.tsx', '.vue'],
     },
     // SASS / SCSS の設定
@@ -52,6 +86,13 @@ export default defineConfig({
         port: 7011,
         strictPort: true,
         allowedHosts: true,
+        proxy: {
+            // データ放送 iframe は CSP で同一 origin に閉じ込め、既存 API 反代だけを経由させる。
+            '/api': {
+                target: process.env.VITE_KONOMITV_API_BASE_URL?.replace(/\/api\/?$/, '') ?? 'http://127.0.0.1:7000',
+                changeOrigin: true,
+            },
+        },
     },
     preview: {
         host: '0.0.0.0',
@@ -61,6 +102,7 @@ export default defineConfig({
     },
     // プラグインの設定
     plugins: [
+        aribVfsWorkerPlugin,
         comlink(),
         vue({
             template: {
@@ -82,6 +124,7 @@ export default defineConfig({
             filename: 'sw.ts',
             registerType: 'prompt',  // PWA の更新前にユーザーに確認する
             injectRegister: 'auto',
+            useCredentials: true,
             // PWA のキャッシュに含めるファイル
             includeAssets: [
                 'assets/**',

@@ -10,10 +10,12 @@
         "build": "vue-tsc --noEmit && vite build",
         "preview": "concurrently --raw \"npm:akebi\" \"vite preview\"",
         "lint": "eslint . --fix --ignore-path .gitignore",
+        "logo": "node logoGenerator.js",
+        "test": "vitest run",
         "typecheck": "vue-tsc --noEmit"
     },
     "engines": {
-        "node": "^20.16.0"
+        "node": ">=20.16.0"
     },
     "dependencies": {
         "@github/mini-throttle": "^2.1.1",
@@ -25,10 +27,11 @@
         "comlink": "^4.4.1",
         "copy-image-clipboard": "^2.1.2",
         "dayjs": "^1.11.13",
-        "dplayer": "github:tsukumijima/DPlayer#v1.32.9",
+        "dplayer": "github:makeding/DPlayer#5e12d68373ffb0a6677f4f86b6e524079598aeab",
         "floating-vue": "^5.2.2",
         "hls.js": "^1.6.9",
         "idb": "^8.0.3",
+        "libaribhtml5": "^0.1.7",
         "mitt": "^3.0.1",
         "mpegts.js": "github:tsukumijima/mpegts.js#c69a71c809b6e0a53f7101455333f8b3d98460d0",
         "nanoid": "^5.1.16",
@@ -37,6 +40,8 @@
         "pinia": "^2.2.2",
         "pwa-install-handler": "^2.6.0",
         "seamless-scroll-polyfill": "^2.3.4",
+        "sharp": "^0.35.2",
+        "spritesmith": "^3.5.1",
         "swiper": "^12.1.2",
         "tslib": "^2.7.0",
         "virtua": "^0.39.3",
@@ -60,12 +65,14 @@
         "@typescript-eslint/parser": "^7.18.0",
         "@vitejs/plugin-vue": "^5.1.2",
         "@vue/eslint-config-typescript": "^12.0.0",
+        "@vue/test-utils": "^2.4.6",
         "concurrently": "^8.2.2",
         "eslint": "^8.57.0",
         "eslint-plugin-import": "^2.29.1",
         "eslint-plugin-unused-imports": "^3.2.0",
         "eslint-plugin-vue": "^9.27.0",
         "eslint-plugin-vuetify": "^2.4.0",
+        "happy-dom": "^15.11.7",
         "network-information-types": "^0.1.1",
         "run-script-os": "^1.1.6",
         "sass": "1.77.6",
@@ -74,6 +81,7 @@
         "vite-plugin-comlink": "^5.0.1",
         "vite-plugin-pwa": "^0.21.2",
         "vite-plugin-vuetify": "^2.0.4",
+        "vitest": "^2.1.9",
         "vue-tsc": "^2.0.29"
     },
     "browserslist": [

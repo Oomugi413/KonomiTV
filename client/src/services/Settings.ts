@@ -50,6 +50,7 @@ export interface IClientSettings {
     tv_channel_selection_requires_alt_key: boolean;
     use_28hour_clock: boolean;
     show_original_broadcast_time_during_playback: boolean;
+    video_playback_start_position: 'FileStart' | 'ProgramStart';
     panel_display_state: 'RestorePreviousState' | 'AlwaysDisplay' | 'AlwaysFold';
     tv_panel_active_tab: 'Program' | 'Channel' | 'Comment' | 'Twitter';
     video_panel_active_tab: 'RecordedProgram' | 'Series' | 'Comment' | 'Twitter';
@@ -110,10 +111,11 @@ export interface IClientSettings {
  */
 export interface IServerSettings {
     general: {
-        backend: 'EDCB' | 'Mirakurun';
+        backend: 'EDCB' | 'Mirakurun' | 'EPGStation';
         always_receive_tv_from_mirakurun: boolean;
         edcb_url: string;
         mirakurun_url: string;
+        epgstation_url: string;
         encoder: 'FFmpeg' | 'QSVEncC' | 'NVEncC' | 'VCEEncC' | 'rkmppenc';
         program_update_interval: number;
         debug: boolean;
@@ -136,6 +138,20 @@ export interface IServerSettings {
     capture: {
         upload_folders: string[];
     };
+    notifications: {
+        services: Array<{
+            type: 'Telegram' | 'Slack';
+            enabled: boolean;
+            bot_token?: string;
+            chat_id?: string;
+            webhook_url?: string;
+            watch_urls?: Array<{
+                text: string;
+                base_url: string;
+                type: 'watch_url';
+            }>;
+        }>;
+    };
 }
 
 /* サーバー設定を表すインターフェースのデフォルト値 */
@@ -145,6 +161,7 @@ export const IServerSettingsDefault: IServerSettings = {
         always_receive_tv_from_mirakurun: false,
         edcb_url: 'tcp://127.0.0.1:4510/',
         mirakurun_url: 'http://127.0.0.1:40772/',
+        epgstation_url: 'http://127.0.0.1:8888/',
         encoder: 'FFmpeg',
         program_update_interval: 5.0,
         debug: false,
@@ -166,6 +183,9 @@ export const IServerSettingsDefault: IServerSettings = {
     },
     capture: {
         upload_folders: [],
+    },
+    notifications: {
+        services: [],
     },
 };
 

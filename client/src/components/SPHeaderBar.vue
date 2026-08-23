@@ -7,10 +7,13 @@
             <v-spacer></v-spacer>
             <!-- 番組表コントロール用スロット -->
             <slot name="timetable-controls"></slot>
-            <!-- スマホ縦画面では Navigation が非表示のため、ヘッダー側にバッジを残す -->
-            <OfflineDownloadBadge class="mr-4" />
-            <div v-if="showSearchButton" v-ripple class="search-button" @click="activateSearch">
-                <Icon icon="fluent:search-20-filled" height="24px" />
+            <div class="header-actions">
+                <!-- スマホ縦画面では Navigation が非表示のため、ヘッダー側にバッジを残す -->
+                <OfflineDownloadBadge />
+                <RemoteDeviceActivator class="header-actions__cast" />
+                <div v-if="showSearchButton" v-ripple class="search-button" @click="activateSearch">
+                    <Icon icon="fluent:search-20-filled" height="24px" />
+                </div>
             </div>
         </template>
         <template v-else>
@@ -33,6 +36,7 @@ import { ref, computed, onMounted, watch } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 
 import OfflineDownloadBadge from '@/components/OfflineDownloadBadge.vue';
+import RemoteDeviceActivator from '@/components/RemoteDeviceActivator.vue';
 
 // Props の定義
 const props = withDefaults(defineProps<{
@@ -83,6 +87,9 @@ const showSearchButton = computed(() => {
 
 // 検索プレースホルダー
 const searchPlaceholder = computed(() => {
+    if (route.path.startsWith('/series')) {
+        return 'シリーズを検索...';
+    }
     return isVideoSection(route.path)
         ? '録画番組やシリーズを検索...'
         : '放送予定の番組を検索...';
@@ -98,6 +105,9 @@ const isVideoSection = (path: string) => {
 
 // 検索パスを取得
 const getSearchPath = () => {
+    if (route.path.startsWith('/series')) {
+        return '/series/';
+    }
     return isVideoSection(route.path)
         ? '/videos/search'
         : '/tv/search';
@@ -239,19 +249,47 @@ watch(() => props.searchQuery, (searchQueryValue) => {
         }
     }
 
+    .header-actions {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+
+        > :deep(*) {
+            flex: 0 0 36px;
+        }
+
+        &__cast :deep(.v-btn) {
+            width: 36px;
+            height: 36px;
+        }
+
+        @include smartphone-horizontal {
+            gap: 2px;
+
+            > :deep(*) {
+                flex-basis: 28px;
+            }
+
+            &__cast :deep(.v-btn) {
+                width: 28px;
+                height: 28px;
+            }
+        }
+    }
+
     .search-button {
         display: flex;
         align-items: center;
         justify-content: center;
         position: relative;
-        margin-right: -2px;
-        padding: 2px;
+        width: 36px;
+        height: 36px;
         border-radius: 8px;
         cursor: pointer;
 
         @include smartphone-horizontal {
-            width: 24px;
-            height: 24px;
+            width: 28px;
+            height: 28px;
         }
     }
 

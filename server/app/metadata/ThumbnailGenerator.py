@@ -36,7 +36,7 @@ class ThumbnailGenerator:
     BASE_INTERVAL_SEC: ClassVar[float] = 5.0  # 基準となる間隔 (5秒)
     MAX_INTERVAL_SEC: ClassVar[float] = 30.0  # 最大間隔 (30秒)
     SCORING_SCALE: ClassVar[tuple[int, int]] = (480, 270)  # スコアリング・代表サムネイル選定時の解像度 (顔検出精度のため維持)
-    TILE_SCALE: ClassVar[tuple[int, int]] = (320, 180)  # タイル化時の1フレーム解像度 (width, height)
+    TILE_SCALE: ClassVar[tuple[int, int]] = (480, 270)  # タイル化時の1フレーム解像度 (width, height)
     LEGACY_TILE_SCALE: ClassVar[tuple[int, int]] = (480, 270)  # 旧タイルの1フレーム解像度 (width, height)
     LEGACY_TILE_COLS: ClassVar[int] = 34  # 旧タイルの列数
 
@@ -45,7 +45,16 @@ class ThumbnailGenerator:
     WEBP_QUALITY_TILE: ClassVar[int] = 71  # シークバーサムネイルタイルの WebP 品質 (0-100)
     WEBP_COMPRESSION: ClassVar[int] = 6  # WebP 圧縮レベル (0-6)
     WEBP_MAX_SIZE: ClassVar[int] = 16383  # WebP の最大サイズ制限 (px)
+
+    # MMT/TLV の HDR-to-SDR サムネイル変換設定
+    ## BS4K と BS の同時放送素材を比較し、SDR 素材由来の HLG で中間調を持ち上げすぎない値に調整している。
+    MMTS_HDR_NOMINAL_PEAK_LUMINANCE: ClassVar[int] = 200
+    MMTS_HDR_TONEMAP_MOBIUS_PARAM: ClassVar[float] = 0.9
+
+    # 外部プロセスのタイムアウト設定
     FFMPEG_TIMEOUT: ClassVar[int] = 300  # FFmpeg サブプロセスのタイムアウト時間 (秒)
+    MMTS_COLOR_TRANSFER_PROBE_TIMEOUT: ClassVar[int] = 60  # MMT/TLV の映像伝達特性を先頭 I フレームから取得するタイムアウト時間 (秒)
+    MMTS_FRAME_EXTRACTION_TIMEOUT: ClassVar[int] = 900  # MMT/TLV を FFmpeg で先頭から走査するフレーム抽出のタイムアウト時間 (秒)
     TSREADEX_FRAME_EXTRACTION_TIMEOUT: ClassVar[int] = 600  # tsreadex 経由のフレーム抽出タイムアウト時間 (秒)
     FRAME_EXTRACTION_MAX_DEMUX_PACKETS: ClassVar[int] = 20000  # 1候補位置でフレーム探索する最大パケット数
     FRAME_EXTRACTION_MAX_CONSECUTIVE_FAILURES: ClassVar[int] = 10  # 連続失敗時に残り候補を黒画像で埋める閾値
@@ -146,7 +155,7 @@ class ThumbnailGenerator:
     def __init__(
         self,
         file_path: anyio.Path,
-        container_format: Literal['MPEG-TS', 'MPEG-4'],
+        container_format: Literal['MPEG-TS', 'MPEG-4', 'MMT/TLV'],
         file_hash: str,
         duration_sec: float,
         candidate_time_ranges: list[tuple[float, float]],
@@ -159,7 +168,7 @@ class ThumbnailGenerator:
 
         Args:
             file_path (anyio.Path): 動画ファイルのパス
-            container_format (Literal['MPEG-TS', 'MPEG-4']): 動画ファイルのコンテナ形式
+            container_format (Literal['MPEG-TS', 'MPEG-4', 'MMT/TLV']): 動画ファイルのコンテナ形式
             file_hash (str): 動画ファイルのハッシュ値（ファイル名の一意性を保証するため）
             duration_sec (float): 動画の再生時間(秒)
             candidate_time_ranges (list[tuple[float, float]]): 代表サムネ候補とする区間 [(start, end), ...]
@@ -550,9 +559,12 @@ class ThumbnailGenerator:
             LoadConfig(bypass_validation=True)
 
         # 1. フレーム抽出を実行し、候補区間内のフレームをスコアリングして最良フレームを特定する
+        ## PyAV が同梱する FFmpeg には MMT/TLV demuxer がないため、MMT/TLV のみパッチ済み同梱 FFmpeg を使う。
         ## 映像 PID や映像ストリーム構成が途中で変わる TS は PyAV のストリーム固定シークと相性が悪いため、
         ## 該当録画だけ tsreadex で映像 PID を固定化した TS を順次デコードする
-        if self.has_video_stream_changes is True and self.container_format == 'MPEG-TS':
+        if self.container_format == 'MMT/TLV':
+            result = self.__extractAndScoreFramesWithFFmpeg(candidate_offsets)
+        elif self.has_video_stream_changes is True and self.container_format == 'MPEG-TS':
             result = self.__extractAndScoreFramesWithTSReadEx(candidate_offsets)
         else:
             result = self.__extractAndScoreFrames(candidate_offsets)
@@ -757,6 +769,212 @@ class ThumbnailGenerator:
 
         except Exception as ex:
             logging.error(f'{self.file_path}: Error in PyAV frame extraction and scoring:', exc_info=ex)
+            return None
+
+
+    def __detectMMTSHDRTransfer(self) -> Literal['HLG', 'PQ'] | None:
+        """
+        MMT/TLV の先頭 I フレームから HDR の映像伝達特性を検出する
+
+        Args:
+            None
+
+        Returns:
+            Literal['HLG', 'PQ'] | None:
+                - ARIB STD-B67 (HLG) の場合は 'HLG'
+                - SMPTE ST 2084 (PQ) の場合は 'PQ'
+                - SDR または検出できなかった場合は None
+        """
+
+        try:
+            # 番組素材自体が SDR であっても、放送時に HLG へ変換されている場合は HLG として逆変換する必要がある。
+            ## FFprobe だけでは先頭に不完全な TLV パケットを含む録画を安定して同期できないため、
+            ## 実際のフレーム抽出と同じ FFmpeg デマルチプレクサで先頭 I フレームを1枚だけデコードする。
+            probe_options = [
+                LIBRARY_PATH['FFmpeg'],
+                '-nostdin',
+                '-hide_banner',
+                '-loglevel', 'info',
+                '-f', 'libaribtlv',
+                '-skip_frame', 'nointra',
+                '-i', str(self.file_path),
+                '-map', '0:v:0',
+                '-frames:v', '1',
+                '-f', 'null',
+                '-',
+            ]
+            process = subprocess.run(
+                probe_options,
+                capture_output = True,
+                timeout = self.MMTS_COLOR_TRANSFER_PROBE_TIMEOUT,
+                check = False,
+            )
+            stderr_text = process.stderr.decode('utf-8', errors='ignore')
+
+            # FFmpeg のストリーム情報には、SPS の VUI から読み取った transfer_characteristics が表示される。
+            ## ARIB STD-B32 では HLG が 18、PQ が 16 であり、FFmpeg はそれぞれ下記の名前で表示する。
+            if 'arib-std-b67' in stderr_text:
+                logging.info(f'{self.file_path}: Detected ARIB STD-B67 (HLG) video for MMT/TLV thumbnails.')
+                return 'HLG'
+            if 'smpte2084' in stderr_text:
+                logging.info(f'{self.file_path}: Detected SMPTE ST 2084 (PQ) video for MMT/TLV thumbnails.')
+                return 'PQ'
+
+            # HDR 以外の transfer_characteristics を取得できた場合は、既存の SDR 変換経路をそのまま使用する。
+            ## 不明時も HDR 変換を推測適用すると SDR 映像の色を壊すため、安全側として既存経路へフォールバックする。
+            if process.returncode != 0:
+                error_message = stderr_text[-2000:]
+                logging.warning(
+                    f'{self.file_path}: Could not detect MMT/TLV video transfer characteristics. '
+                    f'Using the SDR thumbnail conversion path. [return_code: {process.returncode}]\n{error_message}'
+                )
+            return None
+
+        except subprocess.TimeoutExpired:
+            logging.warning(
+                f'{self.file_path}: MMT/TLV video transfer probe timed out after '
+                f'{self.MMTS_COLOR_TRANSFER_PROBE_TIMEOUT} seconds. Using the SDR thumbnail conversion path.'
+            )
+            return None
+        except Exception as ex:
+            logging.warning(
+                f'{self.file_path}: Failed to detect MMT/TLV video transfer characteristics. '
+                'Using the SDR thumbnail conversion path.',
+                exc_info=ex,
+            )
+            return None
+
+
+    def __extractAndScoreFramesWithFFmpeg(
+        self,
+        candidate_offsets: list[float],
+    ) -> tuple[list[NDArray[np.uint8]], int | None] | None:
+        """
+        MMT/TLV 録画を同梱 FFmpeg で順次デコードし、等間隔のサムネイルフレームを抽出する
+
+        Args:
+            candidate_offsets (list[float]): 抽出するフレームのタイムスタンプ (秒) のリスト
+
+        Returns:
+            tuple[list[NDArray[np.uint8]], int | None] | None:
+                - 全フレームの BGR 配列リスト (SCORING_SCALE)
+                - 最良フレームのインデック (候補区間内にフレームがない場合は None)
+                - エラー時は None
+        """
+
+        try:
+            start_time_frame_extraction = time.time()
+            scoring_width, scoring_height = self.SCORING_SCALE
+            expected_frame_count = len(candidate_offsets)
+            if expected_frame_count == 0:
+                return ([], None)
+
+            # HLG / PQ の VUI が付与された放送映像だけを HDR-to-SDR 変換する。
+            ## 4K であることだけを条件にすると、ARIB STD-B32 で許容されている BT.2020 SDR まで誤って tone-map してしまう。
+            hdr_transfer = self.__detectMMTSHDRTransfer()
+            video_filters = [
+                f'fps=fps=1/{self.tile_interval_sec:.6f}:start_time=0:round=down',
+            ]
+            if hdr_transfer is not None:
+                # HLG/PQ 信号をリニア光へ戻してから BT.709 色域へ変換し、SDR の表示範囲を超える部分だけを圧縮する。
+                ## nominal peak 200 / Mobius 0.9 は BS4K と BS の同時放送素材で比較し、SDR 側の明るさと色へ近づけた値。
+                ## Mobius の knee を 0.9 に置くことで SDR の大部分を保ち、SDR 白を超える HDR ハイライトだけを滑らかに圧縮する。
+                ## desat=0 はアニメなどの鮮やかな色が高輝度部で不用意に白へ寄るのを避けるために指定する。
+                video_filters.extend([
+                    f'zscale=transfer=linear:npl={self.MMTS_HDR_NOMINAL_PEAK_LUMINANCE}',
+                    'format=gbrpf32le',
+                    'zscale=primaries=bt709',
+                    f'tonemap=mobius:param={self.MMTS_HDR_TONEMAP_MOBIUS_PARAM}:desat=0',
+                    'zscale=transfer=bt709:matrix=bt709:range=limited',
+                    'format=yuv420p',
+                ])
+            video_filters.append(f'scale={scoring_width}:{scoring_height}')
+
+            # PyAV の wheel が内蔵する FFmpeg には MMT/TLV demuxer がないため、
+            # thirdparty に同梱した MMT/TLV 対応 FFmpeg を別プロセスとして使う。
+            ## 4K HEVC を全フレームデコードすると負荷が高いため、I フレームだけをデコードし、
+            ## fps filter で従来と同じ tile_interval_sec ごとのフレームに揃える。
+            ffmpeg_options = [
+                LIBRARY_PATH['FFmpeg'],
+                '-nostdin',
+                '-loglevel', 'error',
+                '-f', 'libaribtlv',
+                '-skip_frame', 'nointra',
+                '-i', str(self.file_path),
+                '-map', '0:v:0',
+                '-vf', ','.join(video_filters),
+                '-frames:v', str(expected_frame_count),
+                '-pix_fmt', 'bgr24',
+                '-f', 'rawvideo',
+                'pipe:1',
+            ]
+
+            # rawvideo を stdout から一括取得し、1フレームごとの BGR 配列に復元する。
+            ## 従来経路も全スコアリング用フレームをメモリ上に保持するため、メモリ使用量は同程度に収まる。
+            process = subprocess.run(
+                ffmpeg_options,
+                capture_output = True,
+                timeout = self.MMTS_FRAME_EXTRACTION_TIMEOUT,
+                check = False,
+            )
+            frame_size = scoring_width * scoring_height * 3
+            decoded_frame_count = len(process.stdout) // frame_size
+            trailing_byte_count = len(process.stdout) % frame_size
+
+            # FFmpeg から1枚もフレームを得られなかった場合は、終了コードにかかわらず生成失敗とする。
+            if decoded_frame_count == 0:
+                error_message = process.stderr.decode('utf-8', errors='ignore')[-4000:]
+                logging.error(
+                    f'{self.file_path}: FFmpeg MMT/TLV frame extraction failed. '
+                    f'[return_code: {process.returncode}]\n{error_message}'
+                )
+                return None
+
+            # 中途まで有効なフレームを得ている場合は、部分的なデコード成果をサムネイルに活用する。
+            if process.returncode != 0:
+                error_message = process.stderr.decode('utf-8', errors='ignore')[-4000:]
+                logging.warning(
+                    f'{self.file_path}: FFmpeg MMT/TLV frame extraction finished with an error after decoding '
+                    f'{decoded_frame_count} frames. [return_code: {process.returncode}]\n{error_message}'
+                )
+            if trailing_byte_count != 0:
+                logging.warning(
+                    f'{self.file_path}: FFmpeg MMT/TLV rawvideo output has incomplete trailing data. '
+                    f'[trailing_bytes: {trailing_byte_count}]'
+                )
+
+            # FFmpeg の出力は単一の bytes なので、各フレームが独立した書き込み可能な配列になるよう copy() する。
+            bgr_frames: list[NDArray[np.uint8]] = []
+            for frame_index in range(min(decoded_frame_count, expected_frame_count)):
+                frame_start = frame_index * frame_size
+                frame_end = frame_start + frame_size
+                frame = np.frombuffer(process.stdout[frame_start:frame_end], dtype=np.uint8)
+                bgr_frames.append(frame.reshape((scoring_height, scoring_width, 3)).copy())
+
+            # 録画末尾が想定より短い場合もタイルレイアウトを崩さないよう、不足分は最後の有効フレームで補う。
+            ## 有効フレームが1枚もない場合は上で失敗しているため、ここでは必ず末尾フレームを参照できる。
+            if len(bgr_frames) < expected_frame_count:
+                missing_frame_count = expected_frame_count - len(bgr_frames)
+                logging.warning(
+                    f'{self.file_path}: FFmpeg MMT/TLV frame extraction produced fewer frames than expected. '
+                    f'[expected: {expected_frame_count}, actual: {len(bgr_frames)}]'
+                )
+                bgr_frames.extend(bgr_frames[-1].copy() for _ in range(missing_frame_count))
+
+            logging.info(
+                f'{self.file_path}: FFmpeg extracted {len(bgr_frames)} MMT/TLV frames. '
+                f'({time.time() - start_time_frame_extraction:.2f} sec)'
+            )
+            return (bgr_frames, self.__scoreFrames(bgr_frames))
+
+        except subprocess.TimeoutExpired:
+            logging.error(
+                f'{self.file_path}: FFmpeg MMT/TLV frame extraction timed out after '
+                f'{self.MMTS_FRAME_EXTRACTION_TIMEOUT} seconds.'
+            )
+            return None
+        except Exception as ex:
+            logging.error(f'{self.file_path}: Error in FFmpeg MMT/TLV frame extraction and scoring:', exc_info=ex)
             return None
 
 
@@ -1311,9 +1529,9 @@ class ThumbnailGenerator:
 
     async def migrateFromLegacyTile(self) -> bool:
         """
-        既存のサムネイルタイル画像を新仕様に合わせて再タイル化し、サムネイル情報を DB に保存する
+        既存のサムネイルタイル画像を現在のレイアウトに合わせて再構成し、サムネイル情報を DB に保存する
 
-        旧仕様 (480x270, 34列) で生成されたタイル画像を読み込み、新仕様 (192x108, 85列) にリサイズ・再タイル化する
+        thumbnail_info がない旧仕様 (480x270, 34列) のタイルを読み込み、現在の 480x270 レイアウトで再タイル化する
         処理は ProcessPoolExecutor で別プロセスで実行され、完了後に旧タイルをバックアップしてから新タイルに置換する
         このメソッドは RecordedScanTask から呼び出される
 
@@ -1409,8 +1627,8 @@ class ThumbnailGenerator:
         output_tile_path: pathlib.Path,
     ) -> bool:
         """
-        既存のタイル画像を読み込み、新しい解像度に合わせて再タイル化する
-        旧仕様 (480x270, 34列) で生成されたタイル画像を、新仕様 (192x108, 85列) に変換する
+        既存のタイル画像を読み込み、現在のレイアウトに合わせて再タイル化する
+        旧仕様 (480x270, 34列) で生成されたタイル画像を、同じ解像度を維持したまま thumbnail_info 対応形式へ変換する
         ProcessPoolExecutor で実行されるエントリーポイントなので、あえて prefix のアンダースコアは1つとしている
         (別プロセスで実行されるため、__ を付けるとマングリングにより正常に実行できない)
 
@@ -2104,8 +2322,8 @@ if __name__ == "__main__":
         ),
     ) -> None:
         """
-        既存のサムネイルタイル画像を新仕様にマイグレーションする
-        旧仕様 (480x270, 34列) から新仕様 (192x108, 85列) に変換する
+        既存のサムネイルタイル画像を thumbnail_info 対応形式へマイグレーションする
+        旧仕様の 480x270 / 34列という画質とレイアウトは維持する
         """
 
         async def run() -> bool:

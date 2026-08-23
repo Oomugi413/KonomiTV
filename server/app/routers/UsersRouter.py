@@ -1,6 +1,8 @@
 
 import asyncio
+import hashlib
 import pathlib
+import secrets
 import uuid
 from datetime import datetime, timedelta
 from typing import Annotated, BinaryIO
@@ -33,6 +35,7 @@ from app.constants import (
 )
 from app.models.AccountLink import AccountLink
 from app.models.BlueskyAccount import BlueskyAccount
+from app.models.DeviceAuth import DeviceAuth
 from app.models.TwitterAccount import TwitterAccount
 from app.models.User import User
 
@@ -77,6 +80,19 @@ def GenerateAccessToken(user_id: int) -> str:
         key = JWT_SECRET_KEY,
         algorithm = 'HS256',
     )
+
+
+def HashDeviceCode(device_code: str) -> str:
+    """
+    端末だけが保持するデバイスコードを、DB 保存用の SHA-256 ハッシュへ変換する。
+
+    Args:
+        device_code (str): Komorebi に発行した十分に長いデバイスコード。
+
+    Returns:
+        str: デバイスコードの SHA-256 ハッシュ。
+    """
+    return hashlib.sha256(device_code.encode()).hexdigest()
 
 
 async def GetCurrentUser(token: Annotated[str, Depends(OAuth2PasswordBearer(tokenUrl='users/token'))]) -> User:
@@ -308,6 +324,91 @@ async def UserAccessTokenAPI(
         access_token = GenerateAccessToken(current_user.id),
         token_type = 'bearer',
     )
+
+
+@router.post('/device-auth', response_model=schemas.DeviceAuthRequest, status_code=status.HTTP_201_CREATED)
+async def DeviceAuthCreateAPI(request: schemas.DeviceAuthCreateRequest):
+    """
+    Komorebi 向けの一時的な端末ペアリング要求を作成する。
+
+    Args:
+        request (schemas.DeviceAuthCreateRequest): 連携元端末の表示名。
+
+    Returns:
+        schemas.DeviceAuthRequest: 端末コード、ユーザーコード、確認 URL と有効期間。
+    """
+    now = datetime.now(JST)
+    await DeviceAuth.filter(expires_at__lte=now).delete()
+
+    # ユーザーコードの衝突は DB の一意制約を最終保証として、衝突時だけ新しいコードを再生成する
+    while True:
+        device_code = secrets.token_urlsafe(32)
+        user_code = ''.join(secrets.choice('ABCDEFGHJKLMNPQRSTUVWXYZ23456789') for _ in range(8))
+        try:
+            await DeviceAuth.create(
+                device_code_hash=HashDeviceCode(device_code),
+                user_code=user_code,
+                device_name=request.device_name,
+                expires_at=now + timedelta(minutes=10),
+            )
+            break
+        except IntegrityError:
+            continue
+    return schemas.DeviceAuthRequest(
+        device_code=device_code,
+        user_code=user_code,
+        verification_url=f'/pair/?code={user_code}',
+        expires_in=600,
+        interval=3,
+    )
+
+
+@router.post('/device-auth/approve', status_code=status.HTTP_204_NO_CONTENT)
+async def DeviceAuthApproveAPI(
+    request: schemas.DeviceAuthApprovalRequest,
+    current_user: Annotated[User, Depends(GetCurrentUser)],
+):
+    """
+    ログイン中のユーザーが、テレビに表示されたユーザーコードを承認する。
+
+    Args:
+        request (schemas.DeviceAuthApprovalRequest): テレビに表示されたユーザーコード。
+        current_user (User): JWT から解決したログイン中のユーザー。
+
+    Returns:
+        None: 承認に成功した場合はレスポンス本文を返さない。
+    """
+    pairing = await DeviceAuth.filter(user_code=request.user_code.upper(), expires_at__gt=datetime.now(JST)).get_or_none()
+    if pairing is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Device authorization request was not found')
+    # 同時承認時も最初のユーザーだけを受け付け、後続ユーザーによる上書きを防ぐ
+    updated_count = await DeviceAuth.filter(id=pairing.id, user_id=None).update(user_id=current_user.id)
+    if updated_count == 0:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='Device authorization request was already approved')
+
+
+@router.post('/device-auth/token', response_model=schemas.UserAccessToken)
+async def DeviceAuthTokenAPI(request: schemas.DeviceAuthTokenRequest):
+    """
+    承認済みペアリング要求を、Komorebi が利用するアクセストークンへ交換する。
+
+    Args:
+        request (schemas.DeviceAuthTokenRequest): Komorebi だけが保持するデバイスコード。
+
+    Returns:
+        schemas.UserAccessToken | Response: 承認後はアクセストークン、承認待ちの間は HTTP 202 。
+    """
+    pairing = await DeviceAuth.filter(
+        device_code_hash=HashDeviceCode(request.device_code),
+        expires_at__gt=datetime.now(JST),
+    ).get_or_none()
+    if pairing is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Device authorization request was not found')
+    if pairing.user_id is None:
+        return Response(status_code=status.HTTP_202_ACCEPTED)
+    token = GenerateAccessToken(pairing.user_id)
+    await pairing.delete()
+    return schemas.UserAccessToken(access_token=token, token_type='bearer')
 
 
 @router.get(

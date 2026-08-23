@@ -21,6 +21,25 @@
                         <Icon class="navigation__link-icon" icon="fluent:movies-and-tv-20-regular" width="26px" />
                         <span v-if="!iconOnly" class="navigation__link-text">ビデオをみる</span>
                     </router-link>
+                    <router-link v-ripple class="navigation__link" active-class="navigation__link--active" to="/series/on-air"
+                        :class="{
+                            'navigation__link--active': $route.path.startsWith('/series/on-air'),
+                            'navigation__link--icon-only': iconOnly,
+                        }"
+                        v-ftooltip.right="iconOnly ? '放送中' : ''">
+                        <Icon class="navigation__link-icon" icon="fluent:calendar-clock-20-regular" width="26px" />
+                        <span v-if="!iconOnly" class="navigation__link-text">放送中</span>
+                    </router-link>
+                    <router-link v-ripple class="navigation__link" to="/series/"
+                        :class="{
+                            'navigation__link--active': $route.path.startsWith('/series') &&
+                                !$route.path.startsWith('/series/on-air'),
+                            'navigation__link--icon-only': iconOnly,
+                        }"
+                        v-ftooltip.right="iconOnly ? 'シリーズ' : ''">
+                        <Icon class="navigation__link-icon" icon="fluent:video-clip-multiple-20-regular" width="26px" />
+                        <span v-if="!iconOnly" class="navigation__link-text">シリーズ</span>
+                    </router-link>
                     <router-link v-ripple class="navigation__link" active-class="navigation__link--active" to="/timetable/"
                         :class="{
                             'navigation__link--active': $route.path.startsWith('/timetable'),
@@ -79,6 +98,11 @@
                         <span v-if="!iconOnly" class="navigation__link-text">視聴履歴</span>
                     </router-link>
                     <v-spacer></v-spacer>
+                    <a v-if="settingsStore.settings.is_cloudflare_zerotrust" v-ripple class="navigation__link"
+                        active-class="navigation__link--active" href="/cdn-cgi/access/logout">
+                        <Icon class="navigation__link-icon" icon="fluent:sign-out-20-regular" width="26px" />
+                        <span v-if="!iconOnly" class="navigation__link-text">CFからログアウト</span>
+                    </a>
                     <router-link v-ripple class="navigation__link" active-class="navigation__link--active" to="/settings/"
                         :class="{
                             'navigation__link--active': $route.path.startsWith('/settings'),
@@ -114,6 +138,7 @@ import { defineComponent } from 'vue';
 
 import BottomNavigation from '@/components/BottomNavigation.vue';
 import OfflineDownloadBadge from '@/components/OfflineDownloadBadge.vue';
+import useSettingsStore from '@/stores/SettingsStore';
 import useVersionStore from '@/stores/VersionStore';
 
 export default defineComponent({
@@ -132,6 +157,7 @@ export default defineComponent({
     },
     computed: {
         ...mapStores(useVersionStore),
+        ...mapStores(useSettingsStore),
     },
     async created() {
         // オフライン保存ページは通信なしでも開くため、明らかなオフライン状態でバージョン API のエラーを表示しない

@@ -31,9 +31,21 @@
                         <Icon icon="ic:round-playlist-play" width="26px" />
                         <span class="ml-4">マイリスト</span>
                     </v-btn>
+                    <v-btn variant="flat" class="settings-navigation__button" to="/series/">
+                        <Icon icon="fluent:video-clip-multiple-20-regular" width="26px" />
+                        <span class="ml-4">シリーズ</span>
+                    </v-btn>
+                    <v-btn variant="flat" class="settings-navigation__button" to="/captures/">
+                        <Icon icon="fluent:image-multiple-24-regular" width="26px" />
+                        <span class="ml-4">キャプチャ</span>
+                    </v-btn>
                     <v-btn variant="flat" class="settings-navigation__button" to="/watched-history/">
                         <Icon icon="fluent:history-20-regular" width="26px" />
                         <span class="ml-4">視聴履歴</span>
+                    </v-btn>
+                    <v-btn variant="flat" class="settings-navigation__button mt-3" href="/cdn-cgi/access/logout" v-if="settingsStore.settings.is_cloudflare_zerotrust">
+                        <Icon icon="fluent:sign-out-20-regular" width="26px" />
+                        <span class="ml-4">CFからログアウト</span>
                     </v-btn>
                     <v-btn variant="flat" class="settings-navigation__button settings-navigation__button--version mt-3"
                         :class="{'settings-navigation__button--version-highlight': versionStore.is_update_available}"
@@ -55,11 +67,13 @@ import { onMounted } from 'vue';
 import HeaderBar from '@/components/HeaderBar.vue';
 import Navigation from '@/components/Navigation.vue';
 import SPHeaderBar from '@/components/SPHeaderBar.vue';
+import useSettingsStore from '@/stores/SettingsStore';
 import useUserStore from '@/stores/UserStore';
 import useVersionStore from '@/stores/VersionStore';
 
 const userStore = useUserStore();
 const versionStore = useVersionStore();
+const settingsStore = useSettingsStore();
 
 onMounted(async () => {
     await userStore.fetchUser();

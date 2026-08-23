@@ -20,16 +20,22 @@ from tortoise import transactions
 
 from app import logging
 from app.config import Config
-from app.constants import QUALITY_TYPES
+from app.constants import VIDEO_QUALITY_TYPES
 from app.models.RecordedProgram import RecordedProgram
 from app.models.RecordedVideo import RecordedVideo
 from app.schemas import KeyFrame, SegmentMapEntry
+from app.streams.RecordingPlaybackTracker import RecordingPlaybackTracker
 from app.streams.StreamEncodingOptions import StreamEncodingOptions
 from app.streams.VideoEncodingTask import VideoEncodingTask
 from app.streams.VideoSegmentPlanner import VideoSegmentPlanner
+from app.streams.VideoSourceTimeline import VideoSourceTimeline
 from app.utils import SetTimeout
 from app.utils.MP4KeyFrameParser import MP4KeyFrameParser
-from app.utils.TSKeyFrameSeeker import TSKeyFrameSeeker, TSStreamInfo
+from app.utils.TSKeyFrameSeeker import (
+    TSKeyFrameNotFoundError,
+    TSKeyFrameSeeker,
+    TSStreamInfo,
+)
 
 
 @dataclass
@@ -44,6 +50,16 @@ class VideoStreamSegment:
     # HLS プレイリスト上の開始時刻 (秒)
     ## 入力ソース側の DTS とは別物で、仮想プレイリストを等間隔で作るための再生時刻
     playlist_start_seconds: float
+    # このセグメントを供給する録画番組 ID
+    ## 仮想時間軸を使わない通常再生では None とし、セッションの基準録画を使う
+    source_recorded_program_id: int | None
+    # 入力ファイル内の開始時刻 (秒)
+    ## 複数ファイルを跨ぐ HLS では playlist_start_seconds と異なるため、別フィールドで保持する
+    source_start_seconds: float
+    # どの録画ファイルにも実データが存在しない欠落区間かどうか
+    is_gap: bool
+    # 直前の実セグメントとは別入力になるため、HLS の discontinuity が必要かどうか
+    is_discontinuity: bool
     # エンコードを開始する入力ファイルの位置 (バイト)
     ## TS コンテナはオンデマンド探索または segment_map で解決し、MP4 は psisimux に時刻を渡すため None のまま扱う
     source_file_position: int | None
@@ -87,6 +103,11 @@ class VideoStream:
     # 一度でも読み取られた HLS セグメントの最大保持数
     MAX_READED_SEGMENTS: ClassVar[int] = 10
 
+    # 同一視聴セッションで同時に処理するセグメントリクエストの最大数
+    ## hls.js は manifest 更新直後に現在セグメントと次セグメント、さらに再試行分を並行して投げることがある。
+    ## 2 本では追いかけ再生の末尾更新時に 429 が出やすいため、エンコーダー再起動の暴発を防ぐ範囲で少し余裕を持たせる。
+    MAX_ACTIVE_SEGMENT_REQUESTS: ClassVar[int] = 4
+
     # QSVEncC でエンコードを開始する際、入力 DTS が 33bit ラップアラウンド直前だと時刻補正でフレーム間隔がズレる問題を回避するための余裕
     DTS_WRAP_AVOIDANCE_SECONDS: ClassVar[int] = 60
 
@@ -97,6 +118,14 @@ class VideoStream:
     # 再生しながら見つけたキーフレーム位置を segment_map として保存する最小件数
     ## DB 書き込みを HLS セグメントごとに発生させず、再生済み範囲をある程度まとめて保存する
     SEGMENT_MAP_SAVE_BATCH_SIZE: ClassVar[int] = 16
+
+    # オンデマンド探索で許容するキーフレームの最大古さ (HLS セグメント数)
+    ## 長い GOP や PCR 二分探索の推定ズレがある TS でも、実用上許容できる範囲では再生を継続させる
+    ON_DEMAND_KEYFRAME_MAX_AGE_SEGMENTS: ClassVar[int] = 5
+
+    # 録画中ファイルの末尾は、PCR から再生可能そうに見えてもエンコーダー入力としてはまだ安定していないことがある。
+    ## 追いかけ再生ではこの数だけ playlist の末尾セグメントを隠し、半端に書き込み中の GOP / TS パケットへ hls.js が到達しないようにする。
+    RECORDING_PLAYLIST_EDGE_BUFFER_SEGMENTS: ClassVar[int] = 2
 
     # 録画視聴セッションのインスタンスが入る、セッション ID をキーとした辞書
     # この辞書に録画視聴セッションに関する全てのデータが格納されている
@@ -113,7 +142,7 @@ class VideoStream:
         cls,
         session_id: str,
         recorded_program: RecordedProgram,
-        quality: QUALITY_TYPES,
+        quality: VIDEO_QUALITY_TYPES,
         encoding_options: StreamEncodingOptions | None = None,
         is_new_session_allowed: bool = False,
     ) -> VideoStream:
@@ -156,6 +185,11 @@ class VideoStream:
             # HLS セグメントを格納するリスト
             instance._segments = []
 
+            # HLS（オリジナル）で複数の中断録画を繋ぐ場合にだけ使う仮想入力時間軸
+            ## 原始 TLV の直通経路は単一ファイルのまま維持し、ここには登録しない
+            instance._source_timeline = None
+            instance._source_recorded_programs = {recorded_program.id: recorded_program}
+
             # segment_map はシーケンス番号で参照するため、視聴セッション内では辞書として保持する
             ## DB には JSON 配列のまま保存し、検索時だけ辞書化することで保存形式を増やさずに参照コストを下げる
             instance._segment_map_by_sequence = {
@@ -169,6 +203,9 @@ class VideoStream:
             instance._ts_source_base_dts = None
             instance._mp4_keyframe_dts_list = None
             instance._source_position_lock = asyncio.Lock()
+            # 録画中ファイルの追っかけ再生で使う共有トラッカー
+            ## ファイル末尾の追跡はセッションごとではなく録画ファイルごとに集約し、keepAlive() で利用中状態を延長する。
+            instance._recording_playback_tracker = None
 
             # 現在実行中の VideoEncodingTask のインスタンス
             ## 録画再生時は、シークによりエンコーダーの再起動が必要になる度に、新しい VideoEncodingTask を都度作り直す
@@ -184,12 +221,15 @@ class VideoStream:
             # イベントループ上の Task は弱参照で管理されるため、自然終了するまでここで強参照を保持する
             instance._detached_video_encoding_task_refs = set()
 
-            # destroy() の開始後に待機中のセグメント要求や生存期限更新がセッションを再始動しないよう、破棄済みかどうかを共有する
+            # destroy() 開始後に待機中の要求がセッションを再始動しないよう、終了状態を共有する
             instance._is_destroyed = False
 
             # キャンセルされない限り SESSION_TIMEOUT 秒後にインスタンスを破棄するタイマー
             # cancel_destroy_timer() を呼び出すことでタイマーをキャンセルできる
             instance._cancel_destroy_timer = SetTimeout(lambda: asyncio.create_task(instance.destroy()), cls.SESSION_TIMEOUT)
+
+            # 現在処理中のセグメントリクエスト数
+            instance._active_segment_requests = 0
 
             # 生成したインスタンスを登録する
             cls.__instances[session_id] = instance
@@ -235,7 +275,7 @@ class VideoStream:
         self,
         session_id: str,
         recorded_program: RecordedProgram,
-        quality: QUALITY_TYPES,
+        quality: VIDEO_QUALITY_TYPES,
         encoding_options: StreamEncodingOptions | None = None,
         is_new_session_allowed: bool = False,
     ) -> None:
@@ -245,7 +285,7 @@ class VideoStream:
         Args:
             session_id (str): セッション ID
             recorded_program (RecordedProgram): 録画番組の情報
-            quality (QUALITY_TYPES): 映像の品質 (1080p-60fps ~ 240p)
+            quality (VIDEO_QUALITY_TYPES): 映像の品質 (copy / 1080p-60fps ~ 240p)
             encoding_options (StreamEncodingOptions | None): ベース画質に追加するエンコードオプション
             is_new_session_allowed (bool): セッションが存在しない場合に新規作成を許可するかどうか
         """
@@ -254,7 +294,7 @@ class VideoStream:
         # Singleton のためインスタンスの生成は __new__() で行うが、__init__() も定義しておかないと補完がうまく効かない
         self.session_id: str
         self.recorded_program: RecordedProgram
-        self.quality: QUALITY_TYPES
+        self.quality: VIDEO_QUALITY_TYPES
         self.encoding_options: StreamEncodingOptions
         self._segment_duration_seconds: float
         self._segments: list[VideoStreamSegment]
@@ -263,11 +303,14 @@ class VideoStream:
         self._ts_source_base_dts: int | None
         self._mp4_keyframe_dts_list: list[int] | None
         self._source_position_lock: asyncio.Lock
+        self._recording_playback_tracker: RecordingPlaybackTracker | None
         self._video_encoding_task: VideoEncodingTask
         self._video_encoding_task_lock: asyncio.Lock
         self._video_encoding_task_ref: asyncio.Task[None] | None
         self._detached_video_encoding_task_refs: set[asyncio.Task[None]]
+        self._is_destroyed: bool
         self._cancel_destroy_timer: Callable[[], None]
+        self._active_segment_requests: int
 
 
     @property
@@ -286,6 +329,49 @@ class VideoStream:
         基本一度 VideoStream 内部でセットされたら外部から変更されるべきではないので、読み取り専用にしている
         """
         return tuple(self._segments)
+
+
+    def configureSourceTimeline(
+        self,
+        source_timeline: VideoSourceTimeline,
+        source_recorded_programs: list[RecordedProgram],
+    ) -> None:
+        """
+        HLS（オリジナル）用の複数録画ファイル時間軸をセッションへ設定する。
+
+        Args:
+            source_timeline (VideoSourceTimeline): 番組時刻を維持したソース区間と欠落区間。
+            source_recorded_programs (list[RecordedProgram]): 時間軸内の ID から参照する録画番組。
+
+        Returns:
+            None
+        """
+
+        # プレイリスト作成後に時間軸を差し替えると sequence の意味が変わるため、初回作成時だけ設定する。
+        if len(self._segments) > 0:
+            return
+        self._source_timeline = source_timeline
+        self._source_recorded_programs = {
+            source_recorded_program.id: source_recorded_program
+            for source_recorded_program in source_recorded_programs
+        }
+
+
+    def getSourceRecordedProgram(self, segment_sequence: int) -> RecordedProgram:
+        """
+        指定セグメントを供給する録画番組を取得する。
+
+        Args:
+            segment_sequence (int): HLS セグメントのシーケンス番号。
+
+        Returns:
+            RecordedProgram: 入力ファイルとメタデータを提供する録画番組。
+        """
+
+        segment = self._segments[segment_sequence]
+        if segment.source_recorded_program_id is None:
+            return self.recorded_program
+        return self._source_recorded_programs[segment.source_recorded_program_id]
 
 
     @property
@@ -323,6 +409,12 @@ class VideoStream:
 
         async with self._source_position_lock:
             file_path = Path(recorded_video.file_path)
+            if self._recording_playback_tracker is not None:
+                snapshot = self._recording_playback_tracker.getSnapshot()
+                if self._ts_stream_info is None and snapshot.stream_info is not None:
+                    self._ts_stream_info = snapshot.stream_info
+                if self._ts_source_base_dts is None and snapshot.source_base_dts is not None:
+                    self._ts_source_base_dts = snapshot.source_base_dts
 
             # segment_map キャッシュから再生を開始した場合、ソース位置は即時解決できても PID 情報が未取得のままになる
             ## 再生中のキーフレーム収集は入力 TS の PES を読むため、必要になった時点で一度だけ PAT/PMT を読む
@@ -390,6 +482,8 @@ class VideoStream:
 
         # キャンセルされない限り SESSION_TIMEOUT 秒後にインスタンスを破棄するタイマーを設定する
         self._cancel_destroy_timer = SetTimeout(lambda: asyncio.create_task(self.destroy()), self.SESSION_TIMEOUT)
+        if self._recording_playback_tracker is not None:
+            self._recording_playback_tracker.touch()
 
 
     def getBufferRange(self) -> tuple[float, float]:
@@ -415,7 +509,180 @@ class VideoStream:
             return (0, 0)
 
 
-    def getVirtualPlaylist(self, cache_key: str | None = None) -> str:
+    def __ensureVirtualSegments(self, duration_seconds: float, *, is_recording: bool = False) -> None:
+        """
+        指定された再生時間まで HLS 仮想セグメントを作成・更新する
+
+        Args:
+            duration_seconds (float): プレイリストに含める再生時間 (秒)
+            is_recording (bool): 録画中ファイル向けの追いかけ再生 playlist として作るかどうか
+        """
+
+        duration_seconds = max(duration_seconds, 0.001)
+
+        # 録画中は末尾セグメントが次回 playlist 更新で伸び続けると、同じ sequence の EXTINF と実データ長がずれて
+        ## hls.js 側では「TS が繋がっていない」ような周期的な停止に見えやすい。
+        ## そのため、追いかけ再生では基本的に完全に閉じた固定長セグメントだけを playlist へ出す。
+        if is_recording is True and duration_seconds >= self._segment_duration_seconds:
+            segment_count = max(1, math.floor(duration_seconds / self._segment_duration_seconds))
+            duration_seconds = segment_count * self._segment_duration_seconds
+        else:
+            segment_count = max(1, math.ceil(duration_seconds / self._segment_duration_seconds))
+        previous_segment_count = len(self._segments)
+
+        # 既存セグメントの長さも更新する。
+        ## 録画中は最初に短かった末尾セグメントが、次の playlist 更新時には通常長へ伸びるため、
+        ## セグメントオブジェクト自体は維持しながら EXTINF だけ現在の長さへ合わせる。
+        for segment in self._segments[:segment_count]:
+            remaining_duration = duration_seconds - segment.playlist_start_seconds
+            segment.duration_seconds = min(self._segment_duration_seconds, max(remaining_duration, 0.001))
+
+        for segment_sequence in range(previous_segment_count, segment_count):
+            playlist_start_seconds = segment_sequence * self._segment_duration_seconds
+            remaining_duration = duration_seconds - playlist_start_seconds
+            self._segments.append(VideoStreamSegment(
+                sequence_index = segment_sequence,
+                playlist_start_seconds = playlist_start_seconds,
+                source_recorded_program_id = None,
+                source_start_seconds = playlist_start_seconds,
+                is_gap = False,
+                is_discontinuity = False,
+                source_file_position = None,
+                source_start_dts = None,
+                duration_seconds = min(self._segment_duration_seconds, max(remaining_duration, 0.001)),
+                encode_status = 'Pending',
+                encoded_segment_ts_future = asyncio.get_running_loop().create_future(),
+            ))
+
+        if len(self._segments) != previous_segment_count:
+            logging.info(
+                f'{self.log_prefix} Total {len(self._segments)} virtual segments '
+                f'(segment_duration: {self._segment_duration_seconds:.6f}s).'
+            )
+
+
+    def __ensureSourceTimelineSegments(self, source_timeline: VideoSourceTimeline) -> None:
+        """
+        複数録画ファイルの仮想時間軸から、入力境界を跨がない HLS セグメントを作成する。
+
+        Args:
+            source_timeline (VideoSourceTimeline): 番組時刻上のソース区間と欠落区間。
+
+        Returns:
+            None
+        """
+
+        if len(self._segments) > 0:
+            return
+
+        timeline_regions = sorted(
+            [
+                (
+                    span.timeline_start_seconds,
+                    span.timeline_end_seconds,
+                    span.recorded_program_id,
+                    span.source_start_seconds,
+                    False,
+                )
+                for span in source_timeline.spans
+            ] + [
+                (
+                    gap.timeline_start_seconds,
+                    gap.timeline_end_seconds,
+                    None,
+                    0.0,
+                    True,
+                )
+                for gap in source_timeline.gaps
+            ],
+            key = lambda region: region[0],
+        )
+        previous_source_recorded_program_id: int | None = None
+        was_gap = False
+
+        # 入力ファイルの切り替え位置と欠落区間を跨がないよう、各領域を基準長以下へ分割する。
+        for region_start, region_end, source_recorded_program_id, source_region_start, is_gap in timeline_regions:
+            cursor_seconds = region_start
+            while cursor_seconds < region_end:
+                segment_end_seconds = min(cursor_seconds + self._segment_duration_seconds, region_end)
+                is_discontinuity = (
+                    is_gap is False and
+                    previous_source_recorded_program_id is not None and
+                    (
+                        was_gap is True or
+                        previous_source_recorded_program_id != source_recorded_program_id
+                    )
+                )
+                self._segments.append(VideoStreamSegment(
+                    sequence_index = len(self._segments),
+                    playlist_start_seconds = cursor_seconds,
+                    source_recorded_program_id = source_recorded_program_id,
+                    source_start_seconds = (
+                        source_region_start + (cursor_seconds - region_start)
+                        if is_gap is False
+                        else 0.0
+                    ),
+                    is_gap = is_gap,
+                    is_discontinuity = is_discontinuity,
+                    source_file_position = None,
+                    source_start_dts = None,
+                    duration_seconds = max(segment_end_seconds - cursor_seconds, 0.001),
+                    encode_status = 'Pending',
+                    encoded_segment_ts_future = asyncio.get_running_loop().create_future(),
+                ))
+                cursor_seconds = segment_end_seconds
+                if is_gap is False:
+                    previous_source_recorded_program_id = source_recorded_program_id
+                was_gap = is_gap
+
+        logging.info(
+            f'{self.log_prefix} Total {len(self._segments)} virtual source timeline segments '
+            f'(sources: {len(source_timeline.spans)}, gaps: {len(source_timeline.gaps)}).'
+        )
+
+
+    async def __getPlaylistDuration(self) -> float:
+        """
+        現在のプレイリストに含めるべき再生時間を取得する
+
+        Returns:
+            float: プレイリストに含める再生時間 (秒)
+        """
+
+        recorded_video = self.recorded_program.recorded_video
+        playlist_duration_seconds = max(recorded_video.duration, 0.001)
+        if recorded_video.status != 'Recording':
+            return playlist_duration_seconds
+
+        self._recording_playback_tracker = await RecordingPlaybackTracker.getOrCreate(self.recorded_program)
+        snapshot = self._recording_playback_tracker.getSnapshot()
+
+        # tracker が既に取得した MPEG-TS コンテキストは、この視聴セッションのシーク解決にも流用する。
+        ## 同じファイルに対して PAT/PMT と先頭 DTS を何度も読み直さず、プレイリスト更新とセグメント要求の I/O を抑える。
+        if self._ts_stream_info is None and snapshot.stream_info is not None:
+            self._ts_stream_info = snapshot.stream_info
+        if self._ts_source_base_dts is None and snapshot.source_base_dts is not None:
+            self._ts_source_base_dts = snapshot.source_base_dts
+
+        # tracker の推定値は「末尾 PCR までは読めそう」という値であり、HLS セグメントとして安定して配れる境界とは限らない。
+        ## 追いかけ再生では後端 playlist を常に 2 セグメント分遅らせ、書き込み中の末尾へ到達しないようにする。
+        recording_playlist_duration_seconds = max(playlist_duration_seconds, snapshot.available_duration_seconds)
+        recording_playlist_edge_buffer_seconds = self._segment_duration_seconds * self.RECORDING_PLAYLIST_EDGE_BUFFER_SEGMENTS
+        return max(recording_playlist_duration_seconds - recording_playlist_edge_buffer_seconds, 0.001)
+
+
+    async def __refreshRecordingSegments(self) -> None:
+        """
+        録画中ファイルの現在可読範囲に合わせて HLS 仮想セグメントを伸ばす
+        """
+
+        if self.recorded_program.recorded_video.status != 'Recording':
+            return
+        playlist_duration_seconds = await self.__getPlaylistDuration()
+        self.__ensureVirtualSegments(playlist_duration_seconds, is_recording = True)
+
+
+    async def getVirtualPlaylist(self, cache_key: str | None = None) -> str:
         """
         仮想 HLS M3U8 プレイリストを取得する
         返却時点では仮想 HLS M3U8 プレイリストに記載されているセグメントのデータは存在せず (「仮想」のゆえん)、随時エンコードされる
@@ -430,26 +697,14 @@ class VideoStream:
         # セッションのアクティブ状態を維持する
         self.keepAlive()
 
-        # まだ HLS セグメントリストが空なら、録画時間とフレームレートから仮想セグメントを作成する
-        if len(self._segments) == 0:
-            segment_count = max(1, math.ceil(self.recorded_program.recorded_video.duration / self._segment_duration_seconds))
-            for segment_sequence in range(segment_count):
-                playlist_start_seconds = segment_sequence * self._segment_duration_seconds
-                remaining_duration = self.recorded_program.recorded_video.duration - playlist_start_seconds
-                duration_seconds = min(self._segment_duration_seconds, max(remaining_duration, 0.001))
-                self._segments.append(VideoStreamSegment(
-                    sequence_index = segment_sequence,
-                    playlist_start_seconds = playlist_start_seconds,
-                    source_file_position = None,
-                    source_start_dts = None,
-                    duration_seconds = duration_seconds,
-                    encode_status = 'Pending',
-                    encoded_segment_ts_future = asyncio.Future(),
-                ))
-
-            logging.info(
-                f'{self.log_prefix} Total {len(self._segments)} virtual segments '
-                f'(segment_duration: {self._segment_duration_seconds:.6f}s).'
+        # 録画済みは DB の duration から固定長プレイリストを作り、録画中は tracker が推定した可読範囲まで随時伸ばす。
+        playlist_duration_seconds = await self.__getPlaylistDuration()
+        if self._source_timeline is not None:
+            self.__ensureSourceTimelineSegments(self._source_timeline)
+        else:
+            self.__ensureVirtualSegments(
+                playlist_duration_seconds,
+                is_recording = self.recorded_program.recorded_video.status == 'Recording',
             )
 
         # キャッシュキーが指定されていない場合は UUID の - で区切って一番左側のみを使う
@@ -460,7 +715,12 @@ class VideoStream:
         virtual_playlist = ''
         virtual_playlist += '#EXTM3U\n'
         virtual_playlist += '#EXT-X-VERSION:6\n'
-        virtual_playlist += '#EXT-X-PLAYLIST-TYPE:VOD\n'
+        virtual_playlist += (
+            '#EXT-X-PLAYLIST-TYPE:EVENT\n'
+            if self.recorded_program.recorded_video.status == 'Recording'
+            else '#EXT-X-PLAYLIST-TYPE:VOD\n'
+        )
+        virtual_playlist += '#EXT-X-MEDIA-SEQUENCE:0\n'
 
         # HLS セグメントの実時間の最大値を指定する (小数点以下は切り上げ)
         target_duration = max(s.duration_seconds for s in self._segments)
@@ -468,12 +728,17 @@ class VideoStream:
 
         # 事前に算出したセグメントをすべて記述する
         for segment in self._segments:
+            if segment.is_discontinuity is True:
+                virtual_playlist += '#EXT-X-DISCONTINUITY\n'
+            if segment.is_gap is True:
+                virtual_playlist += '#EXT-X-GAP\n'
             # セグメントの長さ (秒, 小数点以下6桁まで)
             virtual_playlist += f'#EXTINF:{segment.duration_seconds:.6f},\n'
             # キャッシュ避けのためにキャッシュキーを付与する
             virtual_playlist += f'segment?session_id={self.session_id}&sequence={segment.sequence_index}&cache_key={cache_key}\n'
 
-        virtual_playlist += '#EXT-X-ENDLIST\n'
+        if self.recorded_program.recorded_video.status != 'Recording':
+            virtual_playlist += '#EXT-X-ENDLIST\n'
         return virtual_playlist
 
 
@@ -508,10 +773,17 @@ class VideoStream:
                 )
                 return
 
-            recorded_video = self.recorded_program.recorded_video
+            recorded_video = self.getSourceRecordedProgram(segment_sequence).recorded_video
             file_path = Path(recorded_video.file_path)
 
             if recorded_video.container_format == 'MPEG-TS':
+                if self._recording_playback_tracker is not None:
+                    snapshot = self._recording_playback_tracker.getSnapshot()
+                    if self._ts_stream_info is None and snapshot.stream_info is not None:
+                        self._ts_stream_info = snapshot.stream_info
+                    if self._ts_source_base_dts is None and snapshot.source_base_dts is not None:
+                        self._ts_source_base_dts = snapshot.source_base_dts
+
                 # segment_map は再生開始位置のキャッシュなので、見つかればファイル I/O なしで即座に使う
                 segment_map_entry = self._segment_map_by_sequence.get(segment_sequence)
                 if segment_map_entry is not None:
@@ -537,14 +809,32 @@ class VideoStream:
                         self._ts_stream_info,
                     )
 
-                source_position = await asyncio.to_thread(
-                    TSKeyFrameSeeker.seek,
-                    file_path,
-                    self._ts_stream_info,
-                    segment.playlist_start_seconds,
-                    self._ts_source_base_dts,
-                    round(self._segment_duration_seconds * ts.HZ),
-                )
+                try:
+                    source_position = await asyncio.to_thread(
+                        TSKeyFrameSeeker.seek,
+                        file_path,
+                        self._ts_stream_info,
+                        segment.playlist_start_seconds,
+                        self._ts_source_base_dts,
+                        round(self._segment_duration_seconds * self.ON_DEMAND_KEYFRAME_MAX_AGE_SEGMENTS * ts.HZ),
+                    )
+                except TSKeyFrameNotFoundError as ex:
+                    # 録画中はまだファイル末尾付近の GOP が揃っていない可能性があるため、クライアントに再試行可能な失敗として伝える
+                    ## 録画済みファイルでは同じリクエストを繰り返しても改善しないため、セグメント生成不能として 422 にする
+                    status_code = (
+                        status.HTTP_503_SERVICE_UNAVAILABLE
+                        if recorded_video.status == 'Recording'
+                        else status.HTTP_422_UNPROCESSABLE_ENTITY
+                    )
+                    logging.warning(
+                        f'{self.log_prefix}[Segment {segment_sequence}] '
+                        f'Failed to resolve TS keyframe near requested time.',
+                        exc_info=ex,
+                    )
+                    raise HTTPException(
+                        status_code = status_code,
+                        detail = 'Keyframe was not found near requested time',
+                    ) from ex
                 segment.source_file_position = source_position.source_file_position
                 segment.source_start_dts = source_position.source_start_dts
 
@@ -560,6 +850,19 @@ class VideoStream:
                 logging.info(
                     f'{self.log_prefix}[Segment {segment_sequence}] '
                     f'Segment source position resolved by TS seek. '
+                    f'[elapsed: {(time.perf_counter() - resolve_start_time) * 1000:.1f}ms]'
+                )
+                return
+
+            # MMT/TLV は libaribtlv の RecordingIndex を利用する FFmpeg の input seek に開始位置の解決を任せる
+            ## FFmpeg は直前の RAP からデコードした上で -ss の指定時刻までのフレームを破棄するため、
+            ## HLS 分割側の論理タイムラインは要求されたプレイリスト時刻をそのまま起点にできる
+            if recorded_video.container_format == 'MMT/TLV':
+                segment.source_file_position = None
+                segment.source_start_dts = round(segment.source_start_seconds * ts.HZ)
+                logging.info(
+                    f'{self.log_prefix}[Segment {segment_sequence}] '
+                    f'Segment source position delegated to FFmpeg MMT/TLV seek. '
                     f'[elapsed: {(time.perf_counter() - resolve_start_time) * 1000:.1f}ms]'
                 )
                 return
@@ -771,92 +1074,121 @@ class VideoStream:
             return None
 
         # セグメントのシーケンス番号が不正な場合は None を返す
-        if segment_sequence < 0 or segment_sequence >= len(self._segments):
+        if segment_sequence < 0:
             return None
+        if segment_sequence >= len(self._segments):
+            if self.recorded_program.recorded_video.status == 'Recording':
+                await self.__refreshRecordingSegments()
+                if segment_sequence >= len(self._segments):
+                    raise HTTPException(
+                        status_code = status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail = 'Segment is not ready yet',
+                    )
+            else:
+                return None
 
-        # シーケンス番号に対応する HLS セグメントを取得する
-        segment = self._segments[segment_sequence]
+        # EXT-X-GAP のセグメントはクライアントが通常取得しないが、実装差で要求されてもエンコーダーは起動しない。
+        ## 空データを返すことで、存在しない録画範囲を誤って前後のファイルから補完することを防ぐ。
+        if self._segments[segment_sequence].is_gap is True:
+            logging.info(f'{self.log_prefix}[Segment {segment_sequence}] Skipped an unrecorded timeline gap.')
+            return b''
 
-        # 当該セグメントのエンコードがまだ完了していない場合は、エンコードタスクを非同期で開始する
-        if segment.encode_status == 'Pending':
-            async with self._video_encoding_task_lock:
-                # ロック待ちの間に終了処理が始まった場合は、新しいエンコードタスクを作成しない
-                if self._is_destroyed is True:
-                    return None
+        # 同時リクエスト数をチェック
+        if self._active_segment_requests >= self.MAX_ACTIVE_SEGMENT_REQUESTS:
+            logging.warning(f'{self.log_prefix}[Segment {segment_sequence}] Too many concurrent requests (current: {self._active_segment_requests}), rejecting.')
+            raise HTTPException(
+                status_code = status.HTTP_429_TOO_MANY_REQUESTS,
+                detail = 'Too many concurrent segment requests for this session',
+            )
 
-                # ロック待ちの間に他のリクエストがすでにエンコードを開始している可能性があるため再確認する
-                if segment.encode_status == 'Pending':
-                    # シークでは旧エンコーダーが同じ録画ファイルを読み続けていると、未キャッシュ区間の探索と I/O が競合する
-                    ## そのため source position 解決より前に旧タスクへキャンセルを投げ、探索が録画ファイルを読みやすい状態へ寄せる
-                    if self._video_encoding_task_ref is not None:
-                        await self.__cancelVideoEncodingTask(should_wait_for_runner = False)
-                        logging.info(
-                            f'{self.log_prefix}[Segment {segment_sequence}] '
-                            f'Previous Encoding Task Canceled before source position resolution.'
-                        )
+        # 並行リクエスト数をインクリメント
+        self._active_segment_requests += 1
+        logging.info(f'{self.log_prefix}[Segment {segment_sequence}] Active requests: {self._active_segment_requests}')
 
-                    # このセグメントからエンコーダーを起動するため、入力ソース上の開始位置を先に確定する
-                    await self.resolveSegmentSourcePosition(segment_sequence)
-                    encoding_start_sequence = segment_sequence
+        try:
+            # シーケンス番号に対応する HLS セグメントを取得する
+            segment = self._segments[segment_sequence]
 
-                    # QSVEncC では MPEG-TS の入力 DTS が 33bit ラップ直前にある状態で起動すると、
-                    ## `check_pts()` が後続フレームの時刻を逆行扱いして小刻みな PTS 補正を入れてしまい、結果盛大に音ズレする既知の問題がある
-                    ## 同一ファイルでも FFmpeg / NVEncC では正常な間隔でエンコードできているため、QSVEncC のみ少し手前から連続エンコードする
-                    ## 映像ストリーム構成が途中で変わる録画は VideoEncodingTask 側で FFmpeg に固定されるため、この QSVEncC 専用の回避策は適用不要
-                    if (
-                        Config().general.encoder == 'QSVEncC' and
-                        self.recorded_program.recorded_video.container_format == 'MPEG-TS' and
-                        self.recorded_program.recorded_video.has_video_stream_changes is False
-                    ):
-                        wrap_avoidance_ticks = self.DTS_WRAP_AVOIDANCE_SECONDS * ts.HZ
-                        backtrack_iterations = 0
-                        while encoding_start_sequence > 0:
-                            backtrack_iterations += 1
-                            if backtrack_iterations > self.DTS_WRAP_AVOIDANCE_MAX_BACKTRACK_SEGMENTS:
-                                logging.warning(
-                                    f'{self.log_prefix}[Segment {segment_sequence}] '
-                                    f'QSVEncC DTS wrap avoidance reached the backtrack limit. '
-                                    f'[encoding_start_sequence: {encoding_start_sequence}]'
-                                )
-                                break
-                            encoding_start_segment = self._segments[encoding_start_sequence]
-                            if encoding_start_segment.source_start_dts is None:
-                                await self.resolveSegmentSourcePosition(encoding_start_sequence)
-                                encoding_start_segment = self._segments[encoding_start_sequence]
-                            assert encoding_start_segment.source_start_dts is not None
-                            distance_to_wrap = ts.PCR_CYCLE - (encoding_start_segment.source_start_dts % ts.PCR_CYCLE)
-                            if distance_to_wrap > wrap_avoidance_ticks:
-                                break
-                            encoding_start_sequence -= 1
-
-                        if encoding_start_sequence != segment_sequence:
+            # 当該セグメントのエンコードがまだ完了していない場合は、エンコードタスクを非同期で開始する
+            if segment.encode_status == 'Pending':
+                async with self._video_encoding_task_lock:
+                    # ロック待ちの間に他のリクエストがすでにエンコードを開始している可能性があるため再確認する
+                    if segment.encode_status == 'Pending':
+                        # シークでは旧エンコーダーが同じ録画ファイルを読み続けていると、未キャッシュ区間の探索と I/O が競合する
+                        ## そのため source position 解決より前に旧タスクへキャンセルを投げ、探索が録画ファイルを読みやすい状態へ寄せる
+                        if self._video_encoding_task_ref is not None:
+                            await self.__cancelVideoEncodingTask(should_wait_for_runner = False)
                             logging.info(
                                 f'{self.log_prefix}[Segment {segment_sequence}] '
-                                f'QSVEncC start adjusted to Segment {encoding_start_sequence} to avoid DTS wrap.',
+                                f'Previous Encoding Task Canceled before source position resolution.'
                             )
 
-                    # 新しいエンコードタスクのインスタンスを初期化
-                    ## エンコードタスクは基本使い回せないので、再度新しく初期化する
-                    self._video_encoding_task = VideoEncodingTask(self)
+                        # このセグメントからエンコーダーを起動するため、入力ソース上の開始位置を先に確定する
+                        await self.resolveSegmentSourcePosition(segment_sequence)
+                        encoding_start_sequence = segment_sequence
 
-                    # 新しいエンコードタスクを開始
-                    self._video_encoding_task_ref = asyncio.create_task(self._video_encoding_task.run(encoding_start_sequence))
-                    self.__registerVideoEncodingTaskRef(self._video_encoding_task_ref)
-                    logging.info(f'{self.log_prefix}[Segment {encoding_start_sequence}] New Encoding Task Started.')
+                        # QSVEncC では MPEG-TS の入力 DTS が 33bit ラップ直前にある状態で起動すると、
+                        ## `check_pts()` が後続フレームの時刻を逆行扱いして小刻みな PTS 補正を入れてしまい、結果盛大に音ズレする既知の問題がある
+                        ## 同一ファイルでも FFmpeg / NVEncC では正常な間隔でエンコードできているため、QSVEncC のみ少し手前から連続エンコードする
+                        ## 映像ストリーム構成が途中で変わる録画は VideoEncodingTask 側で FFmpeg に固定されるため、この QSVEncC 専用の回避策は適用不要
+                        if (
+                            Config().general.encoder == 'QSVEncC' and
+                            self.recorded_program.recorded_video.container_format == 'MPEG-TS' and
+                            self.recorded_program.recorded_video.has_video_stream_changes is False
+                        ):
+                            wrap_avoidance_ticks = self.DTS_WRAP_AVOIDANCE_SECONDS * ts.HZ
+                            backtrack_iterations = 0
+                            while encoding_start_sequence > 0:
+                                backtrack_iterations += 1
+                                if backtrack_iterations > self.DTS_WRAP_AVOIDANCE_MAX_BACKTRACK_SEGMENTS:
+                                    logging.warning(
+                                        f'{self.log_prefix}[Segment {segment_sequence}] '
+                                        f'QSVEncC DTS wrap avoidance reached the backtrack limit. '
+                                        f'[encoding_start_sequence: {encoding_start_sequence}]'
+                                    )
+                                    break
+                                encoding_start_segment = self._segments[encoding_start_sequence]
+                                if encoding_start_segment.source_start_dts is None:
+                                    await self.resolveSegmentSourcePosition(encoding_start_sequence)
+                                    encoding_start_segment = self._segments[encoding_start_sequence]
+                                assert encoding_start_segment.source_start_dts is not None
+                                distance_to_wrap = ts.PCR_CYCLE - (encoding_start_segment.source_start_dts % ts.PCR_CYCLE)
+                                if distance_to_wrap > wrap_avoidance_ticks:
+                                    break
+                                encoding_start_sequence -= 1
 
-        # セグメントデータの Future が完了したらそのデータを返す
-        encoded_segment_ts = await asyncio.shield(segment.encoded_segment_ts_future)
-        segment.is_encoded_segment_ts_future_readed = True
+                            if encoding_start_sequence != segment_sequence:
+                                logging.info(
+                                    f'{self.log_prefix}[Segment {segment_sequence}] '
+                                    f'QSVEncC start adjusted to Segment {encoding_start_sequence} to avoid DTS wrap.',
+                                )
 
-        # 読み取り済みのセグメントが MAX_READED_SEGMENTS 個以上ある場合、一番古いセグメントのデータを初期化する
-        readed_segments = [s for s in self._segments if s.is_encoded_segment_ts_future_readed]
-        if len(readed_segments) >= self.MAX_READED_SEGMENTS:
-            # 一番古いセグメントを取得し、状態をリセットする
-            oldest_segment = readed_segments[0]
-            await oldest_segment.resetState()
-            logging.info(f'{self.log_prefix}[Segment {oldest_segment.sequence_index}] Reset segment data to free memory.')
+                        # 新しいエンコードタスクのインスタンスを初期化
+                        ## エンコードタスクは基本使い回せないので、再度新しく初期化する
+                        self._video_encoding_task = VideoEncodingTask(self)
 
-        return encoded_segment_ts
+                        # 新しいエンコードタスクを開始
+                        self._video_encoding_task_ref = asyncio.create_task(self._video_encoding_task.run(encoding_start_sequence))
+                        self.__registerVideoEncodingTaskRef(self._video_encoding_task_ref)
+                        logging.info(f'{self.log_prefix}[Segment {encoding_start_sequence}] New Encoding Task Started.')
+
+            # セグメントデータの Future が完了したらそのデータを返す
+            encoded_segment_ts = await asyncio.shield(segment.encoded_segment_ts_future)
+            segment.is_encoded_segment_ts_future_readed = True
+
+            # 読み取り済みのセグメントが MAX_READED_SEGMENTS 個以上ある場合、一番古いセグメントのデータを初期化する
+            readed_segments = [s for s in self._segments if s.is_encoded_segment_ts_future_readed]
+            if len(readed_segments) >= self.MAX_READED_SEGMENTS:
+                # 一番古いセグメントを取得し、状態をリセットする
+                oldest_segment = readed_segments[0]
+                await oldest_segment.resetState()
+                logging.info(f'{self.log_prefix}[Segment {oldest_segment.sequence_index}] Reset segment data to free memory.')
+
+            return encoded_segment_ts
+        finally:
+            # 並行リクエスト数をデクリメント
+            self._active_segment_requests -= 1
+            logging.info(f'{self.log_prefix}[Segment {segment_sequence}] Request completed. Active requests: {self._active_segment_requests}')
 
 
     async def __cancelVideoEncodingTask(

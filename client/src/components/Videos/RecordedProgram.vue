@@ -15,7 +15,7 @@
                 <div class="recorded-program__thumbnail-duration">{{ProgramUtils.getProgramDuration(program)}}</div>
                 <div v-if="program.recorded_video.status === 'Recording'" class="recorded-program__thumbnail-status recorded-program__thumbnail-status--recording">
                     <div class="recorded-program__thumbnail-status-dot"></div>
-                    録画中
+                    追いかけ再生
                 </div>
                 <div v-else-if="isOfflineJobActive" class="recorded-program__thumbnail-status recorded-program__thumbnail-status--downloading">
                     <Icon icon="fluent:arrow-download-16-filled" width="13px" height="13px" />
@@ -58,8 +58,11 @@
                 </div>
                 <div class="recorded-program__content-meta">
                     <div class="recorded-program__content-meta-broadcaster" v-if="program.channel">
-                        <img class="recorded-program__content-meta-broadcaster-icon" loading="lazy" decoding="async"
-                            :src="`${Utils.api_base_url}/channels/${program.channel.id}/logo`">
+                        <div class="recorded-program__content-meta-broadcaster-icon">
+                            <div class="ch-sprite" :chid="program.channel.id">
+                                <img loading="lazy" :src="`${Utils.api_base_url}/channels/${program.channel.id}/logo`">
+                            </div>
+                        </div>
                         <span class="recorded-program__content-meta-broadcaster-name">Ch: {{program.channel.channel_number}} {{program.channel.name}}</span>
                     </div>
                     <div class="recorded-program__content-meta-broadcaster" v-else>
@@ -126,61 +129,8 @@
                     <path fill="currentColor" d="M7 3h2a1 1 0 0 0-2 0M6 3a2 2 0 1 1 4 0h4a.5.5 0 0 1 0 1h-.564l-1.205 8.838A2.5 2.5 0 0 1 9.754 15H6.246a2.5 2.5 0 0 1-2.477-2.162L2.564 4H2a.5.5 0 0 1 0-1zm1 3.5a.5.5 0 0 0-1 0v5a.5.5 0 0 0 1 0zM9.5 6a.5.5 0 0 0-.5.5v5a.5.5 0 0 0 1 0v-5a.5.5 0 0 0-.5-.5"></path>
                 </svg>
             </div>
-            <div v-if="!forOffline || offlineVideo !== null" class="recorded-program__menu">
-                <v-menu location="bottom end" :close-on-content-click="true">
-                    <template v-slot:activator="{ props }">
-                        <div v-ripple class="recorded-program__menu-button"
-                            v-bind="props"
-                            @click.prevent.stop=""
-                            @mousedown.prevent.stop="">
-                            <svg width="19px" height="19px" viewBox="0 0 16 16">
-                                <path fill="currentColor" d="M9.5 13a1.5 1.5 0 1 1-3 0a1.5 1.5 0 0 1 3 0m0-5a1.5 1.5 0 1 1-3 0a1.5 1.5 0 0 1 3 0m0-5a1.5 1.5 0 1 1-3 0a1.5 1.5 0 0 1 3 0"/>
-                            </svg>
-                        </div>
-                    </template>
-                    <v-list density="compact" bg-color="background-lighten-1" class="recorded-program__menu-list">
-                        <v-list-item @click="showOfflineDownload = true" :disabled="program.recorded_video.status === 'Recording'">
-                            <template v-slot:prepend>
-                                <Icon icon="fluent:cloud-arrow-down-20-regular" width="20px" height="20px" />
-                            </template>
-                            <v-list-item-title class="ml-3">オフライン再生用に保存 ({{offlineMenuSizeLabel}})</v-list-item-title>
-                        </v-list-item>
-                        <v-list-item @click="show_video_info = true">
-                            <template v-slot:prepend>
-                                <svg width="20px" height="20px" viewBox="0 0 16 16">
-                                    <path fill="currentColor" d="M8.499 7.5a.5.5 0 1 0-1 0v3a.5.5 0 0 0 1 0zm.25-2a.749.749 0 1 1-1.499 0a.749.749 0 0 1 1.498 0M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1M2 8a6 6 0 1 1 12 0A6 6 0 0 1 2 8"></path>
-                                </svg>
-                            </template>
-                            <v-list-item-title class="ml-3">録画ファイル情報を表示</v-list-item-title>
-                        </v-list-item>
-                        <v-list-item @click="downloadVideo" :disabled="program.recorded_video.status === 'Recording'">
-                            <template v-slot:prepend>
-                                <Icon icon="fluent:arrow-download-24-regular" width="20px" height="20px" />
-                            </template>
-                            <v-list-item-title class="ml-3">録画ファイル本体をダウンロード ({{ Utils.formatBytes(program.recorded_video.file_size) }})</v-list-item-title>
-                        </v-list-item>
-                        <v-list-item @click="reanalyzeVideo" v-ftooltip="'再生時に必要な録画ファイル情報・番組情報・サムネイルなどをすべて再解析・再生成します（数分かかります）'">
-                            <template v-slot:prepend>
-                                <Icon icon="fluent:book-arrow-clockwise-20-regular" width="20px" height="20px" />
-                            </template>
-                            <v-list-item-title class="ml-3">メタデータを再解析</v-list-item-title>
-                        </v-list-item>
-                        <v-list-item @click="regenerateThumbnail()" v-ftooltip="'サムネイルのみを再生成します（数分かかります） 変更を反映するにはブラウザキャッシュの削除が必要です'">
-                            <template v-slot:prepend>
-                                <Icon icon="fluent:image-arrow-counterclockwise-24-regular" width="20px" height="20px" />
-                            </template>
-                            <v-list-item-title class="ml-3">サムネイルを再生成</v-list-item-title>
-                        </v-list-item>
-                        <v-divider></v-divider>
-                        <v-list-item @click="showDeleteConfirmation" :disabled="program.recorded_video.status === 'Recording'" class="recorded-program__menu-list-item--danger">
-                            <template v-slot:prepend>
-                                <Icon icon="fluent:delete-20-regular" width="20px" height="20px" />
-                            </template>
-                            <v-list-item-title class="ml-3">録画ファイルを削除</v-list-item-title>
-                        </v-list-item>
-                    </v-list>
-                </v-menu>
-            </div>
+            <RecordedProgramMenu v-if="!forOffline || offlineVideo !== null"
+                :program="program" @deleted="emit('deleted', $event)" />
         </div>
         <div v-if="displayedOfflineDownloadProgress !== null" class="recorded-program__offline-progress">
             <div class="recorded-program__offline-progress-bar"
@@ -188,9 +138,6 @@
             </div>
         </div>
     </component>
-    <RecordedFileInfoDialog :program="program" v-model:show="show_video_info" />
-    <OfflineVideoDownloadDialog :program="program" v-model:show="showOfflineDownload" />
-
     <!-- オフライン保存削除確認ダイアログ -->
     <v-dialog v-model="showOfflineDeleteConfirmation" max-width="715">
         <v-card>
@@ -224,43 +171,17 @@
         </v-card>
     </v-dialog>
 
-    <!-- 録画ファイル削除確認ダイアログ -->
-    <v-dialog max-width="750" v-model="show_delete_confirmation">
-        <v-card>
-            <v-card-title class="d-flex justify-center pt-6 font-weight-bold">本当に録画ファイルを削除しますか？</v-card-title>
-            <v-card-text class="pt-2 pb-0">
-                <div class="delete-confirmation__file-path mb-4">{{ program.recorded_video.file_path }}</div>
-                <div class="text-error-lighten-1 font-weight-bold">
-                    この録画ファイルに関連するすべてのデータ (サムネイル / .ts.program.txt / .ts.err を含む) が削除されます。<br>
-                    元に戻すことはできません。本当に録画ファイルを削除しますか？
-                </div>
-            </v-card-text>
-            <v-card-actions class="pt-4 px-6 pb-6">
-                <v-spacer></v-spacer>
-                <v-btn color="text" variant="text" @click="show_delete_confirmation = false">
-                    <Icon icon="fluent:dismiss-16-filled" width="18px" height="18px" />
-                    <span class="ml-1">キャンセル</span>
-                </v-btn>
-                <v-btn class="px-3" color="error" variant="flat" @click="deleteVideo">
-                    <Icon icon="fluent:delete-16-regular" width="18px" height="18px" />
-                    <span class="ml-1">録画ファイルを削除</span>
-                </v-btn>
-            </v-card-actions>
-        </v-card>
-    </v-dialog>
 </template>
 <script lang="ts" setup>
 
 import { ref, computed, watch } from 'vue';
 
-import OfflineVideoDownloadDialog from '@/components/Videos/Dialogs/OfflineVideoDownloadDialog.vue';
-import RecordedFileInfoDialog from '@/components/Videos/Dialogs/RecordedFileInfoDialog.vue';
+import RecordedProgramMenu from '@/components/Videos/RecordedProgramMenu.vue';
 import Message from '@/message';
 import OfflineVideos, { type IOfflineDownloadJob, type IOfflineVideo } from '@/services/OfflineVideos';
-import Videos, { type IRecordedProgram } from '@/services/Videos';
+import { type IRecordedProgram } from '@/services/Videos';
 import useSettingsStore from '@/stores/SettingsStore';
-import useUserStore from '@/stores/UserStore';
-import Utils, { PlayerUtils, ProgramUtils } from '@/utils';
+import Utils, { ProgramUtils } from '@/utils';
 
 // Props
 const props = withDefaults(defineProps<{
@@ -285,39 +206,10 @@ const emit = defineEmits<{
     (e: 'dismissOfflineJob', jobID: string): void;
 }>();
 
-// ファイル情報ダイアログの表示状態
-const show_video_info = ref(false);
-// 削除確認ダイアログの表示状態
-const show_delete_confirmation = ref(false);
-// オフライン保存ダイアログの表示状態
-const showOfflineDownload = ref(false);
 // オフライン保存削除確認ダイアログの表示状態
 const showOfflineDeleteConfirmation = ref(false);
 // オフライン保存の削除中は確定ボタンの二重操作を防ぐ
 const isDeletingOfflineVideo = ref(false);
-
-// 録画ファイルのダウンロード (location.href を変更し、ダウンロード自体はブラウザに任せる)
-const downloadVideo = () => {
-    window.location.href = `${Utils.api_base_url}/videos/${props.program.id}/download`;
-};
-
-// メタデータ再解析
-const reanalyzeVideo = async () => {
-    Message.success('メタデータの再解析を開始します。完了までしばらくお待ちください。');
-    const result = await Videos.reanalyzeVideo(props.program.id);
-    if (result === true) {
-        Message.success('メタデータの再解析が完了しました。');
-    }
-};
-
-// サムネイル再生成
-const regenerateThumbnail = async () => {
-    Message.success('サムネイルの再生成を開始しました。完了までしばらくお待ちください。');
-    const result = await Videos.regenerateThumbnail(props.program.id);
-    if (result === true) {
-        Message.success('サムネイルの再生成が完了しました。');
-    }
-};
 
 // マイリストに追加/削除
 const settingsStore = useSettingsStore();
@@ -402,7 +294,7 @@ const rootTag = computed(() => isOfflineInteractionBlocked.value === true ? 'div
 const rootBindings = computed(() => {
     if (rootTag.value !== 'router-link') return {};
     return {
-        to: props.program.recorded_video.status === 'Recorded'
+        to: props.program.recorded_video.status !== 'AnalysisFailed'
             ? (props.forOffline ? `/videos/watch/${props.program.id}?source=offline` : `/videos/watch/${props.program.id}`)
             : { path: '' },
     };
@@ -439,6 +331,7 @@ const offlineSizeLabel = computed(() => {
             OfflineVideos.estimateDisplaySizeBytes(
                 props.program.recorded_video.duration,
                 props.offlineDownloadJob.quality,
+                props.program.recorded_video.file_size,
             ),
             true,
         );
@@ -455,6 +348,7 @@ const offlineSizeLabel = computed(() => {
             OfflineVideos.estimateDisplaySizeBytes(
                 props.program.recorded_video.duration,
                 props.offlineDownloadJob.quality,
+                props.program.recorded_video.file_size,
             ),
             true,
         );
@@ -463,18 +357,20 @@ const offlineSizeLabel = computed(() => {
     return null;
 });
 
-// 録画一覧メニュー向けの既定画質 (720p) 見積もり容量
-const offlineMenuSizeLabel = computed(() => {
-    const isHEVC = PlayerUtils.isHEVCVideoSupported();
-    return OfflineVideos.formatDefaultMenuSizeLabel(props.program, isHEVC);
-});
 
 // 保存ジョブの進捗率 (0〜99)。完了確定前は 100% にしない
 const offlineDownloadProgress = computed(() => {
     if (isOfflineJobActive.value === false || props.offlineDownloadJob === null) return null;
     if (props.offlineDownloadJob.state === 'Finalizing') return 99;
-    if (props.offlineDownloadJob.estimated_size_bytes <= 0) return 0;
-    return Math.min(99, (props.offlineDownloadJob.downloaded_bytes / props.offlineDownloadJob.estimated_size_bytes) * 100);
+
+    // ジョブ開始時に固定した estimated_size_bytes は表示のたびに再見積もりする
+    const estimatedSizeBytes = OfflineVideos.estimateJobSizeBytes(
+        props.program.recorded_video.duration,
+        props.offlineDownloadJob.quality,
+        props.program.recorded_video.file_size,
+    );
+    if (estimatedSizeBytes === null || estimatedSizeBytes <= 0) return 0;
+    return Math.min(99, (props.offlineDownloadJob.downloaded_bytes / estimatedSizeBytes) * 100);
 });
 
 // 進捗更新のたびに 0% へ戻ってから伸び直す見え方を避けるため、表示値は単調増加だけを反映する
@@ -529,28 +425,6 @@ const confirmDeleteOfflineVideo = async (): Promise<void> => {
     Message.success('オフライン保存を削除しました。');
 };
 
-// 録画ファイル削除確認ダイアログを表示
-const showDeleteConfirmation = () => {
-    const userStore = useUserStore();
-    if (userStore.user === null || userStore.user.is_admin === false) {
-        Message.warning('録画ファイルを削除するには管理者権限が必要です。\n管理者アカウントでログインし直してください。');
-        return;
-    }
-    show_delete_confirmation.value = true;
-};
-
-// 録画ファイル削除
-const deleteVideo = async () => {
-    show_delete_confirmation.value = false;
-    Message.info('録画ファイルの削除を開始します。完了までしばらくお待ちください。');
-
-    const result = await Videos.deleteVideo(props.program.id);
-    if (result === true) {
-        Message.success('録画ファイルを削除しました。');
-        // 親コンポーネントに削除イベントを発行
-        emit('deleted', props.program.id);
-    }
-};
 
 </script>
 <style lang="scss" scoped>
@@ -786,10 +660,13 @@ const deleteVideo = async () => {
 
                 &-icon {
                     flex-shrink: 0;
-                    width: 28px;
-                    height: 16px;
+                    --ch-sprite-width: 28;
+                    --ch-sprite-height: 16;
+                    --ch-sprite-border-radius: 2;
+                    width: calc(var(--ch-sprite-width) * 1px);
+                    height: calc(var(--ch-sprite-height) * 1px);
                     margin-right: 10px;
-                    border-radius: 2px;
+                    border-radius: calc(var(--ch-sprite-border-radius) * 1px);
                     // 読み込まれるまでのアイコンの背景
                     background: linear-gradient(150deg, rgb(var(--v-theme-gray)), rgb(var(--v-theme-background-lighten-2)));
                     object-fit: cover;
@@ -798,8 +675,8 @@ const deleteVideo = async () => {
                     }
                     @include smartphone-vertical {
                         margin-right: 4px;
-                        width: 24px;
-                        height: 14px;
+                        --ch-sprite-width: 24;
+                        --ch-sprite-height: 14;
                     }
                 }
 
@@ -1061,103 +938,6 @@ const deleteVideo = async () => {
         }
     }
 
-    &__menu {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        flex-shrink: 0;
-        position: absolute;
-        top: 65%;
-        right: 12px;
-        transform: translateY(-50%);
-        cursor: pointer;
-        @include tablet-vertical {
-            right: 6px;
-        }
-        @include smartphone-horizontal {
-            right: 6px;
-        }
-        @include smartphone-vertical {
-            right: 4px;
-        }
-
-        &-button {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            width: 32px;
-            height: 32px;
-            color: rgb(var(--v-theme-text-darken-1));
-            border-radius: 50%;
-            transition: color 0.15s ease, background-color 0.15s ease;
-            user-select: none;
-            @include tablet-vertical {
-                width: 28px;
-                height: 28px;
-                svg {
-                    width: 18px;
-                    height: 18px;
-                }
-            }
-            @include smartphone-horizontal {
-                width: 28px;
-                height: 28px;
-                svg {
-                    width: 18px;
-                    height: 18px;
-                }
-            }
-            @include smartphone-vertical {
-                width: 28px;
-                height: 28px;
-                svg {
-                    width: 18px;
-                    height: 18px;
-                }
-            }
-
-            &:before {
-                content: "";
-                position: absolute;
-                top: 0;
-                left: 0;
-                right: 0;
-                bottom: 0;
-                border-radius: inherit;
-                background-color: currentColor;
-                color: inherit;
-                opacity: 0;
-                transition: opacity 0.2s cubic-bezier(0.4, 0, 0.6, 1);
-                pointer-events: none;
-            }
-            &:hover {
-                color: rgb(var(--v-theme-text));
-                &:before {
-                    opacity: 0.15;
-                }
-            }
-            // タッチデバイスで hover を無効にする
-            @media (hover: none) {
-                &:hover {
-                    &:before {
-                        opacity: 0;
-                    }
-                }
-            }
-        }
-
-        &-list {
-            :deep(.v-list-item-title) {
-                text-autospace: normal;
-                font-size: 14px !important;
-            }
-
-            :deep(.v-list-item) {
-                min-height: 36px !important;
-            }
-        }
-    }
-
     &--offline {
         .recorded-program__content-header {
             @include smartphone-vertical {
@@ -1187,7 +967,7 @@ const deleteVideo = async () => {
         }
     }
 
-    &--recording, &--failed, &--offline-blocked {
+    &--failed, &--offline-blocked {
         pointer-events: none;
         &:hover {
             background: rgb(var(--v-theme-background-lighten-1));
@@ -1198,7 +978,7 @@ const deleteVideo = async () => {
             opacity: 0.65;
         }
         .recorded-program__mylist,
-        .recorded-program__menu {
+        :deep(.recorded-program-menu) {
             pointer-events: auto;
         }
     }
@@ -1241,21 +1021,6 @@ const deleteVideo = async () => {
     0% { opacity: 0; }
     50% { opacity: 1; }
     100% { opacity: 0; }
-}
-
-.delete-confirmation {
-    &__file-path {
-        padding: 12px;
-        background-color: rgb(var(--v-theme-background-lighten-1));
-        border-radius: 4px;
-        font-size: 14px;
-        word-break: break-all;
-        white-space: pre-wrap;
-    }
-}
-
-.recorded-program__menu-list-item--danger {
-    color: rgb(var(--v-theme-error)) !important;
 }
 
 </style>

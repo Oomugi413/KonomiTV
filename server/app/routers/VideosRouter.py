@@ -1,7 +1,9 @@
 
 import asyncio
+import difflib
 import json
 import pathlib
+import re
 from datetime import datetime
 from email.utils import parsedate
 from typing import Annotated, Any, Literal
@@ -23,8 +25,13 @@ from starlette.datastructures import Headers
 from tortoise import connections
 
 from app import logging, schemas
-from app.constants import STATIC_DIR, THUMBNAILS_DIR
-from app.metadata.RecordedScanTask import RecordedScanTask
+from app.constants import JST, STATIC_DIR, THUMBNAILS_DIR
+from app.metadata.RecordedScanTask import (
+    RecordedFileMetadataNotStableError,
+    RecordedFileMetadataRefreshError,
+    RecordedScanTask,
+)
+from app.metadata.SeriesIndexer import NormalizeSeriesTitle, ParseSeriesTitle
 from app.metadata.ThumbnailGenerator import ThumbnailGenerator
 from app.metadata.TSInfoAnalyzer import TSInfoAnalyzer
 from app.models.RecordedProgram import RecordedProgram
@@ -32,6 +39,7 @@ from app.models.User import User
 from app.routers.UsersRouter import GetCurrentAdminUser
 from app.utils.DriveIOLimiter import DriveIOLimiter
 from app.utils.JikkyoClient import JikkyoClient
+from app.utils.TSInformation import TSInformation
 
 
 # ルーター
@@ -42,6 +50,251 @@ router = APIRouter(
 
 # ページングで一度に取得する録画番組の数
 PAGE_SIZE = 30
+
+
+def NormalizeSeriesSearchTitle(title: str) -> str:
+    """
+    シリーズ検索用に番組タイトルから話数・副題を取り除いた基準タイトルを生成する。
+
+    Args:
+        title (str): 元の番組タイトル。
+
+    Returns:
+        str: シリーズ検索用の基準タイトル。
+    """
+
+    parsed_title = ParseSeriesTitle(title, [])
+    if parsed_title is not None:
+        return parsed_title.normalized_title
+
+    # 話数を抽出できない番組も候補検索には残すが、Unicode と空白だけを揃える。
+    return NormalizeSeriesTitle(title)
+
+
+def CalculateStringSimilarity(str1: str, str2: str) -> float:
+    """
+    文字列類似度を計算する。
+
+    Args:
+        str1 (str): 比較元文字列。
+        str2 (str): 比較先文字列。
+
+    Returns:
+        float: 0.0〜1.0 の類似度。
+    """
+
+    if str1 == str2:
+        return 1.0
+    if len(str1) == 0 or len(str2) == 0:
+        return 0.0
+
+    # 文字の順序と重複を保持する比較へ切り替え、共通文字が多いだけの別作品が高得点になるのを防ぐ。
+    return difflib.SequenceMatcher(None, str1, str2, autojunk=False).ratio()
+
+
+def CalculateSeriesTitleScore(current_title: str, target_title: str) -> int:
+    """
+    タイトルマッチングスコアを計算する。
+
+    Args:
+        current_title (str): 検索基準番組のタイトル。
+        target_title (str): 候補番組のタイトル。
+
+    Returns:
+        int: タイトルスコア。
+    """
+
+    current_base = NormalizeSeriesSearchTitle(current_title)
+    target_base = NormalizeSeriesSearchTitle(target_title)
+
+    if current_base == target_base and len(current_base) > 0:
+        return 60
+
+    similarity = CalculateStringSimilarity(current_base, target_base)
+    if similarity >= 0.9:
+        return 55
+    if similarity >= 0.8:
+        return 50
+    if similarity >= 0.7:
+        return 40
+
+    keywords = [word for word in re.split(r'[\s\u3000]+', current_base) if len(word) >= 2]
+    if len(keywords) == 0:
+        return 0
+
+    matched = len([keyword for keyword in keywords if keyword in target_base])
+    match_rate = matched / len(keywords)
+    if match_rate >= 0.8:
+        return 35
+    if match_rate >= 0.6:
+        return 25
+    if match_rate >= 0.4:
+        return 15
+    if match_rate >= 0.2:
+        return 8
+    return 0
+
+
+def CalculateSeriesTimeScore(current: schemas.RecordedProgram, target: schemas.RecordedProgram) -> int:
+    """
+    時間帯マッチングスコアを計算する。
+
+    Args:
+        current (schemas.RecordedProgram): 検索基準番組。
+        target (schemas.RecordedProgram): 候補番組。
+
+    Returns:
+        int: 時間帯スコア。
+    """
+
+    current_time = current.start_time
+    target_time = target.start_time
+    date_diff_days = abs((current_time.date() - target_time.date()).days)
+    day_diff = abs((current_time.weekday() - target_time.weekday() + 7) % 7)
+    total_minute_diff = abs(current_time.hour - target_time.hour) * 60 + abs(current_time.minute - target_time.minute)
+
+    if date_diff_days >= 1 and date_diff_days <= 7:
+        if total_minute_diff <= 5:
+            return 20
+        if total_minute_diff <= 15:
+            return 18
+        if total_minute_diff <= 30:
+            return 16
+
+    if day_diff == 0:
+        if total_minute_diff <= 5:
+            return 20
+        if total_minute_diff <= 15:
+            return 18
+        if total_minute_diff <= 30:
+            return 15
+        if total_minute_diff <= 60:
+            return 10
+
+    if total_minute_diff <= 15:
+        return 12
+    if total_minute_diff <= 30:
+        return 8
+    if total_minute_diff <= 60:
+        return 5
+    return 0
+
+
+def GetSeriesChannelType(channel_number: str) -> str:
+    """
+    チャンネル番号から Series パネル用のチャンネル種別を返す。
+
+    Args:
+        channel_number (str): チャンネル番号。
+
+    Returns:
+        str: terrestrial / bs / cs / other のいずれか。
+    """
+
+    try:
+        number = int(channel_number)
+    except ValueError:
+        return 'other'
+    if number >= 1 and number <= 12:
+        return 'terrestrial'
+    if number >= 101 and number <= 999:
+        return 'bs'
+    if number >= 1000:
+        return 'cs'
+    return 'other'
+
+
+def CalculateSeriesChannelScore(current: schemas.RecordedProgram, target: schemas.RecordedProgram) -> int:
+    """
+    チャンネルマッチングスコアを計算する。
+
+    Args:
+        current (schemas.RecordedProgram): 検索基準番組。
+        target (schemas.RecordedProgram): 候補番組。
+
+    Returns:
+        int: チャンネルスコア。
+    """
+
+    if current.channel is None or target.channel is None:
+        return 0
+    if current.channel.id == target.channel.id:
+        return 10
+    if (
+        current.channel.network_id is not None and
+        target.channel.network_id is not None and
+        current.channel.network_id == target.channel.network_id
+    ):
+        return 6
+    if GetSeriesChannelType(current.channel.channel_number) == GetSeriesChannelType(target.channel.channel_number):
+        return 3
+    return 0
+
+
+def CalculateSeriesMetadataScore(current: schemas.RecordedProgram, target: schemas.RecordedProgram) -> int:
+    """
+    メタデータマッチングスコアを計算する。
+
+    Args:
+        current (schemas.RecordedProgram): 検索基準番組。
+        target (schemas.RecordedProgram): 候補番組。
+
+    Returns:
+        int: メタデータスコア。
+    """
+
+    score = 0
+    if current.series_id is not None and current.series_id == target.series_id:
+        return 10
+
+    if len(current.genres) > 0 and len(target.genres) > 0:
+        exact_match = any(
+            current_genre['major'] == target_genre['major'] and
+            current_genre['middle'] == target_genre['middle']
+            for current_genre in current.genres
+            for target_genre in target.genres
+        )
+        if exact_match:
+            series_genres = ['アニメ・特撮', 'ドラマ', '情報・ワイドショー']
+            is_series_genre = any(genre['major'] in series_genres for genre in current.genres)
+            score += 5 if is_series_genre else 4
+        else:
+            major_match = any(
+                current_genre['major'] == target_genre['major']
+                for current_genre in current.genres
+                for target_genre in target.genres
+            )
+            if major_match:
+                score += 2
+
+    duration_diff = abs(current.duration - target.duration)
+    if duration_diff <= 300:
+        score += 3
+    elif duration_diff <= 600:
+        score += 2
+    elif duration_diff <= 900:
+        score += 1
+    return min(score, 10)
+
+
+def CalculateSeriesMatchScore(current: schemas.RecordedProgram, target: schemas.RecordedProgram) -> int:
+    """
+    Series パネルと同じ条件で候補番組の総合スコアを計算する。
+
+    Args:
+        current (schemas.RecordedProgram): 検索基準番組。
+        target (schemas.RecordedProgram): 候補番組。
+
+    Returns:
+        int: 総合スコア。
+    """
+
+    return (
+        CalculateSeriesTitleScore(current.title, target.title) +
+        CalculateSeriesTimeScore(current, target) +
+        CalculateSeriesChannelScore(current, target) +
+        CalculateSeriesMetadataScore(current, target)
+    )
 
 
 async def ConvertRowToRecordedProgram(row: dict[str, Any]) -> schemas.RecordedProgram:
@@ -290,7 +543,9 @@ async def GetThumbnailResponse(
         media_type = media_type,
         stat_result = stat_result,
         headers = {
-            'Cache-Control': 'public, no-transform, immutable, max-age=2592000',  # 30日間キャッシュ
+            # サムネイル再生成後も URL は変わらないため、immutable や長期間の fresh cache を指定してはいけない。
+            ## 毎回 ETag を再検証させることで、未変更時は 304 の軽量レスポンスを返し、再生成時だけ新しい画像を配信する。
+            'Cache-Control': 'public, no-transform, max-age=0, must-revalidate',
         },
     )
 
@@ -321,6 +576,9 @@ async def VideosAPI(
     order: Annotated[Literal['desc', 'asc', 'ids'], Query(description='ソート順序 (desc or asc or ids) 。ids を指定すると、ids パラメータで指定された順序を維持する。')] = 'desc',
     page: Annotated[int, Query(description='ページ番号。')] = 1,
     ids: Annotated[list[int] | None, Query(description='録画番組 ID のリスト。指定時は指定された ID の録画番組のみを返す。')] = None,
+    channel_id: Annotated[str | None, Query(description='チャンネル ID 。指定時は同一チャンネルの録画番組に絞り込む。')] = None,
+    genre: Annotated[str | None, Query(description='ジャンル名。指定時は genres に含まれる録画番組に絞り込む。')] = None,
+    recording_status: Annotated[Literal['Recording', 'Recorded', 'AnalysisFailed'] | None, Query(description='録画状態。指定時は同一状態の録画番組に絞り込む。')] = None,
 ):
     """
     すべての録画番組を一度に 30 件ずつ取得する。<br>
@@ -409,6 +667,19 @@ async def VideosAPI(
         LIMIT ? OFFSET ?
     """
 
+    filter_clauses: list[str] = []
+    filter_params: list[Any] = []
+    if channel_id is not None and channel_id != '':
+        filter_clauses.append('AND rp.channel_id = ?')
+        filter_params.append(channel_id)
+    if genre is not None and genre != '':
+        filter_clauses.append('AND rp.genres LIKE ?')
+        filter_params.append(f'%"{genre}"%')
+    if recording_status is not None:
+        filter_clauses.append('AND rv.status = ?')
+        filter_params.append(recording_status)
+    filter_where_clause = '\n        '.join(filter_clauses)
+
     # ids が指定されている場合は、指定された ID の録画番組のみを返す
     target_ids: list[int] | None = None
     if ids is not None:
@@ -424,43 +695,53 @@ async def VideosAPI(
 
             # IN 句のプレースホルダーを生成
             placeholders = ','.join(['?' for _ in target_ids])
+            where_clause = f'AND rp.id IN ({placeholders})'
+            if filter_where_clause:
+                where_clause = f'{where_clause}\n        {filter_where_clause}'
             query = base_query.format(
-                where_clause = f'AND rp.id IN ({placeholders})',
+                where_clause = where_clause,
                 order = 'DESC'  # order は無視されるが、SQL の構文上必要
             )
-            params = [*target_ids, str(PAGE_SIZE), '0']  # OFFSET は 0 固定
+            params = [*target_ids, *filter_params, str(PAGE_SIZE), '0']  # OFFSET は 0 固定
 
             # 総数を取得
-            total_query = 'SELECT COUNT(*) as count FROM recorded_programs WHERE id IN ({})'.format(
-                ','.join(['?' for _ in ids])
+            total_query = 'SELECT COUNT(*) as count FROM recorded_programs rp JOIN recorded_videos rv ON rp.id = rv.recorded_program_id WHERE rp.id IN ({}) {}'.format(
+                ','.join(['?' for _ in ids]),
+                filter_where_clause,
             )
-            total_params = ids
+            total_params = [*ids, *filter_params]
 
         else:
+            id_where_clause = f'AND rp.id IN ({",".join(["?" for _ in ids])})'
+            where_clause = id_where_clause
+            if filter_where_clause:
+                where_clause = f'{where_clause}\n        {filter_where_clause}'
             # 通常のソート順で取得
             query = base_query.format(
-                where_clause = f'AND rp.id IN ({",".join(["?" for _ in ids])})',
+                where_clause = where_clause,
                 order = 'DESC' if order == 'desc' else 'ASC'
             )
-            params = [*ids, str(PAGE_SIZE), str((page - 1) * PAGE_SIZE)]
+            params = [*ids, *filter_params, str(PAGE_SIZE), str((page - 1) * PAGE_SIZE)]
 
             # 総数を取得
-            total_query = 'SELECT COUNT(*) as count FROM recorded_programs WHERE id IN ({})'.format(
+            total_query = 'SELECT COUNT(*) as count FROM recorded_programs rp JOIN recorded_videos rv ON rp.id = rv.recorded_program_id WHERE rp.id IN ({}) {}'.format(
                 ','.join(['?' for _ in ids])
+                ,
+                filter_where_clause,
             )
-            total_params = ids
+            total_params = [*ids, *filter_params]
 
     else:
         # すべての録画番組を返す
         query = base_query.format(
-            where_clause = '',
+            where_clause = filter_where_clause,
             order = 'DESC' if order == 'desc' else 'ASC'
         )
-        params = [str(PAGE_SIZE), str((page - 1) * PAGE_SIZE)]
+        params = [*filter_params, str(PAGE_SIZE), str((page - 1) * PAGE_SIZE)]
 
         # 総数を取得
-        total_query = 'SELECT COUNT(*) as count FROM recorded_programs'
-        total_params = []
+        total_query = f'SELECT COUNT(*) as count FROM recorded_programs rp JOIN recorded_videos rv ON rp.id = rv.recorded_program_id WHERE 1=1 {filter_where_clause}'
+        total_params = filter_params
 
     try:
         # データベースから直接クエリを実行
@@ -677,6 +958,328 @@ async def VideosSearchAPI(
 
 
 @router.get(
+    '/related',
+    summary = '関連録画番組 API',
+    response_description = '指定された録画番組と同一シリーズまたは関連する録画番組の情報のリスト。',
+    response_model = schemas.RecordedPrograms,
+)
+async def VideosRelatedAPI(
+    video_id: Annotated[int, Query(description='検索基準となる録画番組の ID 。')],
+    mode: Annotated[Literal['strict', 'relaxed'], Query(description='検索モード。strict は同一シリーズ、relaxed は関連番組まで広げる。')] = 'strict',
+    include_other_channels: Annotated[bool, Query(description='他チャンネルの録画番組も検索対象に含めるかどうか。')] = False,
+    order: Annotated[Literal['desc', 'asc'], Query(description='ソート順序 (desc or asc) 。')] = 'desc',
+    page: Annotated[int, Query(description='ページ番号。')] = 1,
+):
+    """
+    指定された録画番組に関連する録画番組を一度に 30 件ずつ取得する。<br>
+    Series パネル向けに、従来フロントエンドで行っていた候補抽出を DB クエリ側で行う。<br>
+    mode には "strict" か "relaxed" を指定する。<br>
+    include_other_channels が false の場合は同一チャンネルに絞り込む。<br>
+    order には "desc" か "asc" を指定する。
+    """
+
+    # 生 SQL クエリを構築
+    ## ConvertRowToRecordedProgram() に渡すため、VideosAPI と同じ SELECT 形状を維持する。
+    ## Series パネルの既存フィルター条件を機械的に移すため、候補を一度サーバー側でモデル化してから同じスコアリングを適用する。
+    base_query = """
+        SELECT
+            rp.id AS rp_id,
+            rp.recording_start_margin,
+            rp.recording_end_margin,
+            rp.is_partially_recorded,
+            rp.channel_id,
+            rp.network_id,
+            rp.service_id,
+            rp.event_id,
+            rp.series_id,
+            rp.series_broadcast_period_id,
+            rp.title,
+            rp.series_title,
+            rp.episode_number,
+            rp.subtitle,
+            rp.description,
+            rp.detail,
+            rp.start_time,
+            rp.end_time,
+            rp.duration,
+            rp.is_free,
+            rp.genres,
+            rp.primary_audio_type,
+            rp.primary_audio_language,
+            rp.secondary_audio_type,
+            rp.secondary_audio_language,
+            rp.created_at,
+            rp.updated_at,
+            rv.id AS rv_id,
+            rv.status,
+            rv.file_path,
+            rv.file_hash,
+            rv.file_size,
+            rv.file_created_at,
+            rv.file_modified_at,
+            rv.recording_start_time,
+            rv.recording_end_time,
+            rv.duration AS video_duration,
+            rv.container_format,
+            rv.video_codec,
+            rv.video_codec_profile,
+            rv.video_scan_type,
+            rv.video_frame_rate,
+            rv.video_resolution_width,
+            rv.video_resolution_height,
+            rv.has_video_stream_changes,
+            rv.primary_audio_codec,
+            rv.primary_audio_channel,
+            rv.primary_audio_sampling_rate,
+            rv.secondary_audio_codec,
+            rv.secondary_audio_channel,
+            rv.secondary_audio_sampling_rate,
+            rv.cm_sections,
+            rv.thumbnail_info,
+            rv.created_at AS rv_created_at,
+            rv.updated_at AS rv_updated_at,
+            ch.id AS ch_id,
+            ch.display_channel_id,
+            ch.network_id AS ch_network_id,
+            ch.service_id AS ch_service_id,
+            ch.transport_stream_id,
+            ch.remocon_id,
+            ch.channel_number,
+            ch.type,
+            ch.name AS ch_name,
+            ch.jikkyo_force,
+            ch.is_subchannel,
+            ch.is_radiochannel,
+            ch.is_watchable
+        FROM recorded_programs rp
+        JOIN recorded_videos rv ON rp.id = rv.recorded_program_id
+        LEFT JOIN channels ch ON rp.channel_id = ch.id
+        ORDER BY rp.start_time {order}, rp.id {order}
+    """
+
+    query = base_query.format(
+        order = 'DESC' if order == 'desc' else 'ASC',
+    )
+
+    try:
+        # データベースから直接クエリを実行
+        conn = connections.get('default')
+        rows = await conn.execute_query(query, [])
+
+        # 結果を Pydantic モデルに変換
+        all_programs: list[schemas.RecordedProgram] = []
+        for row in rows[1]:  # rows[0] はカラム情報、rows[1] が実際のデータ
+            all_programs.append(await ConvertRowToRecordedProgram(row))
+
+        current_program = next((program for program in all_programs if program.id == video_id), None)
+        if current_program is None:
+            logging.warning(f'[VideosRelatedAPI] Specified video_id was not found. [video_id: {video_id}]')
+            raise HTTPException(
+                status_code = status.HTTP_404_NOT_FOUND,
+                detail = 'Specified video_id was not found',
+            )
+
+        # 永続化済みの Series は fuzzy スコアより信頼できるため、同じ作品 ID の録画だけを返す。
+        if current_program.series_id is not None:
+            related_programs = [
+                program
+                for program in all_programs
+                if program.series_id == current_program.series_id
+                if (
+                    include_other_channels is True or
+                    (
+                        program.channel is not None and
+                        current_program.channel is not None and
+                        program.channel.id == current_program.channel.id
+                    )
+                )
+            ]
+        else:
+            # 話数を確定できない番組だけは従来の関連候補検索を残すが、文字順序を保持する類似度で評価する。
+            score_threshold = 70 if mode == 'strict' else 50
+            related_programs = [
+                program
+                for program in all_programs
+                if CalculateSeriesMatchScore(current_program, program) >= score_threshold
+                if (
+                    include_other_channels is True or
+                    (
+                        program.channel is not None and
+                        current_program.channel is not None and
+                        program.channel.id == current_program.channel.id
+                    )
+                )
+            ]
+
+        total = len(related_programs)
+        offset = (page - 1) * PAGE_SIZE
+        recorded_programs = related_programs[offset:offset + PAGE_SIZE]
+
+        return schemas.RecordedPrograms(
+            total = total,
+            recorded_programs = recorded_programs,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as ex:
+        logging.error('[VideosRelatedAPI] Failed to execute raw SQL query:', exc_info=ex)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail='Failed to execute raw SQL query',
+        )
+
+
+@router.get(
+    '/series/{series_id}',
+    summary = 'シリーズ別録画番組 API',
+    response_description = '指定されたシリーズに属する録画番組の情報のリスト。',
+    response_model = schemas.RecordedPrograms,
+)
+async def VideosBySeriesAPI(
+    series_id: Annotated[int, Path(description='シリーズ番組の ID 。')],
+    series_broadcast_period_id: Annotated[int | None, Query(description='シリーズ放送期間の ID 。指定時は同一放送期間に絞り込む。')] = None,
+    order: Annotated[Literal['desc', 'asc'], Query(description='ソート順序 (desc or asc) 。')] = 'desc',
+    page: Annotated[int, Query(description='ページ番号。')] = 1,
+):
+    """
+    指定されたシリーズ番組に属する録画番組を一度に 30 件ずつ取得する。<br>
+    order には "desc" か "asc" を指定する。<br>
+    page (ページ番号) には 1 以上の整数を指定する。<br>
+    series_broadcast_period_id を指定すると、同一シリーズ内の特定の放送期間だけに絞り込む。
+    """
+
+    # シリーズ ID は RecordedProgram 側にも保持されているため、録画番組一覧としては VideosRouter 側で直接引く。
+    ## /api/series/{series_id} はシリーズメタデータ全体を返す API のまま維持し、録画番組一覧のページングとは分離する。
+    where_conditions = ['rp.series_id = ?']
+    params: list[Any] = [series_id]
+    if series_broadcast_period_id is not None:
+        where_conditions.append('rp.series_broadcast_period_id = ?')
+        params.append(series_broadcast_period_id)
+    where_clause = ' AND '.join(where_conditions)
+
+    # 生 SQL クエリを構築
+    ## ConvertRowToRecordedProgram() に渡すため、VideosAPI と同じ SELECT 形状を維持する。
+    base_query = """
+        SELECT
+            rp.id AS rp_id,
+            rp.recording_start_margin,
+            rp.recording_end_margin,
+            rp.is_partially_recorded,
+            rp.channel_id,
+            rp.network_id,
+            rp.service_id,
+            rp.event_id,
+            rp.series_id,
+            rp.series_broadcast_period_id,
+            rp.title,
+            rp.series_title,
+            rp.episode_number,
+            rp.subtitle,
+            rp.description,
+            rp.detail,
+            rp.start_time,
+            rp.end_time,
+            rp.duration,
+            rp.is_free,
+            rp.genres,
+            rp.primary_audio_type,
+            rp.primary_audio_language,
+            rp.secondary_audio_type,
+            rp.secondary_audio_language,
+            rp.created_at,
+            rp.updated_at,
+            rv.id AS rv_id,
+            rv.status,
+            rv.file_path,
+            rv.file_hash,
+            rv.file_size,
+            rv.file_created_at,
+            rv.file_modified_at,
+            rv.recording_start_time,
+            rv.recording_end_time,
+            rv.duration AS video_duration,
+            rv.container_format,
+            rv.video_codec,
+            rv.video_codec_profile,
+            rv.video_scan_type,
+            rv.video_frame_rate,
+            rv.video_resolution_width,
+            rv.video_resolution_height,
+            rv.has_video_stream_changes,
+            rv.primary_audio_codec,
+            rv.primary_audio_channel,
+            rv.primary_audio_sampling_rate,
+            rv.secondary_audio_codec,
+            rv.secondary_audio_channel,
+            rv.secondary_audio_sampling_rate,
+            rv.cm_sections,
+            rv.thumbnail_info,
+            rv.created_at AS rv_created_at,
+            rv.updated_at AS rv_updated_at,
+            ch.id AS ch_id,
+            ch.display_channel_id,
+            ch.network_id AS ch_network_id,
+            ch.service_id AS ch_service_id,
+            ch.transport_stream_id,
+            ch.remocon_id,
+            ch.channel_number,
+            ch.type,
+            ch.name AS ch_name,
+            ch.jikkyo_force,
+            ch.is_subchannel,
+            ch.is_radiochannel,
+            ch.is_watchable
+        FROM recorded_programs rp
+        JOIN recorded_videos rv ON rp.id = rv.recorded_program_id
+        LEFT JOIN channels ch ON rp.channel_id = ch.id
+        WHERE {where_clause}
+        ORDER BY rp.start_time {order}, rp.id {order}
+        LIMIT ? OFFSET ?
+    """
+
+    query = base_query.format(
+        where_clause = where_clause,
+        order = 'DESC' if order == 'desc' else 'ASC',
+    )
+    query_params = [
+        *params,
+        str(PAGE_SIZE),
+        str((page - 1) * PAGE_SIZE),
+    ]
+
+    total_query = f"""
+        SELECT COUNT(*) as count
+        FROM recorded_programs rp
+        WHERE {where_clause}
+    """
+
+    try:
+        # データベースから直接クエリを実行
+        conn = connections.get('default')
+        rows = await conn.execute_query(query, query_params)
+        total_result = await conn.execute_query(total_query, params)
+        total = total_result[1][0]['count']
+
+        # 結果を Pydantic モデルに変換
+        recorded_programs: list[schemas.RecordedProgram] = []
+        for row in rows[1]:  # rows[0] はカラム情報、rows[1] が実際のデータ
+            recorded_programs.append(await ConvertRowToRecordedProgram(row))
+
+        return schemas.RecordedPrograms(
+            total = total,
+            recorded_programs = recorded_programs,
+        )
+
+    except Exception as ex:
+        logging.error('[VideosBySeriesAPI] Failed to execute raw SQL query:', exc_info=ex)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail='Failed to execute raw SQL query',
+        )
+
+
+@router.get(
     '/{video_id}',
     summary = '録画番組 API',
     response_description = '録画番組の情報。',
@@ -689,16 +1292,42 @@ async def VideoAPI(
     指定された録画番組を取得する。
     """
 
+    # 外部トランスコードでファイルが置き換わっていた場合は、プレイヤーへ古いコーデック情報を返す前に同期的に再解析する。
+    ## ここを詳細 API に限定し、ダウンロード・サムネイル・削除など同じ依存関係を使う別 API では重い解析を発生させない。
+    try:
+        is_refreshed = await RecordedScanTask().refreshRecordedFileMetadataIfNeeded(recorded_program.recorded_video)
+    except RecordedFileMetadataNotStableError as ex:
+        logging.warning(f'[VideosRouter][VideoAPI] Recorded file is still being updated. [video_id: {recorded_program.id}]')
+        raise HTTPException(
+            status_code = status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail = 'Recorded video file is still being updated. Please retry shortly.',
+            headers = {'Retry-After': str(RecordedScanTask.RECORDING_COMPLETE_SECONDS)},
+        ) from ex
+    except RecordedFileMetadataRefreshError as ex:
+        logging.error(
+            f'[VideosRouter][VideoAPI] Failed to refresh recorded file metadata. [video_id: {recorded_program.id}]',
+            exc_info = ex,
+        )
+        raise HTTPException(
+            status_code = status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail = 'Failed to refresh recorded video metadata. Please retry shortly.',
+            headers = {'Retry-After': '5'},
+        ) from ex
+
+    # 解析前の ORM インスタンスには古い値が残るため、DB 保存後は関連レコードを含めて取り直す。
+    if is_refreshed is True:
+        recorded_program = await GetRecordedProgram(recorded_program.id)
+
     return recorded_program
 
 
 @router.get(
     '/{video_id}/download',
     summary = '録画番組ダウンロード API',
-    response_description = '録画番組の MPEG-TS ファイル。',
+    response_description = '録画番組の元ファイル。',
     response_class = FileResponse,
     responses = {
-        200: {'content': {'video/mp2t': {}}},
+        200: {'content': {'video/mp2t': {}, 'application/octet-stream': {}}},
         422: {'description': 'Specified video_id was not found'},
     },
 )
@@ -706,18 +1335,20 @@ async def VideoDownloadAPI(
     recorded_program: Annotated[RecordedProgram, Depends(GetRecordedProgram)],
 ):
     """
-    指定された録画番組の MPEG-TS ファイルをダウンロードする。
+    指定された録画番組の元ファイルをダウンロードする。
     """
 
     # ファイルパスとファイル名を取得
     file_path = recorded_program.recorded_video.file_path
     filename = pathlib.Path(file_path).name
 
-    # MPEG-TS ファイルをダウンロードさせる
+    # MMT/TLV はブラウザで再生させず原始 TLV ファイルとして保存し、それ以外は従来の MPEG-TS MIME を維持する
+    media_type = 'application/octet-stream' \
+        if recorded_program.recorded_video.container_format == 'MMT/TLV' else 'video/mp2t'
     return FileResponse(
         path = file_path,
         filename = filename,
-        media_type = 'video/mp2t',
+        media_type = media_type,
     )
 
 
@@ -740,11 +1371,19 @@ async def VideoJikkyoCommentsAPI(
         (recorded_program.recorded_video.recording_start_time is not None) and
         (recorded_program.recorded_video.recording_end_time is not None)):
 
+        # 録画中は recording_end_time が直近のメタデータ解析時点で止まっているため、
+        # その値を使うと追いかけ再生の過去ログが録画冒頭の短い範囲で途切れてしまう。
+        # コメント時刻の基準はプレイヤーの 0 秒と一致する recording_start_time のままにし、
+        # クエリ終点だけを現在時刻（番組終了後は番組終了時刻）まで延ばす。
+        jikkyo_end_time = recorded_program.recorded_video.recording_end_time
+        if recorded_program.recorded_video.status == 'Recording':
+            jikkyo_end_time = min(datetime.now(tz=JST), recorded_program.end_time)
+
         # ニコニコ実況 過去ログ API から一致する過去ログコメントを取得して返す
         jikkyo_client = JikkyoClient(recorded_program.channel.network_id, recorded_program.channel.service_id)
         jikkyo_comments = await jikkyo_client.fetchJikkyoComments(
             recorded_program.recorded_video.recording_start_time,
-            recorded_program.recorded_video.recording_end_time,
+            jikkyo_end_time,
         )
 
         if recorded_program.recorded_video.container_format != 'MPEG-TS' and jikkyo_comments.comments:
@@ -821,6 +1460,51 @@ async def VideoJikkyoCommentsAPI(
     )
 
 
+@router.get(
+    '/{video_id}/available-channels',
+    summary = '録画番組で利用可能なチャンネル一覧 API',
+    response_model = list[dict[str, Any]],
+)
+async def VideoAvailableChannelsAPI(
+    recorded_program: Annotated[RecordedProgram, Depends(GetRecordedProgram)],
+) -> list[dict[str, Any]]:
+    """
+    指定された録画番組ファイルで利用可能な全チャンネルの一覧を取得する。<br>
+    複数のチャンネルが含まれる TS ファイルの場合、選択可能なチャンネル情報を返す。
+    """
+
+    try:
+        # MPEG-TS ファイルではない場合、空のリストを返す
+        if recorded_program.recorded_video.container_format != 'MPEG-TS':
+            return []
+
+        # TSInfoAnalyzer を使って利用可能なチャンネル情報を取得
+        recorded_video = schemas.RecordedVideo.model_validate(recorded_program.recorded_video, from_attributes=True)
+        analyzer = TSInfoAnalyzer(recorded_video)
+        available_channels: list[dict[str, Any]] = analyzer.collectAllChannels()
+
+        # チャンネル情報を整形して返す
+        result: list[dict[str, Any]] = []
+        for channel in available_channels:
+            result.append({
+                'service_id': channel['service_id'],
+                'channel_name': channel['channel_name'],
+                'network_id': channel['network_id'],
+                'channel_type': channel['channel_type'],
+                'remocon_id': channel['remocon_id'],
+                'is_subchannel': TSInformation.calculateIsSubchannel(channel['channel_type'], channel['service_id'])
+            })
+
+        return result
+
+    except Exception as ex:
+        logging.error(f'[VideoAvailableChannelsAPI] Failed to get available channels for video_id {recorded_program.id}:', exc_info=ex)
+        raise HTTPException(
+            status_code = status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail = f'Failed to get available channels: {ex!s}',
+        )
+
+
 @router.post(
     '/{video_id}/reanalyze',
     summary = '録画番組メタデータ再解析 API',
@@ -828,22 +1512,31 @@ async def VideoJikkyoCommentsAPI(
 )
 async def VideoReanalyzeAPI(
     recorded_program: Annotated[RecordedProgram, Depends(GetRecordedProgram)],
+    selected_service_id: int | None = None,
+    files_only: bool = False,
 ):
     """
-    指定された録画番組のメタデータ（動画情報・番組情報・サムネイル画像・CM 区間情報など）をすべて再解析・再生成する。
+    指定された録画番組のメタデータ（動画情報・番組情報・サムネイル画像・キーフレーム情報・CM 区間情報など）をすべて再解析・再生成する。
+
+    Args:
+        files_only (bool): True の場合、ファイル情報のみを再解析し、CM 区間検出・サムネイル生成・キーフレーム解析をスキップする（デフォルト: False）
     """
 
     try:
         file_path = anyio.Path(recorded_program.recorded_video.file_path)
         # メタデータ再解析を実行
-        ## wait_background_analysis = True 指定時は DriveIOLimiter を掛けるとデッドロックが発生するので、敢えて掛けない
-        ## どのみち内部で実行される RecordedScanTask で DriveIOLimiter を掛けているため、ここで掛ける必要はない
+        ## 重いサムネイル生成と CM 解析は RecordedScanTask の管理下で継続させ、
+        ## メタデータの DB 更新が終わった時点で API レスポンスを返す。
         await RecordedScanTask().processRecordedFile(
             file_path = file_path,
             # 既に DB に登録されている録画ファイルのメタデータを強制的に再解析する
             force_update = True,
-            # API レスポンスの返却をもってメタデータ再解析が完全に完了したことをユーザーに伝えるため、バックグラウンド解析タスクが完了するまで待つ
-            wait_background_analysis = True,
+            # 指定されたサービスID (複数チャンネル選択用)
+            selected_service_id = selected_service_id,
+            # CM 解析とサムネイル生成は数十秒以上掛かるため、HTTP リクエストを待たせない
+            wait_background_analysis = False,
+            # ファイル情報のみを再解析するかどうか
+            files_only = files_only,
         )
 
     except Exception as ex:

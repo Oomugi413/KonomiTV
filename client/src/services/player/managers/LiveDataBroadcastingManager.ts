@@ -404,8 +404,15 @@ class LiveDataBroadcastingManager implements PlayerManager {
 
         // ライブ PSI/SI アーカイブデータデコーダーを初期化
         // Comlink を挟んでいる関係上、コンストラクタにも関わらず Promise を返すため await する必要がある
-        const api_quality = PlayerUtils.extractLiveAPIQualityFromDPlayer(this.player);
-        this.live_psi_archived_data_decoder = await new LivePSIArchivedDataDecoderProxy(channels_store.channel.current, api_quality);
+        const current_api_quality = PlayerUtils.extractLiveAPIQualityFromDPlayer(this.player);
+        // Raw MMTS は既存の LivePSIDataArchiver / LivePSIArchivedDataDecoder が期待する MPEG-TS ではないため、
+        // 現時点では PSI/SI アーカイブデータを利用するデータ放送・番組情報更新は無効化する
+        if (current_api_quality === 'raw-mmts') {
+            console.warn('[LiveDataBroadcastingManager] PSI/SI archived data is unavailable for Raw MMTS.');
+            this.toggleRemoconButtonsLoading(false);
+            return;
+        }
+        this.live_psi_archived_data_decoder = await new LivePSIArchivedDataDecoderProxy(channels_store.channel.current, current_api_quality);
 
         // デコードを開始
         // デコーダーは Web Worker 上で実行される (コールバックを Comlink.proxy() で包むのがポイント)

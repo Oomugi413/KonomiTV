@@ -11,6 +11,10 @@ import Hls, { BufferController, FragmentTracker } from 'hls.js';
 // @ts-ignore
 class CustomBufferController extends BufferController {
 
+    // 録画中ファイルの末尾は、実際に HLS セグメントとして安定して読める位置より少し先に見えることがある。
+    // プレイヤー側では末尾 15 秒を追跡用の余白として扱い、早めに manifest を再読み込みする。
+    private static readonly RECORDING_CHASE_PLAYBACK_EDGE_BUFFER_SECONDS = 15;
+
     // バッファフラッシュ時のイベントハンドラー（独自）
     private onCustomBufferFlushingHandler: () => void;
 
@@ -22,6 +26,12 @@ class CustomBufferController extends BufferController {
 
     // サーバーからのバッファ範囲情報
     private serverBufferingRange: { begin: number, end: number } | null = null;
+
+    // 録画中の追っかけ再生かどうか
+    private isRecordingChasePlayback: boolean = false;
+
+    // 最後に manifest を能動的に再読み込みした時刻
+    private lastManifestReloadedAt: number = 0;
 
 
     constructor(hls: Hls, fragmentTracker: FragmentTracker) {
@@ -57,8 +67,11 @@ class CustomBufferController extends BufferController {
         const hls: Hls = this.hls;
         // @ts-ignore
         const media: HTMLMediaElement = this.media;
+        const playlistUrl = new URL(hls.url!);
+        this.isRecordingChasePlayback = playlistUrl.searchParams.get('recording') === '1';
         // seeking イベントのリスナーを登録
         media.addEventListener('seeking', this.onCustomBufferFlushingHandler);
+        media.addEventListener('timeupdate', this.onCustomBufferFlushingHandler);
         // SSE の接続を開始
         this.sse = new EventSource(hls.url!.replace('playlist', 'buffer'));
         this.sse.addEventListener('buffer_range_update', (event) => {
@@ -77,6 +90,7 @@ class CustomBufferController extends BufferController {
         const media: HTMLMediaElement = this.media;
         // seeking イベントのリスナーを削除
         media.removeEventListener('seeking', this.onCustomBufferFlushingHandler);
+        media.removeEventListener('timeupdate', this.onCustomBufferFlushingHandler);
         // SSE の接続を終了
         if (this.sse) {
             this.sse.close();
@@ -123,6 +137,16 @@ class CustomBufferController extends BufferController {
             isAtEnd = true;
         }
 
+        // 録画中の追っかけ再生では、既存プレイリスト上の末尾に近づいた時点で manifest を積極的に再読込する。
+        // hls.js の EVENT playlist 更新だけに任せると、残り数秒の状態で次のセグメント出現を待つまで UI が止まりやすい。
+        if (
+            this.isRecordingChasePlayback === true &&
+            Number.isFinite(duration) &&
+            duration - media.currentTime <= CustomBufferController.RECORDING_CHASE_PLAYBACK_EDGE_BUFFER_SECONDS
+        ) {
+            this.reloadManifest(hls, 1000);
+        }
+
         // バッファ範囲外かつ再生終了でない場合のみフラッシュとマニフェストの再読み込みを実行
         console.log('[CustomBufferController] Server Buffering Range:', this.serverBufferingRange, 'Current Time:', media.currentTime);
         if (!isInBufferedRange && !isAtEnd) {
@@ -133,15 +157,28 @@ class CustomBufferController extends BufferController {
                 type: null,
             });
             this.dontFlush = true;
-            // マニフェストの再読み込み
-            // URL のクエリパラメータを解析し、cache_key を更新または追加
-            // セッション ID を生成 (セッション ID は UUID の - で区切って一番左側のみを使う)
-            const url = new URL(hls.url!);
-            url.searchParams.set('cache_key', crypto.randomUUID().split('-')[0]);
-            hls.trigger(Hls.Events.MANIFEST_LOADING, {
-                url: url.toString()
-            });
+            this.reloadManifest(hls, 0);
         }
+    }
+
+
+    /**
+     * HLS manifest をキャッシュ避け付きで再読み込みする
+     * @param hls hls.js のインスタンス
+     * @param throttleMs 最低再読込間隔 (ミリ秒)
+     */
+    private reloadManifest(hls: Hls, throttleMs: number): void {
+        const now = performance.now();
+        if (now - this.lastManifestReloadedAt < throttleMs) {
+            return;
+        }
+        this.lastManifestReloadedAt = now;
+
+        const url = new URL(hls.url!);
+        url.searchParams.set('cache_key', crypto.randomUUID().split('-')[0]);
+        hls.trigger(Hls.Events.MANIFEST_LOADING, {
+            url: url.toString(),
+        });
     }
 }
 
