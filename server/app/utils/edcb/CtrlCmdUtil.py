@@ -3,16 +3,48 @@
 # ref: https://stackoverflow.com/a/33533514/17124142
 from __future__ import annotations
 
-import aiofiles
 import asyncio
+import datetime
 import struct
 import sys
 import time
-from pydantic_core import Url
-from typing import Callable, cast, Literal, TypeVar
-from zoneinfo import ZoneInfo
+from collections.abc import Callable
+from typing import Literal, TypeVar, cast
 
-from app.utils.edcb import *
+import aiofiles
+from pydantic_core import Url
+
+from app.constants import JST
+from app.utils.edcb import (
+    AudioComponentInfo,
+    AudioComponentInfoData,
+    AutoAddData,
+    AutoAddDataRequired,
+    ComponentInfo,
+    ContentData,
+    ContentInfo,
+    EventData,
+    EventGroupInfo,
+    EventInfo,
+    ExtendedEventInfo,
+    FileData,
+    ManualAutoAddData,
+    NotifySrvInfo,
+    NWPlayTimeShiftInfo,
+    RecFileInfo,
+    RecFileSetInfo,
+    RecSettingData,
+    ReserveData,
+    ReserveDataRequired,
+    SearchDateInfo,
+    SearchKeyInfo,
+    ServiceEventInfo,
+    ServiceInfo,
+    SetChInfo,
+    ShortEventInfo,
+    TunerProcessStatusInfo,
+    TunerReserveInfo,
+)
 
 
 # ジェネリック型
@@ -29,7 +61,7 @@ class CtrlCmdUtil:
     """
 
     # EDCB の日付は OS のタイムゾーンに関わらず常に UTC+9
-    TZ = ZoneInfo('Asia/Tokyo')
+    TZ = JST
 
     # 読み取った日付が不正なときや既定値に使う UNIX エポック
     UNIX_EPOCH = datetime.datetime(1970, 1, 1, 9, tzinfo=TZ)

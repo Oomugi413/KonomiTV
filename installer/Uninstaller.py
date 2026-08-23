@@ -1,23 +1,26 @@
 
 import os
 import platform
-import subprocess
 import shutil
 import stat
+import subprocess
 from pathlib import Path
-from rich import print
-from rich.padding import Padding
 from typing import Any, Literal
 
-from Utils import CreateBasicInfiniteProgress
-from Utils import CreateTable
-from Utils import CustomConfirm
-from Utils import CustomPrompt
-from Utils import IsDockerComposeV2
-from Utils import IsDockerInstalled
-from Utils import RunSubprocess
-from Utils import ShowPanel
-from Utils import ShowSubProcessErrorLog
+from rich import print
+from rich.padding import Padding
+
+from Utils import (
+    CreateBasicInfiniteProgress,
+    CreateTable,
+    CustomConfirm,
+    CustomPrompt,
+    IsDockerComposeV2,
+    IsDockerInstalled,
+    RunSubprocess,
+    ShowPanel,
+    ShowSubProcessErrorLog,
+)
 
 
 def Uninstaller() -> None:
@@ -107,8 +110,8 @@ def Uninstaller() -> None:
     ShowPanel([
         '[yellow]KonomiTV サーバーに保存されているすべてのユーザーデータが削除されます。',
         'もとに戻すことはできません。本当に KonomiTV をアンインストールしますか？[/yellow]',
-        'なお、config.yaml で指定されたフォルダに保存されているキャプチャ画像は',
-        'アンインストール後も引き続き残りますので、ご安心ください。',
+        'なお、config.yaml で指定されたフォルダに保存されている録画ファイルや',
+        'キャプチャ画像はアンインストール後も引き続き残りますので、ご安心ください。',
     ], padding=(1, 2, 1, 2))
 
     ## 誤実行防止のため、デフォルトは N にしておく
@@ -121,7 +124,9 @@ def Uninstaller() -> None:
 
     if platform_type == 'Windows':
 
-        python_executable_path = uninstall_path / 'server/thirdparty/Python/python.exe'
+        # Windows サービス管理スクリプトは Poetry 経由ではなく、仮想環境の Python 実行ファイルを直接実行する
+        ## Poetry 経由だと Windows で shell 解釈の影響を受け、引数中の記号が崩れる可能性がある
+        venv_python_executable_path = uninstall_path / 'server/.venv/Scripts/python.exe'
 
         # Windows サービスを終了
         print(Padding('Windows サービスを終了しています…', (1, 2, 0, 2)))
@@ -129,7 +134,7 @@ def Uninstaller() -> None:
         progress.add_task('', total=None)
         with progress:
             service_stop_result = subprocess.run(
-                args = [python_executable_path, '-m', 'poetry', 'run', 'python', 'KonomiTV-Service.py', 'stop'],
+                args = [venv_python_executable_path, 'KonomiTV-Service.py', 'stop'],
                 cwd = uninstall_path / 'server/',  # カレントディレクトリを KonomiTV サーバーのベースディレクトリに設定
                 stdout = subprocess.PIPE,  # 標準出力をキャプチャする
                 stderr = subprocess.DEVNULL,  # 標準エラー出力を表示しない
@@ -151,7 +156,7 @@ def Uninstaller() -> None:
         progress.add_task('', total=None)
         with progress:
             service_uninstall_result = subprocess.run(
-                args = [python_executable_path, '-m', 'poetry', 'run', 'python', 'KonomiTV-Service.py', 'uninstall'],
+                args = [venv_python_executable_path, 'KonomiTV-Service.py', 'uninstall'],
                 cwd = uninstall_path / 'server/',  # カレントディレクトリを KonomiTV サーバーのベースディレクトリに設定
                 stdout = subprocess.PIPE,  # 標準出力をキャプチャする
                 stderr = subprocess.DEVNULL,  # 標準エラー出力を表示しない

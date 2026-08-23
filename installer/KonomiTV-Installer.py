@@ -1,31 +1,29 @@
 
 import ctypes
-import distro
-import elevate
 import os
 import platform
 import signal
 import subprocess
 import threading
 import traceback
+from typing import Any
+
+import distro
+import elevate
 from rich import print
 from rich.padding import Padding
 from rich.prompt import Prompt
 from rich.rule import Rule
 from rich.style import Style
-from typing import Any
 
 from Installer import Installer
 from Uninstaller import Uninstaller
 from Updater import Updater
-from Utils import CreateTable
-from Utils import CustomPrompt
-from Utils import GetNetworkDriveList
-from Utils import ShowPanel
+from Utils import CreateTable, CustomPrompt, GetNetworkDriveList, ShowPanel
 
 
 # インストール or アップデート対象の KonomiTV バージョン
-TARGET_VERSION = '0.11.0'
+TARGET_VERSION = '0.14.1'
 
 def ShowHeader():
     print(Padding(Rule(
@@ -116,13 +114,18 @@ def main():
         print(Padding(table, (1, 2, 0, 2)))
 
     ShowPanel([
-        '01. KonomiTV をインストールするときは 1 を、アップデートするときは 2 を、',
-        '    アンインストールするときは 3 を入力してください。',
+        f'01. この PC 上に KonomiTV (version {TARGET_VERSION}) を[bold]新規インストール[/bold]するには [bold cyan]1[/bold cyan] を、',
+        f'    この PC 上の KonomiTV を version {TARGET_VERSION} へ[bold]アップデート[/bold]するには [bold cyan]2[/bold cyan] を、',
+        '    この PC 上の KonomiTV を[bold]アンインストール[/bold]するには [bold cyan]3[/bold cyan] を入力してください。',
+        '',
+        '    master ブランチの最新コミットが反映されている[bold]開発版をインストール[/bold]するには [bold cyan]4[/bold cyan] を、',
+        '    [bold]開発版へアップデート[/bold]するには [bold cyan]5[/bold cyan] を入力してください。',
+        '    なお、開発版の安定動作は保証されていないため、予めご了承の上ご利用ください。',
     ], padding=(1, 2, 1, 2))
 
     # 実行タイプ (インストール or アップデート or アンインストール)
     ## choices を指定することで、自動的にバリデーションが行われる（超便利）
-    run_type = int(CustomPrompt.ask('インストール(1) / アップデート(2) / アンインストール(3)', default='1', choices=['1', '2', '3']))
+    run_type = int(CustomPrompt.ask(f'v{TARGET_VERSION} をインストール (1) / v{TARGET_VERSION} へアップデート (2) / アンインストール (3)\n  開発版をインストール (4) / 開発版へアップデート (5)', default='1', choices=['1', '2', '3', '4', '5']))
 
     # Windows: コンソール出力前のおまじないとして、適当な PowerShell コマンドを実行する
     ## なぜ直るのかは全くもって謎だが、一度 PowerShell コマンドを実行しておくことで、print(Padding('Test', (1, 2, 0, 2)) のように
@@ -143,6 +146,10 @@ def main():
         Updater(TARGET_VERSION)
     elif run_type == 3:
         Uninstaller()
+    elif run_type == 4:
+        Installer('latest')
+    elif run_type == 5:
+        Updater('latest')
 
 
 if __name__ == '__main__':

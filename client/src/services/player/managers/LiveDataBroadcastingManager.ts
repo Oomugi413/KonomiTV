@@ -1,6 +1,7 @@
 
 import * as Comlink from 'comlink';
 import DPlayer from 'dplayer';
+import { isEqual } from 'ohash';
 import { AribKeyCode, BMLBrowser, BMLBrowserFontFace } from 'web-bml';
 
 import router from '@/router';
@@ -403,8 +404,15 @@ class LiveDataBroadcastingManager implements PlayerManager {
 
         // ライブ PSI/SI アーカイブデータデコーダーを初期化
         // Comlink を挟んでいる関係上、コンストラクタにも関わらず Promise を返すため await する必要がある
-        const api_quality = PlayerUtils.extractLiveAPIQualityFromDPlayer(this.player);
-        this.live_psi_archived_data_decoder = await new LivePSIArchivedDataDecoderProxy(channels_store.channel.current, api_quality);
+        const current_api_quality = PlayerUtils.extractLiveAPIQualityFromDPlayer(this.player);
+        // Raw MMTS は既存の LivePSIDataArchiver / LivePSIArchivedDataDecoder が期待する MPEG-TS ではないため、
+        // 現時点では PSI/SI アーカイブデータを利用するデータ放送・番組情報更新は無効化する
+        if (current_api_quality === 'raw-mmts') {
+            console.warn('[LiveDataBroadcastingManager] PSI/SI archived data is unavailable for Raw MMTS.');
+            this.toggleRemoconButtonsLoading(false);
+            return;
+        }
+        this.live_psi_archived_data_decoder = await new LivePSIArchivedDataDecoderProxy(channels_store.channel.current, current_api_quality);
 
         // デコードを開始
         // デコーダーは Web Worker 上で実行される (コールバックを Comlink.proxy() で包むのがポイント)
@@ -451,10 +459,16 @@ class LiveDataBroadcastingManager implements PlayerManager {
             // 番組情報イベント (KonomiTV の UI 表示用)
             // 現在放送中/次に放送される番組情報を ChannelsStore を経由し UI 側にリアルタイムに反映する
             if (message.type === 'IProgramPF') {
+                // EIT[p/f] は同一番組情報が高頻度で流れてくることがあるため、
+                // 変更がない場合は store への再代入を抑止し、watcher が過剰に呼び出される連鎖を防ぐ
                 if (message.present_or_following === 'Present') {
-                    channels_store.current_program_present = message.program;
+                    if (isEqual(channels_store.current_program_present, message.program) === false) {
+                        channels_store.current_program_present = message.program;
+                    }
                 } else if (message.present_or_following === 'Following') {
-                    channels_store.current_program_following = message.program;
+                    if (isEqual(channels_store.current_program_following, message.program) === false) {
+                        channels_store.current_program_following = message.program;
+                    }
                 }
             }
         }));

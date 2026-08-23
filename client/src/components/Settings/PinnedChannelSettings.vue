@@ -25,7 +25,11 @@
                     <template #item="{ element }: { element: ILiveChannel }">
                         <div class="pinned-channel">
                             <!-- 以下では Icon コンポーネントを使うと個数が多いときに高負荷になるため、意図的に SVG を直書きしている -->
-                            <img class="pinned-channel__icon" :src="`${Utils.api_base_url}/channels/${element.id}/logo`">
+                            <div class="pinned-channel__icon">
+                                <div class="ch-sprite" :chid="element.id">
+                                    <img loading="lazy" :src="`${Utils.api_base_url}/channels/${element.id}/logo`">
+                                </div>
+                            </div>
                             <span class="pinned-channel__name">Ch: {{element.channel_number}} {{element.name}}</span>
                             <button class="pinned-channel__sort-handle">
                                 <svg class="iconify iconify--material-symbols" width="20px" height="20px" viewBox="0 0 24 24">
@@ -108,8 +112,14 @@ export default defineComponent({
         // チャンネル情報を更新
         await this.channelsStore.update();
 
-        // ピン留め中チャンネルのリストを取得
-        this.pinned_channels = this.channelsStore.channels_list_with_pinned.get('ピン留め') ?? [];
+        // ピン留め中チャンネルのリストを pinned_channel_ids の順序に基づいて直接構築する
+        // channels_list_with_pinned ゲッターを使うと tv_channel_sort_by_jikkyo_force がオンの時に
+        // 実況勢い順にソートされたリストが返されてしまい、watcher が pinned_channel_ids を
+        // 実況勢い順で上書きしてしまうため、ここでは channels_list から直接構築する
+        const all_channels: ILiveChannel[] = Object.values(this.channelsStore.channels_list).flat();
+        this.pinned_channels = this.settingsStore.settings.pinned_channel_ids
+            .map(id => all_channels.find(channel => channel.id === id))
+            .filter((channel): channel is ILiveChannel => channel !== undefined);
     }
 });
 
@@ -161,9 +171,12 @@ export default defineComponent({
         &__icon {
             display: inline-block;
             flex-shrink: 0;
-            width: 64px;
-            height: 36px;
-            border-radius: 4px;
+            --ch-sprite-width: 64;
+            --ch-sprite-height: 36;
+            --ch-sprite-border-radius: 4;
+            width: calc(var(--ch-sprite-width) * 1px);
+            height: calc(var(--ch-sprite-height) * 1px);
+            border-radius: calc(var(--ch-sprite-border-radius) * 1px);
             // 読み込まれるまでのアイコンの背景
             background: linear-gradient(150deg, rgb(var(--v-theme-gray)), rgb(var(--v-theme-background-lighten-2)));
             object-fit: cover;

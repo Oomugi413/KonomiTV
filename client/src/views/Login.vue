@@ -3,6 +3,7 @@
         <HeaderBar />
         <main>
             <Navigation />
+            <SPHeaderBar :hide-on-smartphone-vertical="true" />
             <div class="login-container-wrapper d-flex align-center w-100 mb-13">
                 <v-card class="login-container px-10 pt-8 pb-11 mx-auto" elevation="10"
                     width="100%" max-width="450">
@@ -15,7 +16,8 @@
                         <v-text-field class="mt-12" color="primary" variant="outlined"
                             placeholder="ユーザー名" hide-details autofocus
                             :density="is_form_dense ? 'compact' : 'default'"
-                            v-model="username">
+                            v-model="username"
+                            @keyup.enter="login()">
                         </v-text-field>
                         <v-text-field class="mt-8" color="primary" variant="outlined"
                             placeholder="パスワード" hide-details
@@ -23,7 +25,8 @@
                             v-model="password"
                             :type="password_showing ? 'text' : 'password'"
                             :append-inner-icon="password_showing ? 'mdi-eye' : 'mdi-eye-off'"
-                            @click:appendInner="password_showing = !password_showing">
+                            @click:appendInner="password_showing = !password_showing"
+                            @keyup.enter="login()">
                         </v-text-field>
                         <v-btn class="login-button mt-5" color="secondary" variant="flat" width="100%" height="56"
                             @click="login()">
@@ -42,6 +45,7 @@ import { defineComponent } from 'vue';
 
 import HeaderBar from '@/components/HeaderBar.vue';
 import Navigation from '@/components/Navigation.vue';
+import SPHeaderBar from '@/components/SPHeaderBar.vue';
 import Message from '@/message';
 import useUserStore from '@/stores/UserStore';
 import Utils from '@/utils';
@@ -51,6 +55,7 @@ export default defineComponent({
     components: {
         HeaderBar,
         Navigation,
+        SPHeaderBar,
     },
     data() {
         return {
@@ -73,7 +78,9 @@ export default defineComponent({
 
         // 現在ログイン中の場合はアカウントページに遷移
         if (this.userStore.is_logged_in) {
-            await this.$router.replace({path: '/settings/account'});
+            const return_path = typeof this.$route.query.return === 'string' && this.$route.query.return.startsWith('/') && !this.$route.query.return.startsWith('//') ?
+                this.$route.query.return : '/settings/account';
+            await this.$router.replace({path: return_path});
         }
     },
     methods: {
@@ -93,7 +100,9 @@ export default defineComponent({
 
             // アカウントページに遷移
             // ブラウザバックでログインページに戻れないようにする
-            await this.$router.replace({path: '/settings/account'});
+            const return_path = typeof this.$route.query.return === 'string' && this.$route.query.return.startsWith('/') && !this.$route.query.return.startsWith('//') ?
+                this.$route.query.return : '/settings/account';
+            await this.$router.replace({path: return_path});
         }
     }
 });

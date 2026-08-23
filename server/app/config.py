@@ -1,35 +1,38 @@
 
 import asyncio
 import concurrent.futures
-import httpx
 import platform
-import psutil
 import re
-import ruamel.yaml
-import ruamel.yaml.scalarstring
 import subprocess
 import sys
+from pathlib import Path
+from typing import Annotated, Any, Literal, Self, cast
+
+import httpx
+import psutil
+import ruamel.yaml
+import ruamel.yaml.scalarstring
 from pydantic import (
     BaseModel,
-    confloat,
     DirectoryPath,
-    field_validator,
     FilePath,
     PositiveFloat,
     PositiveInt,
     UrlConstraints,
     ValidationError,
     ValidationInfo,
+    confloat,
+    field_validator,
+    model_validator,
 )
 from pydantic_core import Url
-from pathlib import Path
-from typing import Annotated, Any, cast, Literal
 
 from app.constants import (
     API_REQUEST_HEADERS,
     BASE_DIR,
     LIBRARY_PATH,
 )
+from app.utils.TSInformation import TerrestrialRegion
 
 
 # クライアント設定を表す Pydantic モデル (クライアント設定同期用 API で利用)
@@ -39,28 +42,65 @@ from app.constants import (
 class ClientSettings(BaseModel):
     last_synced_at: Annotated[float, PositiveFloat] = 0.0
     # showed_panel_last_time: 同期無効
-    # selected_twitter_account_id: 同期無効
+    # selected_twitter_panel_account: 同期無効
+    # twitter_panel_post_targets: 同期無効
     saved_twitter_hashtags: list[str] = []
+    mylist: list[dict[str, Any]] = []
+    watched_history: list[dict[str, Any]] = []
     # lshaped_screen_crop_enabled: 同期無効
     # lshaped_screen_crop_zoom_level: 同期無効
     # lshaped_screen_crop_x_position: 同期無効
     # lshaped_screen_crop_y_position: 同期無効
     # lshaped_screen_crop_zoom_origin: 同期無効
     pinned_channel_ids: list[str] = []
+    timetable_channel_width: Literal['Wide', 'Normal', 'Narrow'] = 'Normal'
+    timetable_hour_height: Literal['Wide', 'Normal', 'Narrow'] = 'Normal'
+    timetable_hover_expand: bool = False
+    timetable_dim_shopping_programs: bool = True
+    # 番組表のジャンル別のハイライト色
+    # キーはジャンル名 (大分類)、値はハイライトカラー
+    # クライアント側の ILocalClientSettingsDefault.timetable_genre_colors と一致させる必要がある
+    timetable_genre_colors: dict[str, Literal['White', 'Pink', 'Red', 'Orange', 'Yellow', 'Lime', 'Teal', 'Cyan', 'Blue', 'Ochre', 'Brown']] = {
+        'ニュース・報道': 'White',
+        '情報・ワイドショー': 'White',
+        'ドキュメンタリー・教養': 'Blue',
+        'スポーツ': 'Cyan',
+        'ドラマ': 'Pink',
+        'アニメ・特撮': 'Yellow',
+        'バラエティ': 'Lime',
+        '音楽': 'Orange',
+        '映画': 'Brown',
+        '劇場・公演': 'Ochre',
+        '趣味・教育': 'Teal',
+        '福祉': 'White',
+        'その他': 'White',
+    }
+    show_player_background_image: bool = True
+    use_pure_black_player_background: bool = False
+    tv_channel_sort_by_jikkyo_force: bool = False
+    tv_channel_up_down_buttons_reverse: bool = False
+    tv_channel_selection_requires_alt_key: bool = False
+    use_28hour_clock: bool = False
+    show_original_broadcast_time_during_playback: bool = False
+    video_playback_start_position: Literal['FileStart', 'ProgramStart'] = 'ProgramStart'
     panel_display_state: Literal['RestorePreviousState', 'AlwaysDisplay', 'AlwaysFold'] = 'RestorePreviousState'
     tv_panel_active_tab: Literal['Program', 'Channel', 'Comment', 'Twitter'] = 'Program'
     video_panel_active_tab: Literal['RecordedProgram', 'Series', 'Comment', 'Twitter'] = 'RecordedProgram'
-    tv_channel_selection_requires_alt_key: bool = False
+    video_watched_history_max_count: Annotated[int, PositiveInt] = 50
     # tv_streaming_quality: 同期無効
     # tv_streaming_quality_cellular: 同期無効
     # tv_data_saver_mode: 同期無効
     # tv_data_saver_mode_cellular: 同期無効
     # tv_low_latency_mode: 同期無効
     # tv_low_latency_mode_cellular: 同期無効
+    # tv_24fps_mode: 同期無効
+    # tv_24fps_mode_cellular: 同期無効
     # video_streaming_quality: 同期無効
     # video_streaming_quality_cellular: 同期無効
     # video_data_saver_mode: 同期無効
     # video_data_saver_mode_cellular: 同期無効
+    # video_24fps_mode: 同期無効
+    # video_24fps_mode_cellular: 同期無効
     caption_font: str = 'Windows TV MaruGothic'
     always_border_caption_text: bool = True
     specify_caption_opacity: bool = False
@@ -84,11 +124,14 @@ class ClientSettings(BaseModel):
     mute_fixed_comments: bool = False
     mute_colored_comments: bool = False
     mute_consecutive_same_characters_comments: bool = False
+    mute_comment_keywords_normalize_alphanumeric_width_case: bool = True
     muted_comment_keywords: list[dict[str, str]] = []
     muted_niconico_user_ids: list[str] = []
     fold_panel_after_sending_tweet: bool = False
     reset_hashtag_when_program_switches: bool = True
     auto_add_watching_channel_hashtag: bool = True
+    twitter_reply_thread_mode: Literal['PerHashtag', 'PerDay', 'Disabled'] = 'PerHashtag'
+    bluesky_reply_thread_mode: Literal['PerHashtag', 'PerDay', 'Disabled'] = 'Disabled'
     twitter_active_tab: Literal['Search', 'Timeline', 'Capture'] = 'Capture'
     tweet_hashtag_position: Literal['Prepend', 'Append', 'PrependWithLineBreak', 'AppendWithLineBreak'] = 'Append'
     tweet_capture_watermark_position: Literal['None', 'TopLeft', 'TopRight', 'BottomLeft', 'BottomRight'] = 'None'
@@ -98,14 +141,23 @@ class ClientSettings(BaseModel):
 # config.yaml のバリデーションは設定データをこの Pydantic モデルに通すことで行う
 
 class _ServerSettingsGeneral(BaseModel):
-    backend: Literal['EDCB', 'Mirakurun'] = 'EDCB'
+    backend: Literal['EDCB', 'Mirakurun', 'EPGStation'] = 'EDCB'
     always_receive_tv_from_mirakurun: bool = False
     edcb_url: Annotated[Url, UrlConstraints(allowed_schemes=['tcp'])] = Url('tcp://127.0.0.1:4510/')
     mirakurun_url: Annotated[Url, UrlConstraints(allowed_schemes=['http', 'https'])] = Url('http://127.0.0.1:40772/')
+    epgstation_url: Annotated[Url, UrlConstraints(allowed_schemes=['http', 'https'])] = Url('http://127.0.0.1:8888/')
     encoder: Literal['FFmpeg', 'QSVEncC', 'NVEncC', 'VCEEncC', 'rkmppenc'] = 'FFmpeg'
     program_update_interval: Annotated[float, confloat(ge=0.1)] = 5.0
     debug: bool = False
     debug_encoder: bool = False
+
+    @model_validator(mode='after')
+    def force_mirakurun_receive_for_epgstation(self) -> Self:
+        # EPGStation は放送波の直接受信 API を提供しないため、視聴・チャンネル・番組表更新は Mirakurun / mirakc に透過的に委譲する。
+        # その前提を設定値にも反映し、UI や後続処理から常に一貫した値として扱えるようにする。
+        if self.backend == 'EPGStation':
+            self.always_receive_tv_from_mirakurun = True
+        return self
 
     @field_validator('edcb_url')
     def validate_edcb_url(cls, edcb_url: Url, info: ValidationInfo) -> Url:
@@ -142,6 +194,18 @@ class _ServerSettingsGeneral(BaseModel):
             logging.info(f'Backend: EDCB ({edcb_url}) Status: {result}')
         return edcb_url
 
+    @field_validator('epgstation_url')
+    def validate_epgstation_url(cls, epgstation_url: Url, info: ValidationInfo) -> Url:
+        # URL を末尾のスラッシュありに統一
+        epgstation_url = Url(str(epgstation_url).rstrip('/') + '/')
+        # EPGStation は録画/予約状態を補完するバックエンドで、環境によっては常駐していないことがある。
+        # 起動時の疎通確認で KonomiTV 全体を落とさないよう、ここでは URL 形式の検証と正規化だけ行う。
+        if not (type(info.context) is dict and info.context.get('bypass_validation') is True):
+            if info.data.get('backend') == 'EPGStation':
+                from app import logging
+                logging.info(f'Backend: EPGStation ({epgstation_url})')
+        return epgstation_url
+
     @field_validator('mirakurun_url')
     def validate_mirakurun_url(cls, mirakurun_url: Url, info: ValidationInfo) -> Url:
         # URL を末尾のスラッシュありに統一
@@ -152,21 +216,29 @@ class _ServerSettingsGeneral(BaseModel):
         if type(info.context) is dict and info.context.get('bypass_validation') is True:
             return mirakurun_url
         # Mirakurun バックエンドの接続確認
-        if info.data.get('backend') == 'Mirakurun' or info.data.get('always_receive_tv_from_mirakurun') is True:
+        if info.data.get('backend') in ['Mirakurun', 'EPGStation'] or info.data.get('always_receive_tv_from_mirakurun') is True:
             # 試しにリクエストを送り、200 (OK) が返ってきたときだけ有効な URL とみなす
             try:
                 response = httpx.get(
-                    # Mirakurun API は http://127.0.0.1:40772//api/version のような二重スラッシュを許容しないので、
+                    # Mirakurun API は http://127.0.0.1:40772//api/tuners のような二重スラッシュを許容しないので、
                     # mirakurun_url の末尾のスラッシュを削除してから endpoint を追加する必要がある
-                    url = str(mirakurun_url).rstrip('/') + '/api/version',
+                    ## 従来は /api/version にアクセスしていたが、Mirakurun 4.0.0-beta.5 以下のバージョンには
+                    ## API 実行時に録画中のストリームがドロップする重大なバグがあるため、他のエンドポイントを使うようにした
+                    ## ref: https://github.com/Chinachu/Mirakurun/commit/27fccf9cd9dd08e56614dabf2ceb1b27a6096f0e
+                    url = str(mirakurun_url).rstrip('/') + '/api/tuners',
                     headers = API_REQUEST_HEADERS,
                     timeout = 20,  # 久々のアクセスだとなぜか時間がかかることがあるため、ここだけタイムアウトを長めに設定
                 )
-                # レスポンスヘッダーの server が mirakc であれば mirakc と判定できる
-                if ('server' in response.headers) and ('mirakc' in response.headers['server']):
+                # レスポンスヘッダーの Server から Mirakurun か mirakc かを判定
+                server_header = response.headers.get('server', '').lower()
+                if 'mirakc' in server_header:
                     mirakurun_or_mirakc = 'mirakc'
+                    # Server ヘッダーからバージョン情報を抽出 (例: mirakc/3.4.4)
+                    version_info = server_header.split('/')[-1] if '/' in server_header else 'unknown'
                 else:
                     mirakurun_or_mirakc = 'Mirakurun'
+                    # Server ヘッダーからバージョン情報を抽出 (例: Mirakurun/3.9.0-rc.4)
+                    version_info = server_header.split('/')[-1] if '/' in server_header else 'unknown'
             except (httpx.NetworkError, httpx.TimeoutException):
                 raise ValueError(
                     f'Mirakurun / mirakc ({mirakurun_url}) にアクセスできませんでした。\n'
@@ -174,7 +246,7 @@ class _ServerSettingsGeneral(BaseModel):
                 )
             try:
                 response_json = response.json()
-                if response.status_code != 200 or response_json.get('current') is None:
+                if response.status_code != 200 or not isinstance(response_json, list) or version_info == 'unknown':
                     raise ValueError()
             except Exception:
                 raise ValueError(
@@ -182,7 +254,10 @@ class _ServerSettingsGeneral(BaseModel):
                     f'{mirakurun_or_mirakc} の URL を間違えている可能性があります。'
                 )
             from app import logging
-            logging.info(f'Backend: {mirakurun_or_mirakc} {response_json.get("current")} ({mirakurun_url})')
+            if info.data.get('backend') == 'Mirakurun':
+                logging.info(f'Backend: {mirakurun_or_mirakc} {version_info} ({mirakurun_url})')
+            else:
+                logging.info(f'Receive source: {mirakurun_or_mirakc} {version_info} ({mirakurun_url})')
             if info.data.get('always_receive_tv_from_mirakurun') is True:
                 logging.info(f'Always receive TV from {mirakurun_or_mirakc}.')
         return mirakurun_url
@@ -294,14 +369,42 @@ class _ServerSettingsServer(BaseModel):
         return port
 
 class _ServerSettingsTV(BaseModel):
+    preferred_terrestrial_region: TerrestrialRegion | None = None
     max_alive_time: PositiveInt = 10
     debug_mode_ts_path: FilePath | None = None
 
 class _ServerSettingsVideo(BaseModel):
     recorded_folders: list[DirectoryPath] = []
+    exclude_scan_paths: list[str] = []
+    enable_mmt_tlv_cm_analysis: bool = False
+    # チャンネル選択設定
+    channel_selection_mode: Literal['auto', 'prefer_main', 'first_found', 'filename_based'] = 'auto'
+    enable_filename_based_channel_selection: bool = True
 
 class _ServerSettingsCapture(BaseModel):
     upload_folders: list[DirectoryPath] = []
+
+
+class WatchUrlConfig(BaseModel):
+    text: str
+    base_url: str
+    type: Literal['watch_url'] = 'watch_url'
+
+
+class _ServerSettingsNotificationService(BaseModel):
+    type: Literal['Telegram', 'Slack'] = 'Telegram'
+    enabled: bool = False
+    # Telegram設定
+    bot_token: str | None = None
+    chat_id: str | None = None
+    # Slack設定（将来用）
+    webhook_url: str | None = None
+    # 視聴URL設定
+    watch_urls: list[WatchUrlConfig] = []
+
+
+class _ServerSettingsNotifications(BaseModel):
+    services: list[_ServerSettingsNotificationService] = []
 
 class ServerSettings(BaseModel):
     general: _ServerSettingsGeneral = _ServerSettingsGeneral()
@@ -309,6 +412,7 @@ class ServerSettings(BaseModel):
     tv: _ServerSettingsTV = _ServerSettingsTV()
     video: _ServerSettingsVideo = _ServerSettingsVideo()
     capture: _ServerSettingsCapture = _ServerSettingsCapture()
+    notifications: _ServerSettingsNotifications = _ServerSettingsNotifications()
 
 
 # サーバー設定データと読み込み・保存用の関数
@@ -336,6 +440,33 @@ def LoadConfig(bypass_validation: bool = False) -> ServerSettings:
         ServerSettings: 読み込んだサーバー設定データ
     """
 
+    def MergeConfigWithDefaults(config_dict: dict[str, Any]) -> dict[str, Any]:
+        """
+        config.yaml の読み込み結果をデフォルト設定とマージする
+
+        Args:
+            config_dict (dict[str, Any]): config.yaml から読み込んだ設定データ
+
+        Returns:
+            dict[str, Any]: デフォルト設定とマージ済みの設定データ
+        """
+
+        def merge_dicts(base_dict: dict[str, Any], override_dict: dict[str, Any]) -> dict[str, Any]:
+            merged_dict = dict(base_dict)
+            for key, value in override_dict.items():
+                if (
+                    key in merged_dict
+                    and isinstance(merged_dict[key], dict)
+                    and isinstance(value, dict)
+                ):
+                    merged_dict[key] = merge_dicts(merged_dict[key], value)
+                else:
+                    merged_dict[key] = value
+            return merged_dict
+
+        default_config_dict = ServerSettings().model_dump(mode='json')
+        return merge_dicts(default_config_dict, config_dict)
+
     global _CONFIG, _CONFIG_YAML_PATH, _DOCKER_PATH_PREFIX
     assert _CONFIG is None, 'LoadConfig() has already been called.'
 
@@ -351,7 +482,7 @@ def LoadConfig(bypass_validation: bool = False) -> ServerSettings:
 
     # 設定ファイルからサーバー設定をロードする
     try:
-        with open(_CONFIG_YAML_PATH, mode='r', encoding='utf-8') as file:
+        with open(_CONFIG_YAML_PATH, encoding='utf-8') as file:
             config_raw = ruamel.yaml.YAML().load(file)
             if config_raw is None:
                 logging.error('設定ファイルが空のため、KonomiTV を起動できません。')
@@ -364,10 +495,25 @@ def LoadConfig(bypass_validation: bool = False) -> ServerSettings:
         sys.exit(1)
 
     try:
+        # config.yaml に存在しない設定値はデフォルト値で補完する
+        config_dict = MergeConfigWithDefaults(config_dict)
+
         # Docker 上で実行されているとき、サーバー設定のうちパス指定の項目に Docker 環境向けの Prefix (/host-rootfs) を付ける
         ## /host-rootfs (docker-compose.yaml で定義) を通してホストマシンのファイルシステムにアクセスできる
         if GetPlatformEnvironment() == 'Linux-Docker':
             config_dict['video']['recorded_folders'] = [_DOCKER_PATH_PREFIX + folder for folder in config_dict['video']['recorded_folders']]
+            if 'exclude_scan_paths' in config_dict['video']:
+                # 空文字や空白だけのパスは無視する
+                ## 空文字が Docker 用 Prefix に変換されると、全パスが除外対象になってしまうため
+                exclude_scan_paths = [
+                    pattern.strip()
+                    for pattern in config_dict['video']['exclude_scan_paths']
+                    if type(pattern) is str and pattern.strip() != ''
+                ]
+                config_dict['video']['exclude_scan_paths'] = [
+                    _DOCKER_PATH_PREFIX + pattern
+                    for pattern in exclude_scan_paths
+                ]
             config_dict['capture']['upload_folders'] = [_DOCKER_PATH_PREFIX + folder for folder in config_dict['capture']['upload_folders']]
             if type(config_dict['tv']['debug_mode_ts_path']) is str:
                 config_dict['tv']['debug_mode_ts_path'] = _DOCKER_PATH_PREFIX + config_dict['tv']['debug_mode_ts_path']
@@ -378,7 +524,7 @@ def LoadConfig(bypass_validation: bool = False) -> ServerSettings:
     if bypass_validation is False:
         try:
             _CONFIG = ServerSettings.model_validate(config_dict, context={'bypass_validation': False})
-            logging.debug_simple('Server settings loaded.')
+            logging.debug('Server settings loaded.')
         except ValidationError as error:
 
             # エラーのうちどれか一つでもカスタムバリデーターからのエラーだった場合、エラーメッセージを表示して終了する
@@ -399,7 +545,7 @@ def LoadConfig(bypass_validation: bool = False) -> ServerSettings:
             sys.exit(1)
     else:
         _CONFIG = ServerSettings.model_validate(config_dict, context={'bypass_validation': True})
-        logging.debug_simple('Server settings loaded (bypassed validation).')
+        # logging.debug('Server settings loaded (bypassed validation).')
 
     return _CONFIG
 
@@ -426,6 +572,7 @@ def SaveConfig(config: ServerSettings) -> None:
     ## LoadConfig() で実行されている処理と逆の処理を行う
     if GetPlatformEnvironment() == 'Linux-Docker':
         config_dict['video']['recorded_folders'] = [str(folder).replace(_DOCKER_PATH_PREFIX, '') for folder in config_dict['video']['recorded_folders']]
+        config_dict['video']['exclude_scan_paths'] = [str(pattern).replace(_DOCKER_PATH_PREFIX, '') for pattern in config_dict['video']['exclude_scan_paths']]
         config_dict['capture']['upload_folders'] = [str(folder).replace(_DOCKER_PATH_PREFIX, '') for folder in config_dict['capture']['upload_folders']]
         if type(config_dict['tv']['debug_mode_ts_path']) is str or config_dict['tv']['debug_mode_ts_path'] is Path:
             config_dict['tv']['debug_mode_ts_path'] = str(config_dict['tv']['debug_mode_ts_path']).replace(_DOCKER_PATH_PREFIX, '')
@@ -434,10 +581,10 @@ def SaveConfig(config: ServerSettings) -> None:
     yaml = ruamel.yaml.YAML()
     yaml.default_flow_style = None  # None を使うと、スカラー以外のものはブロックスタイルになる
     yaml.preserve_quotes = True
-    yaml.width = 20
-    yaml.indent(mapping=4, sequence=4, offset=4)
+    yaml.width = 4096  # 幅を大きくしてスカラー値の改行を防ぐ
+    yaml.indent(mapping=4, sequence=4, offset=2)
     try:
-        with open(_CONFIG_YAML_PATH, mode='r', encoding='utf-8') as file:
+        with open(_CONFIG_YAML_PATH, encoding='utf-8') as file:
             config_raw = yaml.load(file)
     except Exception as error:
         # 回復不可能
@@ -446,13 +593,53 @@ def SaveConfig(config: ServerSettings) -> None:
     # config.yaml の内容を更新して保存
     # コメントやフォーマットを保持して保存するために更新方法を工夫している
     for key in config_dict:
+        # config.yaml 側に存在しないセクションがある場合は新規で作成する
+        if key not in config_raw or config_raw[key] is None:
+            config_raw[key] = ruamel.yaml.CommentedMap()
         for sub_key in config_dict[key]:
+            # config.yaml 側に存在しないキーがある場合は新規で作成する
+            if sub_key not in config_raw[key]:
+                if type(config_dict[key][sub_key]) is list:
+                    config_raw[key][sub_key] = ruamel.yaml.CommentedSeq()
+                else:
+                    config_raw[key][sub_key] = None
             # 文字列のリストを更新する場合は clear() と extend() を使う
             if type(config_dict[key][sub_key]) is list:
                 if type(config_raw[key][sub_key]) is ruamel.yaml.CommentedSeq:
                     config_raw[key][sub_key].clear()
                     for item in config_dict[key][sub_key]:
-                        config_raw[key][sub_key].append(ruamel.yaml.scalarstring.SingleQuotedScalarString(item))
+                        # 文字列の場合は SingleQuotedScalarString に変換
+                        if type(item) is str:
+                            config_raw[key][sub_key].append(ruamel.yaml.scalarstring.SingleQuotedScalarString(item))
+                        # 辞書（オブジェクト）の場合は再帰的に処理
+                        elif type(item) is dict:
+                            processed_dict = ruamel.yaml.CommentedMap()
+                            for dict_key, dict_value in item.items():
+                                # ネストした辞書内の文字列も SingleQuotedScalarString に変換
+                                if type(dict_value) is str:
+                                    processed_dict[dict_key] = ruamel.yaml.scalarstring.SingleQuotedScalarString(dict_value)
+                                # ネストした辞書内のリストも処理
+                                elif type(dict_value) is list:
+                                    nested_list = ruamel.yaml.CommentedSeq()
+                                    for nested_item in dict_value:
+                                        if type(nested_item) is str:
+                                            nested_list.append(ruamel.yaml.scalarstring.SingleQuotedScalarString(nested_item))
+                                        elif type(nested_item) is dict:
+                                            nested_dict = ruamel.yaml.CommentedMap()
+                                            for nested_dict_key, nested_dict_value in nested_item.items():
+                                                if type(nested_dict_value) is str:
+                                                    nested_dict[nested_dict_key] = ruamel.yaml.scalarstring.SingleQuotedScalarString(nested_dict_value)
+                                                else:
+                                                    nested_dict[nested_dict_key] = nested_dict_value
+                                            nested_list.append(nested_dict)
+                                        else:
+                                            nested_list.append(nested_item)
+                                    processed_dict[dict_key] = nested_list
+                                else:
+                                    processed_dict[dict_key] = dict_value
+                            config_raw[key][sub_key].append(processed_dict)
+                        else:
+                            config_raw[key][sub_key].append(item)
                 else:
                     config_raw[key][sub_key] = ruamel.yaml.CommentedSeq(config_dict[key][sub_key])
             # 文字列は明示的に SingleQuotedScalarString に変換する
@@ -499,7 +686,7 @@ def GetServerPort() -> int:
     try:
 
         # 設定ファイルからサーバー設定をロードし、ポート番号だけを返す
-        with open(_CONFIG_YAML_PATH, mode='r', encoding='utf-8') as file:
+        with open(_CONFIG_YAML_PATH, encoding='utf-8') as file:
             config_dict: dict[str, dict[str, Any]] = dict(ruamel.yaml.YAML().load(file))
         return config_dict['server']['port']
 

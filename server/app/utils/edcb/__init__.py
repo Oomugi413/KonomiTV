@@ -1,7 +1,9 @@
 
 import datetime
 from enum import IntEnum
-from typing import NotRequired, TypedDict
+from typing import NotRequired
+
+from typing_extensions import TypedDict
 
 
 # 以下、 CtrlCmdUtil で受け渡しする辞書の型ヒント
@@ -294,8 +296,8 @@ class SearchKeyInfo(TypedDict, total=False):
     content_list: list[ContentData]
     date_list: list[SearchDateInfo]
     service_list: list[int]  # (onid << 32 | tsid << 16 | sid) のリスト
-    video_list: list[int]  # 無視してよい
-    audio_list: list[int]  # 無視してよい
+    video_list: list[int]  # EDCB は検索時に評価するが、KonomiTV では通常空配列を送る
+    audio_list: list[int]  # EDCB は検索時に評価するが、KonomiTV では通常空配列を送る
     aimai_flag: bool
     not_contet_flag: bool
     not_date_flag: bool
@@ -317,8 +319,8 @@ class SearchKeyInfoRequired(TypedDict):
     content_list: list[ContentData]
     date_list: list[SearchDateInfoRequired]
     service_list: list[int]  # (onid << 32 | tsid << 16 | sid) のリスト
-    video_list: list[int]  # 無視してよい
-    audio_list: list[int]  # 無視してよい
+    video_list: list[int]  # EDCB は検索時に評価するが、KonomiTV では通常空配列を送る
+    audio_list: list[int]  # EDCB は検索時に評価するが、KonomiTV では通常空配列を送る
     aimai_flag: bool
     not_contet_flag: bool
     not_date_flag: bool

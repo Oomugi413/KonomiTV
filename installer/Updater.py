@@ -1,34 +1,38 @@
 
 import os
 import platform
-import py7zr
-import requests
-import ruamel.yaml
 import shutil
 import subprocess
 import tarfile
 import tempfile
+import zipfile
 from pathlib import Path
+from typing import Any, Literal, cast
+
+import py7zr
+import requests
+import ruamel.yaml
 from rich import print
 from rich.padding import Padding
-from typing import Any, cast, Literal
 
-from Utils import CreateBasicInfiniteProgress
-from Utils import CreateDownloadProgress
-from Utils import CreateDownloadInfiniteProgress
-from Utils import CreateTable
-from Utils import CustomPrompt
-from Utils import GetNetworkInterfaceInformation
-from Utils import IsDockerComposeV2
-from Utils import IsDockerInstalled
-from Utils import IsGitInstalled
-from Utils import RemoveEmojiIfLegacyTerminal
-from Utils import RunKonomiTVServiceWaiter
-from Utils import RunSubprocess
-from Utils import RunSubprocessDirectLogOutput
-from Utils import SaveConfig
-from Utils import ShowPanel
-from Utils import ShowSubProcessErrorLog
+from Utils import (
+    CreateBasicInfiniteProgress,
+    CreateDownloadInfiniteProgress,
+    CreateDownloadProgress,
+    CreateTable,
+    CustomPrompt,
+    GetNetworkInterfaceInformation,
+    IsDockerComposeV2,
+    IsDockerInstalled,
+    IsGitInstalled,
+    RemoveEmojiIfLegacyTerminal,
+    RunKonomiTVServiceWaiter,
+    RunSubprocess,
+    RunSubprocessDirectLogOutput,
+    SaveConfig,
+    ShowPanel,
+    ShowSubProcessErrorLog,
+)
 
 
 def Updater(version: str) -> None:
@@ -136,8 +140,12 @@ def Updater(version: str) -> None:
     # Python の実行ファイルのパス (Windows と Linux で異なる)
     ## Linux-Docker では利用されない
     python_executable_path = ''
+    venv_python_executable_path: str | Path = ''
     if platform_type == 'Windows':
         python_executable_path = update_path / 'server/thirdparty/Python/python.exe'
+        # Windows サービス管理スクリプトは Poetry 経由ではなく、仮想環境の Python 実行ファイルを直接実行する
+        ## Poetry 経由だと Windows で shell 解釈の影響を受け、引数中の記号が崩れる可能性がある
+        venv_python_executable_path = update_path / 'server/.venv/Scripts/python.exe'
     elif platform_type == 'Linux':
         python_executable_path = update_path / 'server/thirdparty/Python/bin/python'
 
@@ -151,7 +159,7 @@ def Updater(version: str) -> None:
         progress.add_task('', total=None)
         with progress:
             service_stop_result = subprocess.run(
-                args = [python_executable_path, '-m', 'poetry', 'run', 'python', 'KonomiTV-Service.py', 'stop'],
+                args = [venv_python_executable_path, 'KonomiTV-Service.py', 'stop'],
                 cwd = update_path / 'server/',  # カレントディレクトリを KonomiTV サーバーのベースディレクトリに設定
                 stdout = subprocess.PIPE,  # 標準出力をキャプチャする
                 stderr = subprocess.DEVNULL,  # 標準エラー出力を表示しない
@@ -227,9 +235,11 @@ def Updater(version: str) -> None:
             return  # 処理中断
 
         # 新しいバージョンのコードをチェックアウト
+        ## latest の場合は master ブランチを、それ以外は指定されたバージョンのタグをチェックアウト
+        revision = 'master' if version == 'latest' else f'v{version}'
         result = RunSubprocess(
             'KonomiTV のソースコードを更新しています…',
-            ['git', 'checkout', '--force', f'v{version}'],
+            ['git', 'checkout', '--force', revision],
             cwd = update_path,  # カレントディレクトリを KonomiTV のインストールフォルダに設定
             error_message = 'KonomiTV のソースコードの更新中に予期しないエラーが発生しました。',
             error_log_name = 'Git のエラーログ',
@@ -274,7 +284,11 @@ def Updater(version: str) -> None:
         progress = CreateDownloadInfiniteProgress()
 
         # GitHub からソースコードをダウンロード
-        source_code_response = requests.get(f'https://codeload.github.com/tsukumijima/KonomiTV/zip/refs/tags/v{version}')
+        ## latest の場合は master ブランチを、それ以外は指定されたバージョンのタグをダウンロード
+        if version == 'latest':
+            source_code_response = requests.get('https://codeload.github.com/tsukumijima/KonomiTV/zip/refs/heads/master')
+        else:
+            source_code_response = requests.get(f'https://codeload.github.com/tsukumijima/KonomiTV/zip/refs/tags/v{version}')
         task_id = progress.add_task('', total=None)
 
         # ダウンロードしたデータを随時一時ファイルに書き込む
@@ -289,8 +303,12 @@ def Updater(version: str) -> None:
 
         # ソースコードを解凍して展開
         shutil.unpack_archive(source_code_file.name, update_path.parent, format='zip')
-        shutil.copytree(update_path.parent / f'KonomiTV-{version}/', update_path, dirs_exist_ok=True)
-        shutil.rmtree(update_path.parent / f'KonomiTV-{version}/', ignore_errors=True)
+        if version == 'latest':
+            shutil.copytree(update_path.parent / 'KonomiTV-master/', update_path, dirs_exist_ok=True)
+            shutil.rmtree(update_path.parent / 'KonomiTV-master/', ignore_errors=True)
+        else:
+            shutil.copytree(update_path.parent / f'KonomiTV-{version}/', update_path, dirs_exist_ok=True)
+            shutil.rmtree(update_path.parent / f'KonomiTV-{version}/', ignore_errors=True)
         Path(source_code_file.name).unlink()
 
     # ***** サーバー設定ファイル (config.yaml) の更新 *****
@@ -306,7 +324,7 @@ def Updater(version: str) -> None:
         # 旧バージョンの config.yaml の設定値を取得
         ## config.yaml の上書き更新前に行うのが重要
         config_dict: dict[str, dict[str, Any]]
-        with open(update_path / 'config.yaml', mode='r', encoding='utf-8') as file:
+        with open(update_path / 'config.yaml', encoding='utf-8') as file:
             config_dict = dict(ruamel.yaml.YAML().load(file))
             # 0.9.0 -> 0.10.0: config_dict['capture']['upload_folder'] (str) を config_dict['capture']['upload_folders'] (list[str]) に移行
             if 'upload_folder' in config_dict['capture']:
@@ -334,23 +352,28 @@ def Updater(version: str) -> None:
         progress = CreateDownloadProgress()
 
         # GitHub からサードパーティーライブラリをダウンロード
-        thirdparty_file = 'thirdparty-windows.7z'
+        if version == 'latest':
+            thirdparty_base_url = 'https://nightly.link/tsukumijima/KonomiTV/workflows/build_thirdparty.yaml/master/'
+        else:
+            thirdparty_base_url = f'https://github.com/tsukumijima/KonomiTV/releases/download/v{version}/'
+        thirdparty_compressed_file_name = 'thirdparty-windows.7z'
         if platform_type == 'Linux' and is_arm_device is False:
-            thirdparty_file = 'thirdparty-linux.tar.xz'
+            thirdparty_compressed_file_name = 'thirdparty-linux.tar.xz'
         elif platform_type == 'Linux' and is_arm_device is True:
-            thirdparty_file = 'thirdparty-linux-arm.tar.xz'
-        thirdparty_base_url = f'https://github.com/tsukumijima/KonomiTV/releases/download/v{version}/'
-        thirdparty_url = thirdparty_base_url + thirdparty_file
+            thirdparty_compressed_file_name = 'thirdparty-linux-arm.tar.xz'
+        thirdparty_url = thirdparty_base_url + thirdparty_compressed_file_name
+        if version == 'latest':
+            thirdparty_url = thirdparty_url + '.zip'
         thirdparty_response = requests.get(thirdparty_url, stream=True)
         task_id = progress.add_task('', total=float(thirdparty_response.headers['Content-length']))
 
         # ダウンロードしたデータを随時一時ファイルに書き込む
-        thirdparty_file = tempfile.NamedTemporaryFile(mode='wb', delete=False)
+        thirdparty_compressed_file = tempfile.NamedTemporaryFile(mode='wb', delete=False)
         with progress:
             for chunk in thirdparty_response.iter_content(chunk_size=1048576):  # サイズが大きいので1MBごとに読み込み
-                thirdparty_file.write(chunk)
+                thirdparty_compressed_file.write(chunk)
                 progress.update(task_id, advance=len(chunk))
-        thirdparty_file.close()  # 解凍する前に close() してすべて書き込ませておくのが重要
+        thirdparty_compressed_file.close()  # 解凍する前に close() してすべて書き込ませておくのが重要
 
         # サードパーティーライブラリを解凍して展開
         print(Padding('サードパーティーライブラリを更新しています… (数秒～数十秒かかります)', (1, 2, 0, 2)))
@@ -361,16 +384,24 @@ def Updater(version: str) -> None:
             # 更新前に、前バージョンの古いサードパーティーライブラリを削除
             shutil.rmtree(update_path / 'server/thirdparty/', ignore_errors=True)
 
+            # latest のみ、圧縮ファイルがさらに zip で包まれているので、それを解凍
+            thirdparty_compressed_file_path = thirdparty_compressed_file.name
+            if version == 'latest':
+                with zipfile.ZipFile(thirdparty_compressed_file.name, mode='r') as zip_file:
+                    zip_file.extractall(update_path / 'server/')
+                thirdparty_compressed_file_path = update_path / 'server' / thirdparty_compressed_file_name
+                Path(thirdparty_compressed_file.name).unlink()
+
             if platform_type == 'Windows':
                 # Windows: 7-Zip 形式のアーカイブを解凍
-                with py7zr.SevenZipFile(thirdparty_file.name, mode='r') as seven_zip:
+                with py7zr.SevenZipFile(thirdparty_compressed_file_path, mode='r') as seven_zip:
                     seven_zip.extractall(update_path / 'server/')
             elif platform_type == 'Linux':
                 # Linux: tar.xz 形式のアーカイブを解凍
                 ## 7-Zip だと (おそらく) ファイルパーミッションを保持したまま圧縮することができない？ため、あえて tar.xz を使っている
-                with tarfile.open(thirdparty_file.name, mode='r:xz') as tar_xz:
+                with tarfile.open(thirdparty_compressed_file_path, mode='r:xz') as tar_xz:
                     tar_xz.extractall(update_path / 'server/')
-            Path(thirdparty_file.name).unlink()
+            Path(thirdparty_compressed_file_path).unlink()
             # server/thirdparty/.gitkeep が消えてたらもう一度作成しておく
             if Path(update_path / 'server/thirdparty/.gitkeep').exists() is False:
                 Path(update_path / 'server/thirdparty/.gitkeep').touch()
@@ -403,17 +434,6 @@ def Updater(version: str) -> None:
         if result is False:
             return  # 処理中断
 
-        # ***** データベースのアップグレード *****
-
-        result = RunSubprocess(
-            'データベースをアップグレードしています…',
-            [python_executable_path, '-m', 'poetry', 'run', 'aerich', 'upgrade'],
-            cwd = update_path / 'server/',  # カレントディレクトリを KonomiTV サーバーのベースディレクトリに設定
-            error_message = 'データベースのアップグレード中に予期しないエラーが発生しました。'
-        )
-        if result is False:
-            return  # 処理中断
-
     # Linux-Docker: Docker イメージを再ビルド
     elif platform_type == 'Linux-Docker':
 
@@ -438,7 +458,7 @@ def Updater(version: str) -> None:
         progress.add_task('', total=None)
         with progress:
             service_start_result = subprocess.run(
-                args = [python_executable_path, '-m', 'poetry', 'run', 'python', 'KonomiTV-Service.py', 'start'],
+                args = [venv_python_executable_path, 'KonomiTV-Service.py', 'start'],
                 cwd = update_path / 'server/',  # カレントディレクトリを KonomiTV サーバーのベースディレクトリに設定
                 stdout = subprocess.PIPE,  # 標準出力をキャプチャする
                 stderr = subprocess.DEVNULL,  # 標準エラー出力を表示しない

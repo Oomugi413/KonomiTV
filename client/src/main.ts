@@ -14,6 +14,7 @@ import Message from '@/message';
 import FloatingVue from '@/plugins/floating-vue';
 import vuetify from '@/plugins/vuetify';
 import router from '@/router';
+import OfflineVideos from '@/services/OfflineVideos';
 import useSettingsStore, {
     getLocalStorageSettings,
     getNormalizedLocalClientSettings,
@@ -28,6 +29,12 @@ import Utils from '@/utils';
 SeamlessScrollPolyfill();
 
 // ***** Vue アプリケーションの初期化 *****
+
+// 前回のページ終了時に前景保存が中断されていれば、起動時に既存ジョブだけを失敗状態へ移して残片を回収する
+void OfflineVideos.recoverInterruptedForegroundDownloads().catch((error) => {
+    // オフライン保存領域だけの読み取り失敗で、通常のオンライン視聴画面まで起動不能にはしない
+    console.error('Failed to recover interrupted foreground offline downloads:', error);
+});
 
 // Vue アプリケーションを作成
 const app = createApp(App);
@@ -77,6 +84,13 @@ const { updateServiceWorker } = useRegisterSW({
     // PWA の更新が必要なとき
     async onNeedRefresh() {
         console.log('New content is available; please refresh.');
+        // Safari などの前景保存中はリロードで通信が切れるため、完了またはキャンセルまで更新を保留する
+        if (await OfflineVideos.hasActiveForegroundDownload() === true) {
+            Message.show('オフライン保存の完了後にクライアントを更新します。', 10);
+            while (await OfflineVideos.hasActiveForegroundDownload() === true) {
+                await Utils.sleep(1);
+            }
+        }
         // リロードするまでトーストを表示し続ける
         Message.show('クライアントが新しいバージョンに更新されました。5秒後にリロードします。', 10);  // 10秒間表示
         await Utils.sleep(5);  // 5秒待つ
@@ -90,7 +104,35 @@ const { updateServiceWorker } = useRegisterSW({
 // 設定データの変更を監視する
 // Pinia の $subscribe() は app.mount() の後に呼び出す必要がある
 const settings_store = useSettingsStore();
+let is_updating_watched_history = false;
 settings_store.$subscribe(async () => {
+
+    // 視聴履歴の保持件数を変更した際に、既存の視聴履歴件数が上限を超えている場合は即時に古い履歴から削除する
+    // これにより、履歴追加時だけでなく設定値の縮小時にも常に上限件数を維持できる
+    const watched_history_max_count = Number.isFinite(settings_store.settings.video_watched_history_max_count) ?
+        Math.max(1, Math.floor(settings_store.settings.video_watched_history_max_count)) : 1;
+    const watched_history = settings_store.settings.watched_history;
+    if (is_updating_watched_history === false && watched_history.length > watched_history_max_count) {
+
+        // 配列を直接 sort() / splice() で破壊せず、コピー側で削除対象のみを算出する
+        const remove_count = watched_history.length - watched_history_max_count;
+        const remove_targets = new Set(
+            [...watched_history]
+                .sort((a, b) => a.updated_at - b.updated_at)
+                .slice(0, remove_count),
+        );
+
+        // 元の配列順序を維持したまま、削除対象だけを除外した新しい配列を作成する
+        const watched_history_trimmed = watched_history.filter(history => remove_targets.has(history) === false);
+
+        // $subscribe の再入で同じロジックが連続実行されないようにガードしつつ代入する
+        is_updating_watched_history = true;
+        try {
+            settings_store.settings.watched_history = watched_history_trimmed;
+        } finally {
+            is_updating_watched_history = false;
+        }
+    }
 
     // 現在 LocalStorage に保存されている設定データを取得
     const current_saved_settings = getNormalizedLocalClientSettings(getLocalStorageSettings());

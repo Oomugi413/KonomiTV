@@ -2,31 +2,30 @@
 import asyncio
 import atexit
 import mimetypes
-import tortoise.contrib.fastapi
-import tortoise.log
-from fastapi import FastAPI
-from fastapi import Request
-from fastapi import status
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi_restful.tasks import repeat_every
 from pathlib import Path
 
+import tortoise.contrib.fastapi
+import tortoise.log
+from fastapi import FastAPI, Request, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+
 from app import logging
-from app.config import Config
-from app.config import LoadConfig
+from app.config import Config, LoadConfig
 from app.constants import (
     CLIENT_DIR,
     DATABASE_CONFIG,
     QUALITY,
     VERSION,
 )
+from app.metadata.RecordedScanTask import RecordedScanTask
+from app.metadata.SeriesIndexer import SeriesIndexer
 from app.models.Channel import Channel
 from app.models.Program import Program
-from app.models.TwitterAccount import TwitterAccount
 from app.routers import (
+    BangumiRouter,
+    BlueskyRouter,
     CapturesRouter,
     ChannelsRouter,
     DataBroadcastingRouter,
@@ -34,6 +33,8 @@ from app.routers import (
     MaintenanceRouter,
     NiconicoRouter,
     ProgramsRouter,
+    RecordingPresetsRouter,
+    RemoteControlRouter,
     ReservationConditionsRouter,
     ReservationsRouter,
     SeriesRouter,
@@ -42,10 +43,17 @@ from app.routers import (
     UsersRouter,
     VersionRouter,
     VideosRouter,
+    VideoStreamsRouter,
 )
-from app.routers import VideoStreamsRouter
 from app.streams.LiveStream import LiveStream
+from app.utils.BangumiClient import BangumiClient
 from app.utils.edcb.EDCBTuner import EDCBTuner
+from app.utils.EventLoopBlockDetector import (
+    StartEventLoopBlockDetector,
+    StopEventLoopBlockDetector,
+)
+from app.utils.FastAPITaskUtil import repeat_every
+from app.utils.HardwareDevice import InitializeVAAPIHardwareDevices
 
 
 # もし Config() の実行時に AssertionError が発生した場合は、LoadConfig() を実行してサーバー設定データをロードする
@@ -76,23 +84,29 @@ app.include_router(LiveStreamsRouter.router)
 app.include_router(VideoStreamsRouter.router)
 app.include_router(ReservationsRouter.router)
 app.include_router(ReservationConditionsRouter.router)
+app.include_router(RecordingPresetsRouter.router)
+app.include_router(RemoteControlRouter.router)
 app.include_router(CapturesRouter.router)
 app.include_router(DataBroadcastingRouter.router)
 app.include_router(NiconicoRouter.router)
+app.include_router(BangumiRouter.router)
 app.include_router(TwitterRouter.router)
+app.include_router(BlueskyRouter.router)
 app.include_router(UsersRouter.router)
 app.include_router(SettingsRouter.router)
 app.include_router(MaintenanceRouter.router)
 app.include_router(VersionRouter.router)
 
 # CORS の設定
-## デバッグモード時のみ全てのオリジンからのリクエストを許可 (クライアント側の開発サーバーからのアクセスに必要)
-CORS_ORIGINS = ['*'] if CONFIG.general.debug is True else []
+## 開発環境では全てのオリジンからのリクエストを許可
+## 本番環境では app.konomi.tv 以外のオリジンからのリクエストを拒否
+CORS_ORIGINS = ['*'] if CONFIG.general.debug is True else ['https://app.konomi.tv']
 app.add_middleware(
     CORSMiddleware,
     allow_origins = CORS_ORIGINS,
-    allow_methods = CORS_ORIGINS,
-    allow_headers = CORS_ORIGINS,
+    # すべての HTTP メソッドと HTTP ヘッダーを許可
+    allow_methods = ['*'],
+    allow_headers = ['*'],
     allow_credentials = True,
 )
 
@@ -114,10 +128,10 @@ for suffix, mime_type in [
 # 静的ファイルの配信
 app.mount('/assets', StaticFiles(directory=CLIENT_DIR / 'assets', html=True))
 
-# ルート以下のルーティング
+# ルート以下のルーティング (同期ファイル I/O を伴うため同期関数として実装している)
 # ファイルが存在すればそのまま配信し、ファイルが存在しなければ index.html を返す
 @app.get('/{file:path}', include_in_schema=False)
-async def Root(file: str):
+def Root(file: str):
 
     # ディレクトリトラバーサル対策のためのチェック
     ## ref: https://stackoverflow.com/a/45190125/17124142
@@ -145,12 +159,50 @@ async def Root(file: str):
 
     # 存在しない静的ファイルが指定された場合
     else:
-        if file.startswith('api/'):
-            # パスに api/ が前方一致で含まれているなら、404 Not Found を返す
+        if (file.startswith('api/') or file.startswith('local/') or
+            file == 'data-broadcast' or file.startswith('data-broadcast/')):
+            # API・オフライン動画の仮想 URL・ARIB データ放送用 VFS は SPA の管理外なので、404 Not Found を返す。
+            # /data-broadcast/ を index.html へ fallback させると、VFS Worker がリソースを
+            # 解決できなかった際に KonomiTV 本体がデータ放送 iframe 内で起動してしまう。
             return JSONResponse({'detail': 'Not Found'}, status_code = status.HTTP_404_NOT_FOUND)
         else:
             # パスに api/ が前方一致で含まれていなければ、index.html を返す
             return FileResponse(CLIENT_DIR / 'index.html', media_type='text/html')
+
+def GetCORSHeadersForExceptionHandler(request: Request) -> dict[str, str]:
+    """
+    例外ハンドラ用の CORS ヘッダーを生成する。
+    Starlette のミドルウェアスタックは ServerErrorMiddleware → CORSMiddleware → ExceptionMiddleware の順で構築される。
+    @app.exception_handler() で登録したハンドラは ExceptionMiddleware で処理されるため、
+    通常は CORSMiddleware の send ラッパーを通り CORS ヘッダーが付与される。
+    ただし、ExceptionMiddleware で処理しきれない例外が ServerErrorMiddleware まで到達した場合、
+    CORSMiddleware がバイパスされ CORS ヘッダーが欠落する。
+    この関数はその防御策として、例外ハンドラ内で明示的に CORS ヘッダーを付与する。
+    ref: https://github.com/fastapi/fastapi/discussions/8027
+    ref: https://github.com/encode/starlette/discussions/2876
+
+    Args:
+        request: FastAPI の Request オブジェクト
+
+    Returns:
+        CORS ヘッダーを含む辞書。Origin が許可されていない場合は空の辞書を返す。
+    """
+
+    # リクエストの Origin ヘッダーを取得
+    origin = request.headers.get('Origin')
+    # CORS ヘッダーを設定
+    cors_header = ''
+    if origin is not None:
+        # 開発環境では全てのオリジンからのリクエストを許可
+        ## allow_credentials=True と Access-Control-Allow-Origin: * の組み合わせは
+        ## ブラウザにブロックされるため、リクエスト元の Origin をそのままエコーバックする
+        if CONFIG.general.debug is True:
+            cors_header = origin
+        # 本番環境では、Origin が許可されたオリジンに含まれている場合のみその Origin を返す
+        elif origin in CORS_ORIGINS:
+            cors_header = origin
+
+    return {'Access-Control-Allow-Origin': cors_header} if cors_header else {}
 
 # Internal Server Error のハンドリング
 @app.exception_handler(Exception)
@@ -158,8 +210,7 @@ async def ExceptionHandler(request: Request, exc: Exception):
     return JSONResponse(
         {'detail': f'Oops! {type(exc).__name__} did something. There goes a rainbow...'},
         status_code = status.HTTP_500_INTERNAL_SERVER_ERROR,
-        # FastAPI の謎仕様で CORSMiddleware は exception_handler に対しては効かないので、ここで自前で CORS ヘッダーを付与する
-        headers = {'Access-Control-Allow-Origin': CORS_ORIGINS[0] if len(CORS_ORIGINS) > 0 else ''},
+        headers = GetCORSHeadersForExceptionHandler(request),
     )
 
 # Tortoise ORM の初期化
@@ -173,12 +224,21 @@ tortoise.contrib.fastapi.register_tortoise(
     app = app,
     config = DATABASE_CONFIG,
     generate_schemas = True,
-    add_exception_handlers = True,
+    # Tortoise ORM の例外ハンドラ (DoesNotExist → 404, IntegrityError → 422) は登録しない
+    ## これらのハンドラは CORS ヘッダーを付与しないため、ブラウザがエラーレスポンスをブロックする可能性がある
+    ## Tortoise ORM の例外がルーターから漏れ出すこと自体がアプリのバグなので、
+    ## @app.exception_handler(Exception) で 500 として処理すれば十分
+    add_exception_handlers = False,
 )
 
 # サーバーの起動時に実行する
+recorded_scan_task: RecordedScanTask | None = None
 @app.on_event('startup')
 async def Startup():
+    global recorded_scan_task
+
+    # Linux の DRI render node を起動時に一度だけ検証し、CM 解析で共有する。
+    await InitializeVAAPIHardwareDevices()
 
     # チャンネル情報を更新
     await Channel.update()
@@ -189,21 +249,25 @@ async def Startup():
     # 番組情報を更新
     await Program.update()
 
-    # 登録されている Twitter アカウントの情報を更新
-    await TwitterAccount.updateAccountsInformation()
+    # 既存録画も含めて確定的に解析できる作品を Series へ関連付ける
+    ## EDCB / EPGStation 構成では RecordedScanTask の起動時一括スキャンが動かないため、バックエンドに依存せずここで実行する。
+    await SeriesIndexer.rebuild()
 
     # 全てのチャンネル&品質のライブストリームを初期化する
     for channel in await Channel.filter(is_watchable=True).order_by('channel_number'):
         for quality in QUALITY:
             LiveStream(channel.display_channel_id, quality)
 
-    # 録画フォルダ配下の録画ファイルのメタデータを更新/同期
-    ## 録画ファイルの量次第では録画ファイルの更新確認に時間がかかるため、非同期で実行する
-    async def run():
-        # サーバーの起動完了を待ってから実行する
-        await asyncio.sleep(0.1)
-        # await RecordedVideo.update()
-    asyncio.create_task(run())
+    # 録画バックエンドの有無に応じて、ローカル監視とバックエンド同期を明確に分離して開始する。
+    recorded_scan_task = RecordedScanTask()
+    if CONFIG.general.backend == 'Mirakurun':
+        # Mirakurun は録画バックエンドを持たないため、録画フォルダの一括スキャンと変更監視を開始する。
+        # 録画ファイルの量次第では更新確認に時間がかかるため、start() 内で非同期タスクとして実行する。
+        # ref: https://docs.astral.sh/ruff/rules/asyncio-dangling-task/
+        await recorded_scan_task.start()
+    else:
+        # EDCB / EPGStation はバックエンド API が返した録画だけを同期し、録画フォルダの全件スキャン・変更監視は開始しない。
+        await recorded_scan_task.startBackendRecordingSync()
 
 # サーバー設定で指定された時間 (デフォルト: 15分) ごとに1回、チャンネル情報と番組情報を更新する
 # チャンネル情報は頻繁に変わるわけではないけど、手動で再起動しなくても自動で変更が適用されてほしい
@@ -225,11 +289,17 @@ async def UpdateChannelAndProgram():
 async def UpdateChannelJikkyoStatus():
     await Channel.updateJikkyoStatus()
 
-# 1時間に1回、登録されている Twitter アカウントの情報を更新する
+# 30分に1回、連携済み Bangumi アカウントの在看・看過一覧から Series の条目情報を更新する。
+## 条目検索を Series ごとに行わず、アカウントごとの收藏一覧を候補プールとして一括照合する。
 @app.on_event('startup')
-@repeat_every(seconds=60 * 60, wait_first=60 * 60, logger=logging.logger)
-async def UpdateTwitterAccountInformation():
-    await TwitterAccount.updateAccountsInformation()
+@repeat_every(seconds=30 * 60, wait_first=10, logger=logging.logger)
+async def UpdateBangumiCollections():
+    await BangumiClient.syncAllLinkedUsers()
+
+# 通常の起動処理が完了してからイベントループの応答性を監視し、実行中の同期ブロックを次回発生時に捕捉する。
+@app.on_event('startup')
+async def StartEventLoopBlockDetection():
+    StartEventLoopBlockDetector()
 
 # サーバーの終了時に実行する
 cleanup = False
@@ -242,6 +312,9 @@ async def Shutdown():
         return
     cleanup = True
 
+    # 意図したシャットダウン待機をイベントループ停止として記録しないよう、他の終了処理より先に監視を止める。
+    await StopEventLoopBlockDetector()
+
     # 全てのライブストリームを終了する
     for live_stream in LiveStream.getAllLiveStreams():
         live_stream.setStatus('Offline', 'ライブストリームは Offline です。', True)
@@ -250,6 +323,28 @@ async def Shutdown():
     if CONFIG.general.backend == 'EDCB':
         await EDCBTuner.closeAll()
 
+    # 録画フォルダ監視タスクを停止
+    global recorded_scan_task
+    if recorded_scan_task is not None:
+        await recorded_scan_task.stop()
+        recorded_scan_task = None
+
+    # 非同期タスクの終了処理が完全に終わるよう、もう少しだけ待つ
+    # この待機を省略すると LiveEncodingTask などの終了前に Tortoise ORM の DB 接続が閉じられ、エラートレースバックが出力される
+    await asyncio.sleep(0.5)
+
 # shutdown イベントが発火しない場合も想定し、アプリケーションの終了時に Shutdown() が確実に呼ばれるように
-# atexit は同期関数しか実行できないので、asyncio.run() でくるむ
-atexit.register(asyncio.run, Shutdown())
+# atexit は同期関数しか実行できないので、終了時に asyncio.run() でくるむ
+## asyncio.run(Shutdown()) を直接 register() に渡すと登録時点で coroutine オブジェクトが作られ、
+## ProcessPoolExecutor の fork 子プロセス終了時に未 await の coroutine として警告が出る
+def RunShutdownAtExit() -> None:
+    """
+    atexit からサーバー終了処理を実行する
+
+    Returns:
+        None
+    """
+
+    asyncio.run(Shutdown())
+
+atexit.register(RunShutdownAtExit)

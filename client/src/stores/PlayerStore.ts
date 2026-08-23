@@ -2,6 +2,8 @@
 import mitt from 'mitt';
 import { defineStore } from 'pinia';
 
+import type { IOfflineVideo } from '@/services/OfflineVideos';
+
 import { ITweetCapture } from '@/components/Watch/Panel/Twitter.vue';
 import { ICommentData } from '@/services/player/managers/LiveCommentManager';
 import { IRecordedProgram, IRecordedProgramDefault } from '@/services/Videos';
@@ -26,6 +28,7 @@ export type PlayerEvents = {
         message?: string;  // プレイヤーに通知するメッセージ
         message_delay_seconds?: number;  // メッセージを表示するまでの待機時間 (秒)
         is_error_message?: boolean;  // メッセージをエラーメッセージとして表示するか (既定は true)
+        should_resume_quality?: boolean;  // 再起動後に直前の画質を引き継ぐかどうか (既定は true)
     };
     // PlayerController.setControlDisplayTimer() をそのまま呼び出す
     SetControlDisplayTimer: {
@@ -46,6 +49,14 @@ export type PlayerEvents = {
     // ライブ視聴: LiveCommentManager からコメントを送信したことを通知する
     CommentSendCompleted: {
         comment: ICommentData;  // 送信したコメントデータ (を整形したもの)
+    }
+    // 録画再生時: 再生位置が変更されたことを通知する
+    PlaybackPositionChanged: {
+        playback_position: number;  // 再生位置 (秒)
+    }
+    // 録画再生時: UI コンポーネントからプレイヤーに指定秒数へのシークを要求する
+    SeekRequest: {
+        playback_position: number;  // シーク先の再生位置 (秒)
     }
 };
 
@@ -69,7 +80,7 @@ const usePlayerStore = defineStore('player', {
 
         // 現在視聴中の録画番組の情報
         // 視聴中の録画番組がない場合は IRecordedProgramDefault を設定すべき (初期値も IRecordedProgramDefault にしている)
-        recorded_program: IRecordedProgramDefault as IRecordedProgram,
+        recorded_program: structuredClone(IRecordedProgramDefault) as IRecordedProgram,
 
         // 仮想キーボードが表示されているか
         // 既定で表示されていない想定
@@ -99,6 +110,13 @@ const usePlayerStore = defineStore('player', {
             }
         })(),
 
+        // データ放送アプリケーションが表示されているか
+        is_data_broadcasting_display: false,
+
+        // データ放送中の視聴パネルを表示するか
+        // 通常時の is_panel_display とは分離し、データ放送のために開いたパネルでユーザー設定を上書きしない
+        is_data_broadcasting_panel_display: true,
+
         // ライブ視聴: 表示されるパネルのタブ
         tv_panel_active_tab: useSettingsStore().settings.tv_panel_active_tab,
 
@@ -113,6 +131,19 @@ const usePlayerStore = defineStore('player', {
 
         // ザッピング（「前/次のチャンネル」ボタン or 上下キーショートカット）によるチャンネル移動かどうか
         is_zapping: false,
+
+        // DPlayer の設定パネルが開いているか
+        is_player_setting_panel_open: false,
+
+        // 視聴画面内で手動選択された画質プロファイル
+        // null の間は回線種別から選び、チャンネル切り替えなどでプレイヤーを作り直すときは手動選択を引き継ぐ
+        selected_quality_profile_type: null as 'Wi-Fi' | 'Cellular' | null,
+
+        // ビデオ視聴: CacheStorage に保存した単一画質を再生しているか
+        is_offline_playback: false,
+
+        // ビデオ視聴: 再生中の保存世代と画質
+        offline_video: null as IOfflineVideo | null,
 
         // プレイヤーのローディング状態
         // 既定でローディングとする
@@ -195,10 +226,11 @@ const usePlayerStore = defineStore('player', {
         reset(): void {
             this.is_watching = false;
             this.is_player_initialized = false;
-            this.recorded_program = IRecordedProgramDefault;
+            this.recorded_program = structuredClone(IRecordedProgramDefault);
             this.is_virtual_keyboard_display = false;
             this.is_fullscreen = false;
             this.is_document_pip = false;
+            this.is_data_broadcasting_panel_display = true;
             this.is_control_display = true;
             this.is_panel_display = (() => {
                 const settings_store = useSettingsStore();
@@ -211,11 +243,16 @@ const usePlayerStore = defineStore('player', {
                         return settings_store.settings.showed_panel_last_time;
                 }
             })();
+            this.is_data_broadcasting_display = false;
             this.tv_panel_active_tab = useSettingsStore().settings.tv_panel_active_tab;
             this.video_panel_active_tab = useSettingsStore().settings.video_panel_active_tab;
             this.twitter_active_tab = useSettingsStore().settings.twitter_active_tab;
             this.is_remocon_display = false;
             this.is_zapping = false;
+            this.is_player_setting_panel_open = false;
+            this.selected_quality_profile_type = null;
+            this.is_offline_playback = false;
+            this.offline_video = null;
             this.is_loading = true;
             this.is_video_buffering = true;
             this.is_video_paused = false;

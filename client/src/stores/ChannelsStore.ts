@@ -22,7 +22,7 @@ const useChannelsStore = defineStore('channels', {
             CS: [],
             CATV: [],
             SKY: [],
-            STARDIGIO: [],
+            BS4K: [],
         } as ILiveChannelsList,
 
         // 初回のチャンネル情報更新が実行された後かどうか
@@ -63,9 +63,9 @@ const useChannelsStore = defineStore('channels', {
             // 初回のチャンネル情報更新がまだ実行されていない or 実行中のときは、情報取得中であることを示すダミーのチャンネル情報を返す
             if (this.is_channels_list_initial_updated === false) {
                 return {
-                    previous: ILiveChannelDefault,
-                    current: ILiveChannelDefault,
-                    next: ILiveChannelDefault,
+                    previous: structuredClone(ILiveChannelDefault),
+                    current: structuredClone(ILiveChannelDefault),
+                    next: structuredClone(ILiveChannelDefault),
                 };
             }
 
@@ -177,6 +177,34 @@ const useChannelsStore = defineStore('channels', {
         channels_list_with_pinned(): Map<ChannelTypePretty, ILiveChannel[]> {
             const settings_store = useSettingsStore();
 
+            // チャンネル番号をメイン番号とサブ番号に分割する
+            const parseChannelNumber = (channel_number: string): {main: number; sub: number} => {
+                const matched_channel_number = channel_number.match(/^(\d+)(?:-(\d+))?$/);
+                if (matched_channel_number === null) {
+                    return {
+                        main: Number.MAX_SAFE_INTEGER,
+                        sub: Number.MAX_SAFE_INTEGER,
+                    };
+                }
+                return {
+                    main: Number(matched_channel_number[1]),
+                    sub: Number(matched_channel_number[2] ?? '0'),
+                };
+            };
+
+            // チャンネル番号を昇順で比較する
+            const compareChannelNumberAsc = (a: ILiveChannel, b: ILiveChannel): number => {
+                const a_channel_number = parseChannelNumber(a.channel_number);
+                const b_channel_number = parseChannelNumber(b.channel_number);
+                if (a_channel_number.main !== b_channel_number.main) {
+                    return a_channel_number.main - b_channel_number.main;
+                }
+                if (a_channel_number.sub !== b_channel_number.sub) {
+                    return a_channel_number.sub - b_channel_number.sub;
+                }
+                return a.channel_number.localeCompare(b.channel_number, 'ja');
+            };
+
             // 事前に Map を定義しておく
             // Map にしていたのは、確か連想配列の順序を保証してくれるからだったはず
             const channels_list_with_pinned = new Map<ChannelTypePretty, ILiveChannel[]>();
@@ -192,7 +220,7 @@ const useChannelsStore = defineStore('channels', {
             channels_list_with_pinned.set('CS', []);
             channels_list_with_pinned.set('CATV', []);
             channels_list_with_pinned.set('SKY', []);
-            channels_list_with_pinned.set('StarDigio', []);
+            channels_list_with_pinned.set('BS4K', []);
 
             // channels_list に格納されているすべてのチャンネルに対しループを回し、
             // 順次 channels_list_with_pinned に追加していく
@@ -235,8 +263,8 @@ const useChannelsStore = defineStore('channels', {
                             channels_list_with_pinned.get('SKY')?.push(channel);
                             break;
                         }
-                        case 'STARDIGIO': {
-                            channels_list_with_pinned.get('StarDigio')?.push(channel);
+                        case 'BS4K': {
+                            channels_list_with_pinned.get('BS4K')?.push(channel);
                             break;
                         }
                     }
@@ -249,6 +277,31 @@ const useChannelsStore = defineStore('channels', {
                 const index_b = settings_store.settings.pinned_channel_ids.indexOf(b.id);
                 return index_a - index_b;
             }));
+
+            // 「チャンネル一覧を実況勢いが強い順に並べる」がオンかつ、実況勢いが1つでも取得できている場合のみ、
+            // ピン留めタブを含む全チャンネルリストを実況勢い順で並び替える
+            // すべての実況勢いが 0 または取得できない（null）場合は、従来の並び順をそのまま維持する
+            if (settings_store.settings.tv_channel_sort_by_jikkyo_force === true) {
+                const has_non_zero_jikkyo_force = Array.from(channels_list_with_pinned.values())
+                    .flat()
+                    .some((channel) => (channel.jikkyo_force ?? 0) > 0);
+                if (has_non_zero_jikkyo_force === true) {
+                    for (const [channel_type, channels] of channels_list_with_pinned) {
+                        channels_list_with_pinned.set(channel_type, [...channels].sort((a, b) => {
+                            const a_jikkyo_force = a.jikkyo_force ?? 0;
+                            const b_jikkyo_force = b.jikkyo_force ?? 0;
+                            if (a_jikkyo_force !== b_jikkyo_force) {
+                                return b_jikkyo_force - a_jikkyo_force;
+                            }
+                            const channel_number_compare_result = compareChannelNumberAsc(a, b);
+                            if (channel_number_compare_result !== 0) {
+                                return channel_number_compare_result;
+                            }
+                            return a.id.localeCompare(b.id, 'ja');
+                        }));
+                    }
+                }
+            }
 
             // 最後に、チャンネルが1つもないチャンネルタイプのタブを除外する (ピン留めタブを除く)
             for (const [channel_type, channels] of channels_list_with_pinned) {
@@ -317,12 +370,13 @@ const useChannelsStore = defineStore('channels', {
          */
         async update(force: boolean = false): Promise<void> {
 
-            const update = async () => {
+            const update = async (): Promise<boolean> => {
 
                 // 最新のすべてのチャンネルの情報を取得
-                const channels_list = await Channels.fetchAll();
+                const channels_list = await Channels.fetchAllChannels();
                 if (channels_list === null) {
-                    return;
+                    console.warn('[ChannelsStore] Failed to fetch channels list. Skip updating cache.');
+                    return false;
                 }
 
                 // 再帰的に Object.freeze() を適用し、Vue 側で再帰的にリアクティブ化されないようにする
@@ -338,6 +392,8 @@ const useChannelsStore = defineStore('channels', {
                     this.is_channels_list_initial_updated = true;
                 }
                 this.last_updated_at = Utils.time();
+
+                return true;
             };
 
             // すでに取得されている場合は更新しない
@@ -345,14 +401,22 @@ const useChannelsStore = defineStore('channels', {
 
                 // ただし、最終更新日時が1分以上前の場合は非同期で更新する
                 if (Utils.time() - this.last_updated_at > 60) {
-                    update();
+                    update().catch((error) => {
+                        console.error('[ChannelsStore] Background update failed:', error);
+                    });
                 }
 
                 return;
             }
 
             // チャンネルリストの更新を行う
-            await update();
+            const is_update_succeeded = await update();
+            if (is_update_succeeded === false) {
+                // ネットワークエラーなどでチャンネル情報更新に失敗した場合、以降の処理を実行すると
+                // 意図せずピン留め中チャンネルの情報が削除されてしまうため、実行しない
+                console.warn('[ChannelsStore] Failed to update channels list. Skip removing pinned channel IDs.');
+                return;
+            }
 
             // この時点で pinned_channels に存在していないピン留め中チャンネルの ID を pinned_channel_ids から削除する
             // 受信環境の変化などでピン留め中チャンネルのチャンネル情報が取得できなくなった場合に備える

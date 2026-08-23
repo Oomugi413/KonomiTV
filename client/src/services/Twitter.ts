@@ -4,24 +4,34 @@ import APIClient from '@/services/APIClient';
 import useTwitterStore from '@/stores/TwitterStore';
 
 
-/** Twitter アカウントと連携するための認証 URL を表すインターフェイス */
-export interface ITwitterAuthURL {
-    authorization_url: string;
-}
-
-/** Twitter アカウントとパスワード認証で連携するためのリクエストを表すインターフェイス */
-export interface ITwitterPasswordAuthRequest {
-    screen_name: string;
-    password: string;
-}
-
 /** Twitter アカウントと Cookie 認証で連携するためのリクエストを表すインターフェイス */
 export interface ITwitterCookieAuthRequest {
     cookies_txt: string;
+    browser_info: IBrowserEnvironmentInfoRequest | null;
+}
+
+/** Cookie 採取元ブラウザから JavaScript API 経由で採取できる環境情報 */
+export interface IBrowserEnvironmentInfoRequest {
+    user_agent_data: IBrowserEnvironmentUserAgentData;
+    navigator_platform: string;
+    locale: string;
+    timezone: string;
+}
+
+/** Cookie 採取元ブラウザの UA-CH 高エントロピー値を表すインターフェイス */
+export interface IBrowserEnvironmentUserAgentData {
+    platform: string;
+    platform_version: string;
+    architecture: string;
+    bitness: string;
+    mobile: boolean;
+    model: string;
+    wow64: boolean;
 }
 
 /** ツイートを表すインターフェイス */
 export interface ITweet {
+    source: 'Twitter' | 'Bluesky';
     id: string;
     created_at: Date;
     user: ITweetUser;
@@ -40,6 +50,7 @@ export interface ITweet {
 
 /** ツイートのユーザーを表すインターフェイス */
 export interface ITweetUser {
+    source: 'Twitter' | 'Bluesky';
     id: string;
     name: string;
     screen_name: string;
@@ -55,82 +66,70 @@ export interface ITwitterAPIResult {
 /** ツイートの送信結果を表すインターフェイス */
 export interface IPostTweetResult extends ITwitterAPIResult {
     tweet_url: string;
+    tweet_id: string | null;
+    post_uri: string | null;
+    post_cid: string | null;
+}
+
+/** 投稿フォームから呼び出す送信処理の結果 */
+export interface IPostTweetSendResult {
+    message: string;
+    is_error: boolean;
+    tweet_id: string | null;
+    post_uri: string | null;
+    post_cid: string | null;
 }
 
 /** タイムラインのツイート取得結果を表すインターフェイス */
 export interface ITimelineTweetsResult extends ITwitterAPIResult {
-    next_cursor_id: string;
-    previous_cursor_id: string;
     tweets: ITweet[];
+    newer_cursor_id: string | null;
+    load_more_cursors: ITimelineLoadMoreCursor[];
+    is_cursor_consumed: boolean;
 }
 
-/** Twitter チャレンジデータを表すインターフェイス */
-export interface ITwitterChallengeData extends ITwitterAPIResult {
-    endpoint_infos: { [key: string]: ITwitterGraphQLAPIEndpointInfo };
-    verification_code: string;
-    challenge_js_code: string;
-    challenge_animation_svg_codes: string[];
-}
-
-/** Twitter GraphQL API のエンドポイント情報を表すインターフェイス */
-export interface ITwitterGraphQLAPIEndpointInfo {
-    method: 'GET' | 'POST';
-    query_id: string;
-    endpoint: string;
-    features: { [key: string]: any } | null;
-    path: string;
+/** タイムラインの追加取得カーソルを表すインターフェイス */
+export interface ITimelineLoadMoreCursor {
+    cursor_type: 'Older' | 'Gap' | 'ShowMore';
+    cursor_id: string;
+    entry_id: string | null;
+    upper_created_at: string | null;
+    lower_created_at: string | null;
 }
 
 
 class Twitter {
 
     /**
-     * Twitter アカウントと連携するための認証 URL を取得する
-     * @returns 認証 URL or 認証 URL の取得に失敗した場合は null
-     */
-    static async fetchAuthorizationURL(): Promise<string | null> {
-
-        // API リクエストを実行
-        const response = await APIClient.get<ITwitterAuthURL>('/twitter/auth');
-
-        // エラー処理
-        if (response.type === 'error') {
-            APIClient.showGenericError(response, 'Twitter アカウントとの連携用の認証 URL を取得できませんでした。');
-            return null;
-        }
-
-        return response.data.authorization_url;
-    }
-
-
-    /**
-     * Twitter アカウントと Cookie or パスワードログインで連携する
-     * @param twitter_auth_request cookies.txt または スクリーンネーム&パスワード
+     * Twitter アカウントと Cookie ログインで連携する
+     * @param twitter_auth_request Netscape 形式の Cookie ファイルの内容を格納した文字列
      * @returns ログインできた場合は true, 失敗した場合は false
      */
-    static async auth(twitter_auth_request: ITwitterPasswordAuthRequest | ITwitterCookieAuthRequest): Promise<boolean> {
+    static async auth(twitter_auth_request: ITwitterCookieAuthRequest): Promise<boolean> {
 
         // API リクエストを実行
-        const response = await APIClient.post('/twitter/auth', twitter_auth_request);
+        const response = await APIClient.post('/twitter/auth', twitter_auth_request, {
+            // サーバー側でヘッドレスブラウザのセットアップが発生する可能性があるため、
+            // タイムアウトを 60 秒に設定
+            timeout: 60 * 1000,
+        });
 
         // エラー処理
         if (response.type === 'error') {
-            if (typeof response.data.detail === 'string') {
-                if (response.data.detail.startsWith('Failed to authenticate with password')) {
-                    const error = response.data.detail.match(/Message: (.+)\)/)![1];
-                    Message.error(`ログインに失敗しました。${error}`);
-                    return false;
-                } else if (response.data.detail.startsWith('Unexpected error occurred while authenticate with password')) {
-                    const error = response.data.detail.match(/Message: (.+)\)/)![1];
-                    Message.error(`ログインフローの途中で予期せぬエラーが発生しました。${error}`);
-                    return false;
-                } else if (response.data.detail.startsWith('Failed to get user information')) {
-                    Message.error('Twitter アカウントのユーザー情報の取得に失敗しました。');
-                    return false;
+            switch (response.data.detail) {
+                case 'No valid cookies found in the provided cookies.txt': {
+                    Message.error('Cookie データのフォーマットが不正です。Netscape 形式の Cookie データを入力してください。');
+                    break;
+                }
+                case 'Failed to get user information': {
+                    Message.error('Twitter アカウント情報の取得に失敗しました。');
+                    break;
+                }
+                default: {
+                    APIClient.showGenericError(response, 'Twitter アカウントとの連携に失敗しました。');
+                    break;
                 }
             }
-            // 上記以外のエラー
-            APIClient.showGenericError(response, 'Twitter アカウントとの連携に失敗しました。');
             return false;
         }
 
@@ -159,32 +158,21 @@ class Twitter {
 
 
     /**
-     * Twitter Web App の API リクエスト内の X-Client-Transaction-ID ヘッダーを算出するために必要な Challenge 情報を取得する
+     * KonomiTV サーバー内部で起動しているヘッドレスブラウザのシャットダウンを遅らせる
      * @param screen_name Twitter のスクリーンネーム
-     * @returns Challenge 情報
      */
-    static async fetchChallengeData(screen_name: string): Promise<ITwitterChallengeData | null> {
+    static async keepAlive(screen_name: string): Promise<void> {
 
         // API リクエストを実行
-        const response = await APIClient.get<ITwitterChallengeData>(`/twitter/accounts/${screen_name}/challenge-data`);
+        const response = await APIClient.post(`/twitter/accounts/${screen_name}/keep-alive`);
 
         // エラー処理
         if (response.type === 'error') {
-            switch (response.data.detail) {
-                default:
-                    APIClient.showGenericError(response, 'Twitter の Challenge 情報を取得できませんでした。');
-                    break;
-            }
-            return null;
+            APIClient.showGenericError(response, 'ヘッドレスブラウザへの Keep-Alive 送信に失敗しました。');
+            return;
         }
 
-        // HTTP エラーではないが、実際には処理が失敗した場合
-        if (response.data.is_success === false) {
-            Message.error(response.data.detail);
-            return null;
-        }
-
-        return response.data;
+        Twitter.recordAccountActivity(screen_name);
     }
 
 
@@ -193,25 +181,24 @@ class Twitter {
      * @param screen_name Twitter のスクリーンネーム
      * @param text ツイート本文
      * @param captures 添付するキャプチャ画像
+     * @param in_reply_to_status_id リプライ先のツイート ID
      */
-    static async sendTweet(screen_name: string, text: string, captures: Blob[]): Promise<{message: string; is_error: boolean;}> {
+    static async sendTweet(screen_name: string, text: string, captures: Blob[], in_reply_to_status_id: string | null = null): Promise<IPostTweetSendResult> {
 
         // multipart/form-data でツイート本文と画像（選択されている場合）を送る
         const form_data = new FormData();
         form_data.append('tweet', text);
+        if (in_reply_to_status_id !== null) {
+            form_data.append('in_reply_to_status_id', in_reply_to_status_id);
+        }
         for (const tweet_capture of captures) {
             form_data.append('images', tweet_capture);
         }
-
-        // Twitter の GraphQL API へのリクエストに必要な X-Client-Transaction-ID ヘッダーを Challenge を解決することで算出する
-        // X-Client-Transaction-ID を設定せずとも API 操作は可能だが、垢ロックやツイート失敗の確率が上がる
-        const x_client_transaction_id = await useTwitterStore().solveChallenge(screen_name, 'CreateTweet');
 
         // API リクエストを実行
         const response = await APIClient.post<IPostTweetResult>(`/twitter/accounts/${screen_name}/tweets`, form_data, {
             headers: {
                 'Content-Type': 'multipart/form-data',
-                'X-Client-Transaction-ID': x_client_transaction_id,
             },
             // 連投間隔によってはツイート送信に時間がかかるため、
             // タイムアウトを 10 分に設定
@@ -219,27 +206,35 @@ class Twitter {
         });
 
         // エラー処理 (API リクエスト自体に失敗した場合)
+        // このエンドポイントのみ、Message (SnackBar) では通知せず、通知をプレイヤー側に委ねる必要がある
         if (response.type === 'error') {
             if (typeof response.data.detail === 'string') {
                 if (Number.isNaN(response.status)) {
                     // HTTP リクエスト自体が失敗し、HTTP ステータスコードが取得できなかった場合
-                    return {message: `ツイートの送信に失敗しました。(${response.data.detail})`, is_error: true};
+                    return {message: `Twitter へのツイートに失敗しました。(${response.data.detail})`, is_error: true, tweet_id: null, post_uri: null, post_cid: null};
                 } else {
                     // HTTP リクエスト自体は成功したが、API からエラーレスポンスが返ってきた場合
-                    return {message: `ツイートの送信に失敗しました。(HTTP Error ${response.status} / ${response.data.detail})`, is_error: true};
+                    return {message: `Twitter へのツイートに失敗しました。(HTTP Error ${response.status} / ${response.data.detail})`, is_error: true, tweet_id: null, post_uri: null, post_cid: null};
                 }
             } else {
-                return {message: `ツイートの送信に失敗しました。(HTTP Error ${response.status})`, is_error: true};
+                return {message: `Twitter へのツイートに失敗しました。(HTTP Error ${response.status})`, is_error: true, tweet_id: null, post_uri: null, post_cid: null};
             }
         }
 
         // 成功 or 失敗に関わらず detail の内容をそのまま通知する
         if (response.data.is_success === false) {
             // ツイート失敗
-            return {message: response.data.detail, is_error: true};
+            return {message: response.data.detail, is_error: true, tweet_id: null, post_uri: null, post_cid: null};
         } else {
             // ツイート成功
-            return {message: response.data.detail, is_error: false};
+            Twitter.recordAccountActivity(screen_name);
+            return {
+                message: response.data.detail,
+                is_error: false,
+                tweet_id: response.data.tweet_id,
+                post_uri: null,
+                post_cid: null,
+            };
         }
     }
 
@@ -252,22 +247,16 @@ class Twitter {
      */
     static async retweet(screen_name: string, tweet_id: string): Promise<ITwitterAPIResult | null> {
 
-        // Twitter の GraphQL API へのリクエストに必要な X-Client-Transaction-ID ヘッダーを Challenge を解決することで算出する
-        // X-Client-Transaction-ID を設定せずとも API 操作は可能だが、垢ロックやツイート失敗の確率が上がる
-        const x_client_transaction_id = await useTwitterStore().solveChallenge(screen_name, 'CreateRetweet');
-
         // API リクエストを実行
         const response = await APIClient.put<ITwitterAPIResult>(`/twitter/accounts/${screen_name}/tweets/${tweet_id}/retweet`, undefined, {
-            headers: {'X-Client-Transaction-ID': x_client_transaction_id},
+            // サーバー側でヘッドレスブラウザのセットアップやリトライが発生する可能性があるため、
+            // タイムアウトを 60 秒に設定
+            timeout: 60 * 1000,
         });
 
         // エラー処理
         if (response.type === 'error') {
-            switch (response.data.detail) {
-                default:
-                    APIClient.showGenericError(response, 'ツイートをリツイートできませんでした。');
-                    break;
-            }
+            APIClient.showGenericError(response, 'ツイートをリツイートできませんでした。');
             return null;
         }
 
@@ -277,6 +266,7 @@ class Twitter {
             return null;
         }
 
+        Twitter.recordAccountActivity(screen_name);
         return response.data;
     }
 
@@ -289,22 +279,16 @@ class Twitter {
      */
     static async cancelRetweet(screen_name: string, tweet_id: string): Promise<ITwitterAPIResult | null> {
 
-        // Twitter の GraphQL API へのリクエストに必要な X-Client-Transaction-ID ヘッダーを Challenge を解決することで算出する
-        // X-Client-Transaction-ID を設定せずとも API 操作は可能だが、垢ロックやツイート失敗の確率が上がる
-        const x_client_transaction_id = await useTwitterStore().solveChallenge(screen_name, 'DeleteRetweet');
-
         // API リクエストを実行
         const response = await APIClient.delete<ITwitterAPIResult>(`/twitter/accounts/${screen_name}/tweets/${tweet_id}/retweet`, {
-            headers: {'X-Client-Transaction-ID': x_client_transaction_id},
+            // サーバー側でヘッドレスブラウザのセットアップやリトライが発生する可能性があるため、
+            // タイムアウトを 60 秒に設定
+            timeout: 60 * 1000,
         });
 
         // エラー処理
         if (response.type === 'error') {
-            switch (response.data.detail) {
-                default:
-                    APIClient.showGenericError(response, 'リツイートを取り消せませんでした。');
-                    break;
-            }
+            APIClient.showGenericError(response, 'リツイートを取り消せませんでした。');
             return null;
         }
 
@@ -314,6 +298,7 @@ class Twitter {
             return null;
         }
 
+        Twitter.recordAccountActivity(screen_name);
         return response.data;
     }
 
@@ -326,22 +311,16 @@ class Twitter {
      */
     static async favorite(screen_name: string, tweet_id: string): Promise<ITwitterAPIResult | null> {
 
-        // Twitter の GraphQL API へのリクエストに必要な X-Client-Transaction-ID ヘッダーを Challenge を解決することで算出する
-        // X-Client-Transaction-ID を設定せずとも API 操作は可能だが、垢ロックやツイート失敗の確率が上がる
-        const x_client_transaction_id = await useTwitterStore().solveChallenge(screen_name, 'FavoriteTweet');
-
         // API リクエストを実行
         const response = await APIClient.put<ITwitterAPIResult>(`/twitter/accounts/${screen_name}/tweets/${tweet_id}/favorite`, undefined, {
-            headers: {'X-Client-Transaction-ID': x_client_transaction_id},
+            // サーバー側でヘッドレスブラウザのセットアップやリトライが発生する可能性があるため、
+            // タイムアウトを 60 秒に設定
+            timeout: 60 * 1000,
         });
 
         // エラー処理
         if (response.type === 'error') {
-            switch (response.data.detail) {
-                default:
-                    APIClient.showGenericError(response, 'ツイートをいいねできませんでした。');
-                    break;
-            }
+            APIClient.showGenericError(response, 'ツイートをいいねできませんでした。');
             return null;
         }
 
@@ -351,6 +330,7 @@ class Twitter {
             return null;
         }
 
+        Twitter.recordAccountActivity(screen_name);
         return response.data;
     }
 
@@ -363,22 +343,16 @@ class Twitter {
      */
     static async cancelFavorite(screen_name: string, tweet_id: string): Promise<ITwitterAPIResult | null> {
 
-        // Twitter の GraphQL API へのリクエストに必要な X-Client-Transaction-ID ヘッダーを Challenge を解決することで算出する
-        // X-Client-Transaction-ID を設定せずとも API 操作は可能だが、垢ロックやツイート失敗の確率が上がる
-        const x_client_transaction_id = await useTwitterStore().solveChallenge(screen_name, 'UnfavoriteTweet');
-
         // API リクエストを実行
         const response = await APIClient.delete<ITwitterAPIResult>(`/twitter/accounts/${screen_name}/tweets/${tweet_id}/favorite`, {
-            headers: {'X-Client-Transaction-ID': x_client_transaction_id},
+            // サーバー側でヘッドレスブラウザのセットアップやリトライが発生する可能性があるため、
+            // タイムアウトを 60 秒に設定
+            timeout: 60 * 1000,
         });
 
         // エラー処理
         if (response.type === 'error') {
-            switch (response.data.detail) {
-                default:
-                    APIClient.showGenericError(response, 'いいねを取り消せませんでした。');
-                    break;
-            }
+            APIClient.showGenericError(response, 'いいねを取り消せませんでした。');
             return null;
         }
 
@@ -388,6 +362,7 @@ class Twitter {
             return null;
         }
 
+        Twitter.recordAccountActivity(screen_name);
         return response.data;
     }
 
@@ -396,27 +371,32 @@ class Twitter {
      * ホームタイムラインを取得する
      * @param screen_name Twitter のスクリーンネーム
      * @param cursor_id 前回のレスポンスから取得した、次のページを取得するためのカーソル ID
+     * @param cursor_type カーソル ID の種類
+     * @param seenTweetIds Twitter Web App 上で閲覧済みとして扱われるツイート ID のリスト
      * @returns タイムラインのツイートのリスト
      */
-    static async getHomeTimeline(screen_name: string, cursor_id?: string): Promise<ITimelineTweetsResult | null> {
-
-        // Twitter の GraphQL API へのリクエストに必要な X-Client-Transaction-ID ヘッダーを Challenge を解決することで算出する
-        // X-Client-Transaction-ID を設定せずとも API 操作は可能だが、垢ロックやツイート失敗の確率が上がる
-        const x_client_transaction_id = await useTwitterStore().solveChallenge(screen_name, 'HomeLatestTimeline');
+    static async getHomeTimeline(
+        screen_name: string,
+        cursor_id?: string,
+        cursor_type: 'Top' | 'Bottom' | 'Gap' | 'ShowMore' = 'Top',
+        seenTweetIds?: string[],
+    ): Promise<ITimelineTweetsResult | null> {
 
         // API リクエストを実行
         const response = await APIClient.get<ITimelineTweetsResult>(`/twitter/accounts/${screen_name}/timeline`, {
-            params: { cursor_id },
-            headers: {'X-Client-Transaction-ID': x_client_transaction_id},
+            params: {
+                cursor_id,
+                cursor_type,
+                seen_tweet_ids: seenTweetIds && seenTweetIds.length > 0 ? seenTweetIds.join(',') : undefined,
+            },
+            // サーバー側でヘッドレスブラウザのセットアップやリトライが発生する可能性があるため、
+            // タイムアウトを 60 秒に設定
+            timeout: 60 * 1000,
         });
 
         // エラー処理
         if (response.type === 'error') {
-            switch (response.data.detail) {
-                default:
-                    APIClient.showGenericError(response, 'ホームタイムラインを取得できませんでした。');
-                    break;
-            }
+            APIClient.showGenericError(response, 'ホームタイムラインを取得できませんでした。');
             return null;
         }
 
@@ -426,6 +406,7 @@ class Twitter {
             return null;
         }
 
+        Twitter.recordAccountActivity(screen_name);
         return response.data;
     }
 
@@ -435,27 +416,27 @@ class Twitter {
      * @param screen_name Twitter のスクリーンネーム
      * @param query 検索クエリ
      * @param cursor_id 前回のレスポンスから取得した、次のページを取得するためのカーソル ID
+     * @param cursor_type カーソル ID の種類
      * @returns 検索結果のツイートのリスト
      */
-    static async searchTweets(screen_name: string, query: string, cursor_id?: string): Promise<ITimelineTweetsResult | null> {
-
-        // Twitter の GraphQL API へのリクエストに必要な X-Client-Transaction-ID ヘッダーを Challenge を解決することで算出する
-        // X-Client-Transaction-ID を設定せずとも API 操作は可能だが、垢ロックやツイート失敗の確率が上がる
-        const x_client_transaction_id = await useTwitterStore().solveChallenge(screen_name, 'SearchTimeline');
+    static async searchTweets(
+        screen_name: string,
+        query: string,
+        cursor_id?: string,
+        cursor_type: 'Top' | 'Bottom' | 'Gap' | 'ShowMore' = 'Top',
+    ): Promise<ITimelineTweetsResult | null> {
 
         // API リクエストを実行
         const response = await APIClient.get<ITimelineTweetsResult>(`/twitter/accounts/${screen_name}/search`, {
-            params: { query, cursor_id },
-            headers: {'X-Client-Transaction-ID': x_client_transaction_id},
+            params: { query, cursor_id, cursor_type },
+            // サーバー側でヘッドレスブラウザのセットアップやリトライが発生する可能性があるため、
+            // タイムアウトを 60 秒に設定
+            timeout: 60 * 1000,
         });
 
         // エラー処理
         if (response.type === 'error') {
-            switch (response.data.detail) {
-                default:
-                    APIClient.showGenericError(response, 'ツイートの検索に失敗しました。');
-                    break;
-            }
+            APIClient.showGenericError(response, 'ツイートの検索に失敗しました。');
             return null;
         }
 
@@ -465,7 +446,21 @@ class Twitter {
             return null;
         }
 
+        Twitter.recordAccountActivity(screen_name);
         return response.data;
+    }
+
+
+    /**
+     * 指定したスクリーンネームのアカウントで API 呼び出しが行われたことを記録する
+     * @param screen_name Twitter のスクリーンネーム
+     */
+    private static recordAccountActivity(screen_name: string): void {
+        if (screen_name === '') {
+            return;
+        }
+        const twitterStore = useTwitterStore();
+        twitterStore.markAccountAPIActivity(screen_name);
     }
 }
 

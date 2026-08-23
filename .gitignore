@@ -142,6 +142,9 @@ cython_debug/
 .DS_Store
 ._*
 
+# Codex
+.codex/hooks.json
+
 # config.yaml
 config.yaml
 
@@ -152,10 +155,20 @@ docker-compose.yaml
 server/data/*.*
 server/data/account-icons/*.*
 server/data/thumbnails/*.*
+server/data/thumbnails/old/*.*
+server/data/twitter*
 server/static/interlaced_*
 
 # thirdparty
 server/thirdparty/*
 
+# encoder coredup
+server/core.*
+
+# subproject
+/EDCB/
+
 # ignore .gitkeep
 !.gitkeep
+client/public/assets/images/channel-logo-sprite.webp
+client/src/styles/channel-logo.css

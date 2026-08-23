@@ -1,6 +1,6 @@
 
 import APIClient from '@/services/APIClient';
-import { getSyncableClientSettings } from '@/stores/SettingsStore';
+import { getSyncableClientSettings, ITimeTableGenreColors, TimeTableSizeOption } from '@/stores/SettingsStore';
 
 
 /**
@@ -18,28 +18,57 @@ export interface IMutedCommentKeywords {
 export interface IClientSettings {
     last_synced_at: number;
     // showed_panel_last_time: 同期無効
-    // selected_twitter_account_id: 同期無効
+    // selected_twitter_panel_account: 同期無効
+    // twitter_panel_post_targets: 同期無効
     saved_twitter_hashtags: string[];
+    mylist: {
+        type: 'Series' | 'RecordedProgram';
+        id: number;
+        created_at: number;
+    }[];
+    watched_history: {
+        video_id: number;
+        last_playback_position: number;
+        created_at: number;
+        updated_at: number;
+    }[];
     // lshaped_screen_crop_enabled: 同期無効
     // lshaped_screen_crop_zoom_level: 同期無効
     // lshaped_screen_crop_x_position: 同期無効
     // lshaped_screen_crop_y_position: 同期無効
     // lshaped_screen_crop_zoom_origin: 同期無効
     pinned_channel_ids: string[];
+    timetable_channel_width: TimeTableSizeOption;
+    timetable_hour_height: TimeTableSizeOption;
+    timetable_hover_expand: boolean;
+    timetable_dim_shopping_programs: boolean;
+    timetable_genre_colors: ITimeTableGenreColors;
+    show_player_background_image: boolean;
+    use_pure_black_player_background: boolean;
+    tv_channel_sort_by_jikkyo_force: boolean;
+    tv_channel_up_down_buttons_reverse: boolean;
+    tv_channel_selection_requires_alt_key: boolean;
+    use_28hour_clock: boolean;
+    show_original_broadcast_time_during_playback: boolean;
+    video_playback_start_position: 'FileStart' | 'ProgramStart';
     panel_display_state: 'RestorePreviousState' | 'AlwaysDisplay' | 'AlwaysFold';
     tv_panel_active_tab: 'Program' | 'Channel' | 'Comment' | 'Twitter';
     video_panel_active_tab: 'RecordedProgram' | 'Series' | 'Comment' | 'Twitter';
-    tv_channel_selection_requires_alt_key: boolean;
+    video_watched_history_max_count: number;
     // tv_streaming_quality: 同期無効
     // tv_streaming_quality_cellular: 同期無効
     // tv_data_saver_mode: 同期無効
     // tv_data_saver_mode_cellular: 同期無効
     // tv_low_latency_mode: 同期無効
     // tv_low_latency_mode_cellular: 同期無効
+    // tv_24fps_mode: 同期無効
+    // tv_24fps_mode_cellular: 同期無効
     // video_streaming_quality: 同期無効
     // video_streaming_quality_cellular: 同期無効
     // video_data_saver_mode: 同期無効
     // video_data_saver_mode_cellular: 同期無効
+    // video_24fps_mode: 同期無効
+    // video_24fps_mode_cellular: 同期無効
     caption_font: string;
     always_border_caption_text: boolean;
     specify_caption_opacity: boolean;
@@ -63,11 +92,14 @@ export interface IClientSettings {
     mute_fixed_comments: boolean;
     mute_colored_comments: boolean;
     mute_consecutive_same_characters_comments: boolean;
+    mute_comment_keywords_normalize_alphanumeric_width_case: boolean;
     muted_comment_keywords: IMutedCommentKeywords[];
     muted_niconico_user_ids: string[];
     fold_panel_after_sending_tweet: boolean;
     reset_hashtag_when_program_switches: boolean;
     auto_add_watching_channel_hashtag: boolean;
+    twitter_reply_thread_mode: 'PerHashtag' | 'PerDay' | 'Disabled';
+    bluesky_reply_thread_mode: 'PerHashtag' | 'PerDay' | 'Disabled';
     twitter_active_tab: 'Search' | 'Timeline' | 'Capture';
     tweet_hashtag_position: 'Prepend' | 'Append' | 'PrependWithLineBreak' | 'AppendWithLineBreak';
     tweet_capture_watermark_position: 'None' | 'TopLeft' | 'TopRight' | 'BottomLeft' | 'BottomRight';
@@ -79,10 +111,11 @@ export interface IClientSettings {
  */
 export interface IServerSettings {
     general: {
-        backend: 'EDCB' | 'Mirakurun';
+        backend: 'EDCB' | 'Mirakurun' | 'EPGStation';
         always_receive_tv_from_mirakurun: boolean;
         edcb_url: string;
         mirakurun_url: string;
+        epgstation_url: string;
         encoder: 'FFmpeg' | 'QSVEncC' | 'NVEncC' | 'VCEEncC' | 'rkmppenc';
         program_update_interval: number;
         debug: boolean;
@@ -94,14 +127,30 @@ export interface IServerSettings {
         custom_https_private_key: string | null;
     };
     tv: {
+        preferred_terrestrial_region: string | null;
         max_alive_time: number;
         debug_mode_ts_path: string | null;
     };
     video: {
         recorded_folders: string[];
+        exclude_scan_paths: string[];
     };
     capture: {
         upload_folders: string[];
+    };
+    notifications: {
+        services: Array<{
+            type: 'Telegram' | 'Slack';
+            enabled: boolean;
+            bot_token?: string;
+            chat_id?: string;
+            webhook_url?: string;
+            watch_urls?: Array<{
+                text: string;
+                base_url: string;
+                type: 'watch_url';
+            }>;
+        }>;
     };
 }
 
@@ -112,6 +161,7 @@ export const IServerSettingsDefault: IServerSettings = {
         always_receive_tv_from_mirakurun: false,
         edcb_url: 'tcp://127.0.0.1:4510/',
         mirakurun_url: 'http://127.0.0.1:40772/',
+        epgstation_url: 'http://127.0.0.1:8888/',
         encoder: 'FFmpeg',
         program_update_interval: 5.0,
         debug: false,
@@ -123,14 +173,19 @@ export const IServerSettingsDefault: IServerSettings = {
         custom_https_private_key: null,
     },
     tv: {
+        preferred_terrestrial_region: null,
         max_alive_time: 10,
         debug_mode_ts_path: null,
     },
     video: {
         recorded_folders: [],
+        exclude_scan_paths: [],
     },
     capture: {
         upload_folders: [],
+    },
+    notifications: {
+        services: [],
     },
 };
 

@@ -327,6 +327,36 @@ export class ProgramUtils {
 
 
     /**
+     * ARIB 外字記号を除去するための正規表現パターンを取得する
+     * @returns 記号除去用の正規表現パターンの配列
+     */
+    static getEnclosedCharactersRemovalPatterns(): RegExp[] {
+        // 本来 ARIB 外字である記号の一覧
+        // ref: https://ja.wikipedia.org/wiki/%E7%95%AA%E7%B5%84%E8%A1%A8
+        // ref: https://github.com/xtne6f/EDCB/blob/work-plus-s/EpgDataCap3/EpgDataCap3/ARIB8CharDecode.cpp#L1319
+        const mark = '新|終|再|交|映|手|声|多|副|字|文|CC|OP|二|S|B|SS|無|無料|' +
+            'C|S1|S2|S3|MV|双|デ|D|N|W|P|H|HV|SD|天|解|料|前|後|初|生|販|吹|PPV|' +
+            '演|移|他|収|・|英|韓|中|字/日|字/日英|3D|2ndScr|2K|4K|8K|5.1|7.1|22.2|60P|120P|d|HC|HDR|Hi-Res|Lossless|SHV|UHD|VOD|配|初';
+
+        // 正規表現を作成
+        const pattern1 = new RegExp('\\((二|字|再)\\)', 'g');  // 通常の括弧で囲まれている記号
+        const pattern2 = new RegExp(`\\[(${mark})\\]`, 'g');
+
+        return [pattern1, pattern2];
+    }
+
+
+    /**
+     * 番組がショッピング・通販枠かどうかを判定する
+     * @param program 番組情報
+     * @returns ショッピング・通販枠なら true
+     */
+    static isShoppingProgram(program: IProgram): boolean {
+        return program.genres?.some((genre) => genre.middle === 'ショッピング・通販') ?? false;
+    }
+
+
+    /**
      * 番組情報中の[字]や[解]などの記号をいい感じに装飾する
      * @param program 番組情報のオブジェクト
      * @param key 番組情報のオブジェクトから取り出すプロパティのキー
@@ -340,20 +370,12 @@ export class ProgramUtils {
             // 番組情報に含まれる HTML の特殊文字で表示がバグらないように、事前に HTML エスケープしておく
             const text = Utils.escapeHTML(program[key]);
 
-            // 本来 ARIB 外字である記号の一覧
-            // ref: https://ja.wikipedia.org/wiki/%E7%95%AA%E7%B5%84%E8%A1%A8
-            // ref: https://github.com/xtne6f/EDCB/blob/work-plus-s/EpgDataCap3/EpgDataCap3/ARIB8CharDecode.cpp#L1319
-            const mark = '新|終|再|交|映|手|声|多|副|字|文|CC|OP|二|S|B|SS|無|無料|' +
-                'C|S1|S2|S3|MV|双|デ|D|N|W|P|H|HV|SD|天|解|料|前|後初|生|販|吹|PPV|' +
-                '演|移|他|収|・|英|韓|中|字/日|字/日英|3D|2K|4K|8K|5.1|7.1|22.2|60P|120P|d|HC|HDR|SHV|UHD|VOD|配|初';
-
-            // 正規表現を作成
-            const pattern1 = new RegExp('\\((二|字|再)\\)', 'g');  // 通常の括弧で囲まれている記号
-            const pattern2 = new RegExp(`\\[(${mark})\\]`, 'g');
+            // 正規表現パターンを取得
+            const patterns = ProgramUtils.getEnclosedCharactersRemovalPatterns();
 
             // 正規表現で置換した結果を返す
-            return text.replace(pattern1, '<span class="decorate-symbol">$1</span>')
-                .replace(pattern2, '<span class="decorate-symbol">$1</span>');
+            return text.replace(patterns[0], '<span class="decorate-symbol">$1</span>')
+                .replace(patterns[1], '<span class="decorate-symbol">$1</span>');
 
         // 番組情報がない時間帯
         } else {
@@ -426,31 +448,45 @@ export class ProgramUtils {
         // program が空でなく、かつ番組時刻が初期値でない
         if (program !== null && program.start_time !== '2000-01-01T00:00:00+09:00') {
 
-            const start_time = dayjs(program.start_time);
-            const end_time = dayjs(program.end_time);
+            // 録画番組では EPG 上の番組時刻と実際の録画ファイルの時刻がずれることがある
+            // 一覧・プレイヤー上の時刻は実際に再生されるファイルの時刻として見えるべきなので、
+            // recorded_video 側に録画開始/終了時刻が入っている場合はそちらを優先する
+            const is_recorded_program = 'recorded_video' in program;
+            const should_use_recording_time =
+                is_recorded_program === true &&
+                program.recorded_video.recording_start_time !== null &&
+                program.recorded_video.recording_end_time !== null;
+
+            const start_time = dayjs(should_use_recording_time === true ?
+                program.recorded_video.recording_start_time! :
+                program.start_time);
+            const end_time = dayjs(should_use_recording_time === true ?
+                program.recorded_video.recording_end_time! :
+                program.end_time);
 
             // duration が Infinity の場合は、end_time を無視して放送時間未定として扱う
             // この時 end_time には便宜上 start_time と同一の時刻が設定されるため、参照してはいけない
             // IRecordedProgram (録画番組) では発生しない
             if (program.duration === Infinity) {
                 if (is_short === true) {  // 時刻のみ
-                    return `${start_time.format('HH:mm')} ～ --:--`;
+                    return Utils.apply28HourClock(`${start_time.format('HH:mm')} ～ --:--`);
                 } else {
-                    return `${start_time.format('YYYY/MM/DD (dd) HH:mm')} ～ --:-- (放送時間未定)`;
+                    return Utils.apply28HourClock(`${start_time.format('YYYY/MM/DD (dd) HH:mm')} ～ --:-- (放送時間未定)`);
                 }
             }
 
             // 分単位の番組長 (割り切れない場合は小数第2位で四捨五入)
-            const duration = Math.round(program.duration / 60 * 100) / 100;
+            const duration_seconds = should_use_recording_time === true ? program.recorded_video.duration : program.duration;
+            const duration = Math.round(duration_seconds / 60 * 100) / 100;
 
             if (is_short === true) {  // 時刻のみ
-                if ('recorded_video' in program) {
-                    return `${start_time.format('YYYY/MM/DD HH:mm')} ～ ${end_time.format('HH:mm')}`;  // 録画番組
+                if (is_recorded_program === true) {
+                    return Utils.apply28HourClock(`${start_time.format('YYYY/MM/DD HH:mm')} ～ ${end_time.format('HH:mm')}`);  // 録画番組
                 } else {
-                    return `${start_time.format('HH:mm')} ～ ${end_time.format('HH:mm')}`;  // 放送中/次の番組
+                    return Utils.apply28HourClock(`${start_time.format('HH:mm')} ～ ${end_time.format('HH:mm')}`);  // 放送中/次の番組
                 }
             } else {
-                return `${start_time.format('YYYY/MM/DD (dd) HH:mm')} ～ ${end_time.format('HH:mm')} (${duration}分)`;
+                return Utils.apply28HourClock(`${start_time.format('YYYY/MM/DD (dd) HH:mm')} ～ ${end_time.format('HH:mm')} (${duration}分)`);
             }
 
         // 放送休止中
@@ -486,7 +522,7 @@ export class ProgramUtils {
         // 分単位の番組長 (割り切れない場合は小数第2位で四捨五入)
         const duration = Math.round(recorded_program.recorded_video.duration / 60 * 100) / 100;
 
-        return `${start_time.format('YYYY/MM/DD (dd) HH:mm:ss')} ～ ${end_time.format('HH:mm:ss')} (${duration}分)`;
+        return Utils.apply28HourClock(`${start_time.format('YYYY/MM/DD (dd) HH:mm:ss')} ～ ${end_time.format('HH:mm:ss')} (${duration}分)`);
     }
 
 
@@ -578,6 +614,25 @@ export class ProgramUtils {
             '\u{1F225}': '[吹]',
             '\u{1F14E}': '[PPV]',
             '\u{1F200}': '[ほか]',
+            '\u{1F19B}': '[3D]',
+            '\u{1F19C}': '[2ndScr]',
+            '\u{1F19D}': '[2K]',
+            '\u{1F19E}': '[4K]',
+            '\u{1F19F}': '[8K]',
+            '\u{1F1A0}': '[5.1]',
+            '\u{1F1A1}': '[7.1]',
+            '\u{1F1A2}': '[22.2]',
+            '\u{1F1A3}': '[60P]',
+            '\u{1F1A4}': '[120P]',
+            '\u{1F1A5}': '[d]',
+            '\u{1F1A6}': '[HC]',
+            '\u{1F1A7}': '[HDR]',
+            '\u{1F1A8}': '[Hi-Res]',
+            '\u{1F1A9}': '[Lossless]',
+            '\u{1F1AA}': '[SHV]',
+            '\u{1F1AB}': '[UHD]',
+            '\u{1F1AC}': '[VOD]',
+            '\u{1F23B}': '[配]',
         };
 
         // Unicode の囲み文字を大かっこで囲った文字に置換する
@@ -591,6 +646,7 @@ export class ProgramUtils {
 
         return merged_table;
     }
+
 
     /**
      * ISO639 形式の言語コードが示す言語の名称を取得する
@@ -619,6 +675,55 @@ export class ProgramUtils {
             return 'スペイン語';
         } else {
             return 'その他の言語';
+        }
+    }
+
+
+    /**
+     * 番組の長さを「1:30:00」のような形式でフォーマットする
+     * @param program 番組情報
+     * @param use_kanji 1:30:00 ではなく「1時間30分00秒」のような形式で返すかどうか
+     * @returns フォーマットされた番組の長さ
+     */
+    static getProgramDuration(program: IProgram | IRecordedProgram, use_kanji: boolean = false): string {
+        // 録画番組の場合は recorded_video.duration を使用
+        if ('recorded_video' in program) {
+            const duration = program.recorded_video.duration;
+            const hours = Math.floor(duration / 3600);
+            const minutes = Math.floor((duration % 3600) / 60);
+            const seconds = Math.floor(duration % 60);
+            if (use_kanji) {
+                if (hours > 0) {
+                    return `${hours}時間${minutes}分${seconds}秒`;
+                } else {
+                    return `${minutes}分${seconds}秒`;
+                }
+            } else {
+                if (hours > 0) {
+                    return `${hours}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+                } else {
+                    return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+                }
+            }
+        }
+
+        // 通常の番組の場合は duration を使用
+        const duration = program.duration;
+        const hours = Math.floor(duration / 3600);
+        const minutes = Math.floor((duration % 3600) / 60);
+        const seconds = Math.floor(duration % 60);
+        if (use_kanji) {
+            if (hours > 0) {
+                return `${hours}時間${minutes}分${seconds}秒`;
+            } else {
+                return `${minutes}分${seconds}秒`;
+            }
+        } else {
+            if (hours > 0) {
+                return `${hours}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+            } else {
+                return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+            }
         }
     }
 }

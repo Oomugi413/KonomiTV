@@ -4,12 +4,15 @@
             <img class="konomitv-logo__image" src="/assets/images/logo.svg" height="21">
         </router-link>
         <v-spacer></v-spacer>
+        <!-- 番組表コントロール用スロット -->
+        <slot name="timetable-controls"></slot>
         <div v-if="showSearchInput" class="search-box">
-            <input class="search-input" type="text" :placeholder="search_placeholder"
-                v-model="search_query" @keydown="handleKeyDown">
+            <input class="search-input" type="search" name="header-search" enterkeyhint="search" :placeholder="searchPlaceholder"
+                v-model="searchQuery" @keydown="handleKeyDown">
             <Icon class="search-input__icon" icon="fluent:search-20-filled" height="24px" @click="doSearch" />
         </div>
-        <v-btn v-show="isButtonDisplay" variant="flat" class="pwa-install-button"
+        <RemoteDeviceActivator class="ml-2" />
+        <v-btn v-show="isButtonDisplay && !isTimeTablePage" variant="flat" class="pwa-install-button"
             @click="pwaInstallHandler.install()">
             <Icon icon="material-symbols:install-desktop-rounded" height="20px" class="mr-1" />
             アプリとしてインストール
@@ -23,15 +26,44 @@ import { pwaInstallHandler } from 'pwa-install-handler';
 import { onMounted, ref, computed, watch } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 
+import RemoteDeviceActivator from '@/components/RemoteDeviceActivator.vue';
+
+const props = defineProps<{
+    searchQuery?: string;
+}>();
+
+const emit = defineEmits<{
+    (e: 'update:searchQuery', searchQuery: string): void;
+    (e: 'search', searchQuery: string): void;
+}>();
+
 const isButtonDisplay = ref(false);
-const search_query = ref('');
+const internalSearchQuery = ref('');
 const router = useRouter();
 const route = useRoute();
 
+const searchQuery = computed({
+    get: () => props.searchQuery ?? internalSearchQuery.value,
+    set: (value: string) => {
+        // 検索ページでは親がキーワードを持ち、通常ページではヘッダー内だけで保持する
+        if (props.searchQuery !== undefined) {
+            emit('update:searchQuery', value);
+        } else {
+            internalSearchQuery.value = value;
+        }
+    },
+});
+
 // 検索クエリの初期化関数
-const initialize_search_query = () => {
+const initializeSearchQuery = () => {
+    // 親から検索キーワードを受けているページでは、URL からの復元を親側に任せる
+    if (props.searchQuery !== undefined) {
+        return;
+    }
     if (route.path.endsWith('/search') && route.query.query) {
-        search_query.value = decodeURIComponent(route.query.query as string);
+        internalSearchQuery.value = decodeURIComponent(route.query.query as string);
+    } else {
+        internalSearchQuery.value = '';
     }
 };
 
@@ -39,20 +71,26 @@ onMounted(() => {
     pwaInstallHandler.addListener((canInstall) => {
         isButtonDisplay.value = canInstall;
     });
-    initialize_search_query();
+    initializeSearchQuery();
 });
 
 // ルートの変更を監視して検索クエリを更新
-watch(() => route.fullPath, initialize_search_query);
+watch(() => route.fullPath, initializeSearchQuery);
 
-const search_placeholder = computed(() => {
-    return route.path.startsWith('/videos') || route.path.startsWith('/mylist') || route.path.startsWith('/viewing-history')
+const searchPlaceholder = computed(() => {
+    if (route.path.startsWith('/series')) {
+        return 'シリーズを検索...';
+    }
+    return route.path.startsWith('/videos') || route.path.startsWith('/mylist') || route.path.startsWith('/watched-history')
         ? '録画番組を検索...'
         : '放送予定の番組を検索...';
 });
 
 const getSearchPath = () => {
-    return route.path.startsWith('/videos') || route.path.startsWith('/mylist') || route.path.startsWith('/viewing-history')
+    if (route.path.startsWith('/series')) {
+        return '/series/';
+    }
+    return route.path.startsWith('/videos') || route.path.startsWith('/mylist') || route.path.startsWith('/watched-history')
         ? '/videos/search'
         : '/tv/search';
 };
@@ -64,9 +102,17 @@ const handleKeyDown = (event: KeyboardEvent) => {
 };
 
 const doSearch = () => {
-    if (search_query.value.trim()) {
-        const search_path = getSearchPath();
-        router.push(`${search_path}?query=${encodeURIComponent(search_query.value.trim())}`);
+    // 番組検索ページでは空欄キーワードでも絞り込み検索できるため、空文字のままページ側へ渡す
+    if (props.searchQuery !== undefined) {
+        const trimmedSearchQuery = searchQuery.value.trim();
+        emit('update:searchQuery', trimmedSearchQuery);
+        emit('search', trimmedSearchQuery);
+        return;
+    }
+
+    if (searchQuery.value.trim()) {
+        const searchPath = getSearchPath();
+        router.push(`${searchPath}?query=${encodeURIComponent(searchQuery.value.trim())}`);
     }
 };
 
@@ -74,6 +120,9 @@ const showSearchInput = computed(() => {
     const path = route.path;
     return !path.startsWith('/captures') && !path.startsWith('/settings') && !path.startsWith('/login') && !path.startsWith('/register');
 });
+
+// 番組表ページかどうか（ヘッダーにコントロールが多くスペースに余裕がないため、PWA インストールボタンを非表示にする）
+const isTimeTablePage = computed(() => route.path.startsWith('/timetable'));
 
 </script>
 <style lang="scss" scoped>
@@ -89,18 +138,11 @@ const showSearchInput = computed(() => {
     box-shadow: 0px 5px 5px -3px rgb(0 0 0 / 20%),
                 0px 8px 10px 1px rgb(0 0 0 / 14%),
                 0px 3px 14px 2px rgb(0 0 0 / 12%);
-    z-index: 10;
+    z-index: 40;
 
+    // スマホ横・縦画面では SPHeaderBar を使用するため非表示
     @include smartphone-horizontal {
-        width: 210px;
-        height: 48px;
-        justify-content: center;
-        .v-spacer {
-            display: none;
-        }
-    }
-    @include smartphone-horizontal-short {
-        width: 190px;
+        display: none;
     }
     @include smartphone-vertical {
         display: none;

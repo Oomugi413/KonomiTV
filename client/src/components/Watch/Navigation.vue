@@ -22,8 +22,8 @@
             <Icon class="watch-navigation__link-icon" icon="fluent:calendar-ltr-20-regular" width="26px" />
         </router-link>
         <router-link v-ripple class="watch-navigation__link" active-class="watch-navigation__link--active"
-            :class="{'watch-navigation__link--active': $route.path.startsWith('/reserves')}"
-            v-ftooltip.right="'録画予約'" to="/reserves/">
+            :class="{'watch-navigation__link--active': $route.path.startsWith('/reservations')}"
+            v-ftooltip.right="'録画予約'" to="/reservations/">
             <Icon class="watch-navigation__link-icon" icon="fluent:timer-16-regular" width="26px" style="padding: 0.5px;"/>
         </router-link>
         <router-link v-ripple class="watch-navigation__link" active-class="watch-navigation__link--active"
@@ -32,16 +32,33 @@
             <Icon class="watch-navigation__link-icon" icon="fluent:image-multiple-24-regular" width="26px" />
         </router-link>
         <router-link v-ripple class="watch-navigation__link" active-class="watch-navigation__link--active"
+            :class="{'watch-navigation__link--active': $route.path.startsWith('/offline-videos')}"
+            v-ftooltip.right="'オフライン保存'" to="/offline-videos/">
+            <span class="watch-navigation__link-icon-wrapper">
+                <Icon class="watch-navigation__link-icon" icon="fluent:cloud-arrow-down-16-regular" width="26px" />
+                <OfflineDownloadBadge variant="overlay" />
+            </span>
+        </router-link>
+        <router-link v-ripple class="watch-navigation__link" active-class="watch-navigation__link--active"
             :class="{'watch-navigation__link--active': $route.path.startsWith('/mylist')}"
             v-ftooltip.right="'マイリスト'" to="/mylist/">
             <Icon class="watch-navigation__link-icon" icon="ic:round-playlist-play" width="26px" />
         </router-link>
         <router-link v-ripple class="watch-navigation__link" active-class="watch-navigation__link--active"
-            :class="{'watch-navigation__link--active': $route.path.startsWith('/viewing-history')}"
-            v-ftooltip.right="'視聴履歴'" to="/viewing-history/">
+            :class="{'watch-navigation__link--active': $route.path.startsWith('/watched-history')}"
+            v-ftooltip.right="'視聴履歴'" to="/watched-history/">
             <Icon class="watch-navigation__link-icon" icon="fluent:history-20-regular" width="26px" />
         </router-link>
+        <router-link v-ripple class="watch-navigation__link" active-class="watch-navigation__link--active"
+            :class="{'watch-navigation__link--active': $route.path.startsWith('/offline-videos')}"
+            v-ftooltip.right="'オフライン視聴'" to="/offline-videos/">
+            <Icon class="watch-navigation__link-icon" icon="fluent:cloud-arrow-down-20-regular" width="26px" />
+        </router-link>
         <v-spacer></v-spacer>
+        <a v-ripple class="watch-navigation__link" active-class="watch-navigation__link--active" v-if="settingsStore.settings.is_cloudflare_zerotrust"
+            v-ftooltip.right="'CFからログアウト'" href="/cdn-cgi/access/logout">
+            <Icon class="watch-navigation__link-icon" icon="fluent:sign-out-20-regular" width="26px" />
+        </a>   
         <router-link v-ripple class="watch-navigation__link" active-class="watch-navigation__link--active"
             :class="{'watch-navigation__link--active': $route.path.startsWith('/settings')}"
             v-ftooltip.right="'設定'" to="/settings/">
@@ -54,12 +71,18 @@
 import { mapStores } from 'pinia';
 import { defineComponent } from 'vue';
 
+import OfflineDownloadBadge from '@/components/OfflineDownloadBadge.vue';
 import usePlayerStore from '@/stores/PlayerStore';
+import useSettingsStore from '@/stores/SettingsStore';
 
 export default defineComponent({
     name: 'Watch-Navigation',
+    components: {
+        OfflineDownloadBadge,
+    },
     computed: {
         ...mapStores(usePlayerStore),
+        ...mapStores(useSettingsStore),
     }
 });
 
@@ -139,6 +162,13 @@ export default defineComponent({
 
         &:hover {
             background: #433532A0;
+        }
+
+        .watch-navigation__link-icon-wrapper {
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
         }
 
         @include smartphone-horizontal {

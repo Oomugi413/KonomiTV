@@ -3,7 +3,7 @@
 ## タイムゾーンが UTC の環境ではログの日時が日本時間より9時間遅れてしまうため
 ## デフォルトを Asia/Tokyo に変更することで、万が一のタイムゾーン関連のバグを防ぐ防波堤としての意味合いもある
 ## Windows ではタイムゾーンを変更することができないため、何もしない
-import os
+import os  # noqa: I001
 import sys
 import time
 if sys.platform != 'win32':
@@ -19,10 +19,11 @@ import atexit
 import logging
 import platform
 import subprocess
+from pathlib import Path
+
 import typer
 import uvicorn
 from aerich import Command
-from pathlib import Path
 from tortoise import Tortoise
 from uvicorn.supervisors.watchfilesreload import WatchFilesReload
 
@@ -32,12 +33,12 @@ from app.constants import (
     BASE_DIR,
     DATABASE_CONFIG,
     KONOMITV_ACCESS_LOG_PATH,
-    KONOMITV_SERVER_LOG_PATH,
     LIBRARY_PATH,
     LOGGING_CONFIG,
     RESTART_REQUIRED_LOCK_PATH,
     VERSION,
 )
+from app.utils.LogRotation import SplitServerLogByDate
 
 
 # passlib が送出する bcrypt のバージョン差異による警告を無視
@@ -57,16 +58,19 @@ def main(
     version: bool = typer.Option(None, '--version', callback=version, is_eager=True, help='Show version information.'),
 ):
 
-    # 前回のログをすべて削除する
+    # 前回のログのうち、アクセスログと Akebi のログのみ削除する
+    ## サーバーログは起動時に日付別分割されるため、ここでは削除しない
     try:
-        if KONOMITV_SERVER_LOG_PATH.exists():
-            KONOMITV_SERVER_LOG_PATH.unlink()
         if KONOMITV_ACCESS_LOG_PATH.exists():
             KONOMITV_ACCESS_LOG_PATH.unlink()
         if AKEBI_LOG_PATH.exists():
             AKEBI_LOG_PATH.unlink()
     except PermissionError:
         pass
+
+    # サーバーログに過去日付のエントリが含まれている場合、日付別アーカイブに分割する
+    ## DailyRotatingFileHandler がファイルを開く前に分割を完了させるために、ロガーの初期化前に実行する必要がある
+    SplitServerLogByDate()
 
     # もし何らかの理由でロックファイルが残っていた場合は削除する
     if RESTART_REQUIRED_LOCK_PATH.exists():
@@ -163,12 +167,6 @@ def main(
     # このプロセスが終了されたときに、HTTPS リバースプロキシも一緒に終了する
     atexit.register(lambda: reverse_proxy_process.terminate())
 
-    # Uvicorn を自動リロードモードで起動するかのフラグ
-    ## 基本的に開発時用で、コードを変更するとアプリケーションサーバーを自動で再起動してくれる
-    if sys.platform == 'win32' and reload is True:
-        logging.warning('Python の asyncio の技術的な制約により、Windows では自動リロードモードは正常に動作しません。')
-        logging.warning('なお、外部プロセス実行を伴うストリーミング視聴を行わなければ一応 Windows でも機能します。')
-
     # Uvicorn の設定
     server_config = uvicorn.Config(
         # 起動するアプリケーション
@@ -190,8 +188,8 @@ def main(
         interface = 'asgi3',
         # HTTP プロトコルの実装として httptools を選択
         http = 'httptools',
-        # イベントループの実装として Windows では asyncio 、それ以外では uvloop を選択
-        loop = ('asyncio' if sys.platform == 'win32' else 'uvloop'),
+        # イベントループのセットアップは自前で行うため、ここでは none を指定
+        loop = 'none',
         # ストリーミング配信中にサーバーシャットダウンを要求された際、強制的に接続を切断するまでの秒数
         timeout_graceful_shutdown = 1,
     )
@@ -199,20 +197,42 @@ def main(
     # Uvicorn のサーバーインスタンスを初期化
     server = uvicorn.Server(server_config)
 
+    # Linux では Uvloop をイベントループとして利用する
+    # Windows では Winloop をイベントループとして利用する予定だったが、2025年3月時点では
+    # キャプチャ保存時 (?) に稀にプロセスごと無言で落ちる問題があるため、当面は通常の asyncio (ProactorEventLoop) を利用する
+    # ref: https://github.com/Vizonex/Winloop
+    if sys.platform == 'win32':
+        if reload is True:
+            logging.warning('Python の asyncio の技術的な制約により、Windows では自動リロードモードは正常に動作しません。')
+            logging.warning('なお、外部プロセス実行を伴うストリーミング視聴を行わなければ一応 Windows でも機能します。')
+        # Aerich 0.8.2 以降では Windows のみインポート時にイベントループポリシーが SelectorEventLoop に変更されてしまうが、
+        # asyncio.subprocess.create_subprocess_exec() は ProactorEventLoop でないと動作しないため、明示的に ProactorEventLoop に戻す
+        # psycopg3 バックエンドが SelectorEventLoop しか対応していない件の対策らしいが、KonomiTV では SQLite を利用しているため問題ない
+        # ref: https://github.com/tortoise/aerich/pull/251
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    else:
+        import uvloop
+        uvloop.install()
+
     # Uvicorn を起動
     ## 自動リロードモードと通常時で呼び方が異なる
     ## ここで終了までブロッキングされる（非同期 I/O のエントリーポイント）
     ## ref: https://github.com/encode/uvicorn/blob/0.18.2/uvicorn/main.py#L568-L575
-    if server_config.should_reload:
-        # 自動リロードモード (Linux 専用)
-        ## Windows で自動リロードモードを機能させるには SelectorEventLoop が必要だが、外部プロセス実行に利用している
-        ## asyncio.subprocess.create_subprocess_exec() は ProactorEventLoop でないと動作しないため、Windows では事実上利用できない
-        ## 外部プロセス実行を伴うストリーミング視聴を行わなければ一応 Windows でも機能する
-        sock = server_config.bind_socket()
-        WatchFilesReload(server_config, target=server.run, sockets=[sock]).run()
-    else:
-        # 通常時
-        server.run()
+    try:
+        if server_config.should_reload:
+            # 自動リロードモード (Linux 専用)
+            ## Windows で自動リロードモードを機能させるには SelectorEventLoop が必要だが、外部プロセス実行に利用している
+            ## asyncio.subprocess.create_subprocess_exec() は ProactorEventLoop でないと動作しないため、Windows では事実上利用できない
+            ## 外部プロセス実行を伴うストリーミング視聴を行わなければ一応 Windows でも機能する
+            sock = server_config.bind_socket()
+            WatchFilesReload(server_config, target=server.run, sockets=[sock]).run()
+        else:
+            # 通常時
+            server.run()
+    except KeyboardInterrupt:
+        # Uvicorn のサーバーインスタンスから KeyboardInterrupt が送出された場合は一旦無視して、HTTPS リバースプロキシを確実に終了する
+        # 少し前の Uvicorn は KeyboardInterrupt を内部で握り潰していたが、最近のバージョンから送出するようになった
+        pass
 
     # HTTPS リバースプロキシを終了
     reverse_proxy_process.terminate()
@@ -225,14 +245,14 @@ def main(
     if RESTART_REQUIRED_LOCK_PATH.exists():
         logging.warning('Server restart requested. Restarting...')
 
-        # Windows サービスとして実行されている場合は、Windows サービス側で再起動処理が行われるので、ここでは何もしない
+        # Windows サービスとして実行されている場合は、Windows サービス側で再起動処理が行われるので、確実にプロセスを終了する
         if IsRunningAsWindowsService():
-            return
+            os._exit(0)  # type: ignore
 
         # os.execv() で現在のプロセスを新規に起動したプロセスに置き換える
         ## os.execv() は戻らないので、事前にロックファイルを削除しておく
         RESTART_REQUIRED_LOCK_PATH.unlink()
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        os.execv(sys.executable, [sys.executable, *sys.argv])
 
 
 if __name__ == '__main__':

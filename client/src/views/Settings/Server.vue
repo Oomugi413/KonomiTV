@@ -3,7 +3,7 @@
     <SettingsBase>
         <h2 class="settings__heading">
             <a v-ripple class="settings__back-button" @click="$router.back()">
-                <Icon icon="fluent:arrow-left-12-filled" width="25px" />
+                <Icon icon="fluent:chevron-left-12-filled" width="27px" />
             </a>
             <Icon icon="fluent:server-surface-16-filled" width="22px" />
             <span class="ml-2">サーバー設定</span>
@@ -23,12 +23,12 @@
             <div class="settings__item">
                 <div class="settings__item-heading">利用するバックエンド</div>
                 <div class="settings__item-label">
-                    EDCB・Mirakurun のいずれかを選択してください。<br>
-                    バックエンドに Mirakurun が選択されているときは、録画予約機能は利用できません。<br>
+                    EDCB・Mirakurun・EPGStation のいずれかを選択してください。<br>
+                    バックエンドに Mirakurun または EPGStation が選択されているときは、EDCB 専用の録画予約機能は利用できません。<br>
                 </div>
                 <v-select class="settings__item-form" color="primary" variant="outlined" hide-details
                     :density="is_form_dense ? 'compact' : 'default'"
-                    :items="['EDCB', 'Mirakurun']" v-model="server_settings.general.backend">
+                    :items="['EDCB', 'Mirakurun', 'EPGStation']" v-model="server_settings.general.backend">
                 </v-select>
             </div>
             <div class="settings__item">
@@ -58,6 +58,16 @@
                 <v-text-field class="settings__item-form" color="primary" variant="outlined" hide-details
                     :density="is_form_dense ? 'compact' : 'default'"
                     v-model="server_settings.general.mirakurun_url">
+                </v-text-field>
+            </div>
+            <div class="settings__item">
+                <div class="settings__item-heading">EPGStation の HTTP API の URL</div>
+                <div class="settings__item-label">
+                    バックエンドに EPGStation が選択されているとき、録画中判定などに利用されます。<br>
+                </div>
+                <v-text-field class="settings__item-form" color="primary" variant="outlined" hide-details
+                    :density="is_form_dense ? 'compact' : 'default'"
+                    v-model="server_settings.general.epgstation_url">
                 </v-text-field>
             </div>
             <div class="settings__item">
@@ -105,8 +115,8 @@
             <div class="settings__item settings__item--switch">
                 <label class="settings__item-heading" for="debug_encoder">エンコーダーのログを有効にする</label>
                 <label class="settings__item-label" for="debug_encoder">
-                    有効にすると、エンコーダーのログが server/logs/ 以下に保存されます。
-                    さらにデバッグモードが有効のときは、デバッグログとしてリアルタイムにエンコーダーのログが出力されます。<br>
+                    有効にすると、ライブ視聴時のエンコーダーのログが KonomiTV/server/logs/ 以下に保存されます。<br>
+                    さらにデバッグモード有効時は、サーバーログにエンコーダーのログがリアルタイム出力されます。<br>
                 </label>
                 <v-switch class="settings__item-switch" color="primary" id="debug_encoder" hide-details
                     v-model="server_settings.general.debug_encoder">
@@ -152,20 +162,41 @@
                 <label class="settings__item-heading" for="always_receive_tv_from_mirakurun">常に Mirakurun / mirakc から放送波を受信する</label>
                 <label class="settings__item-label" for="always_receive_tv_from_mirakurun">
                     利用するバックエンドが EDCB のとき、常に Mirakurun / mirakc から放送波を受信するかを設定します。
-                    バックエンドに Mirakurun が選択されているときは効果がありません。<br>
+                    バックエンドに Mirakurun が選択されているときは効果がありません。
+                    バックエンドに EPGStation が選択されているときは常に有効になります。<br>
                 </label>
                 <label class="settings__item-label mt-1" for="always_receive_tv_from_mirakurun">
                     KonomiTV から EDCB と Mirakurun / mirakc 両方にアクセスできる必要があります。<br>
                     EDCB はチューナー起動やチャンネル切り替えに時間がかかるため、Mirakurun / mirakc が利用できる環境であれば、この設定を有効にするとより快適に使えます。<br>
                 </label>
                 <v-switch class="settings__item-switch" color="primary" id="always_receive_tv_from_mirakurun" hide-details
+                    :disabled="server_settings.general.backend === 'EPGStation'"
                     v-model="server_settings.general.always_receive_tv_from_mirakurun">
                 </v-switch>
+            </div>
+            <div class="settings__item">
+                <div class="settings__item-heading">チャンネル表示・選局で優先するエリア (地デジ)</div>
+                <div class="settings__item-label">
+                    複数の地域の放送波が受信できる環境で、リモコン番号が同じチャンネルが複数ある場合に、どのエリアのチャンネルを優先して表示・選局するかを設定します。デフォルトは未設定です。<br>
+                </div>
+                <div class="settings__item-label mt-1">
+                    優先エリアのチャンネルは枝番なし (例: Ch:011) で、それ以外のチャンネルは枝番付き (例: Ch:011-1) で表示されます。キーボードショートカットやリモコンボタンでの選局時も、優先エリアのチャンネルが選局されます。<br>
+                </div>
+                <div class="settings__item-label mt-1">
+                    設定しない場合は、(ネットワークID)-(サービスID) の数値順で優先順位が決まります。<br>
+                </div>
+                <v-select class="settings__item-form" color="primary" variant="outlined" hide-details
+                    :density="is_form_dense ? 'compact' : 'default'"
+                    :items="preferred_terrestrial_region_options"
+                    v-model="server_settings.tv.preferred_terrestrial_region">
+                </v-select>
             </div>
             <div class="settings__item">
                 <div class="settings__item-heading">誰も見ていないチャンネルのエンコードタスクを維持する秒数</div>
                 <div class="settings__item-label">
                     10 秒に設定したなら、10 秒間誰も見ていない状態が継続したらエンコードタスク（エンコーダー）を終了します。<br>
+                </div>
+                <div class="settings__item-label mt-1">
                     0 秒に設定すると、ネット回線が瞬断したりリロードしただけでチューナーとエンコーダーの再起動が必要になり、再生復帰までに時間がかかります。余裕をもたせておく事をおすすめします。<br>
                 </div>
                 <v-slider class="settings__item-form" color="primary" show-ticks="always" thumb-label hide-details
@@ -181,7 +212,12 @@
             <div class="settings__item">
                 <div class="settings__item-heading">録画済み番組の保存先フォルダの絶対パス</div>
                 <div class="settings__item-label" style="padding-bottom: 2px;">
-                    複数の保存先フォルダを指定できます。<br>
+                    指定フォルダ以下に保存されている MPEG-TS 形式の録画ファイルを KonomiTV サーバーが自動的に見つけ出し、メタデータの解析とサムネイルの作成を行います。<br>
+                    解析が完了すると、録画番組一覧から再生できるようになります。<br>
+                </div>
+                <div class="settings__item-label mt-1" style="padding-bottom: 2px;">
+                    複数の保存先フォルダを指定できます。フォルダやファイルのシンボリックリンクにも対応しています。<br>
+                    シンボリックリンクは実体のパスに変換されるため、同じ録画ファイルが重複スキャンされることはありません。<br>
                 </div>
                 <div v-for="(folder, index) in server_settings.video.recorded_folders" :key="'recorded-folder-' + index">
                     <div class="d-flex align-center mt-3">
@@ -204,6 +240,36 @@
                     <span class="ml-1">保存先フォルダを追加</span>
                 </v-btn>
             </div>
+            <div class="settings__item">
+                <div class="settings__item-heading">録画フォルダのスキャン対象から除外するフォルダの絶対パス</div>
+                <div class="settings__item-label" style="padding-bottom: 2px;">
+                    録画フォルダ以下にある一時フォルダなど、スキャン対象から除外したいサブフォルダを指定できます。<br>
+                </div>
+                <div class="settings__item-label mt-1" style="padding-bottom: 2px;">
+                    シンボリックリンク解決前のパスと、解決後の実体パスの両方で前方一致判定を行います。<br>
+                    例えば、<code>E:\TV-Record\Temp</code> を指定すると、そのサブフォルダ以下の録画ファイルはスキャン対象から除外されます。<br>
+                </div>
+                <div v-for="(pattern, index) in server_settings.video.exclude_scan_paths" :key="'exclude-pattern-' + index">
+                    <div class="d-flex align-center mt-3">
+                        <v-text-field class="settings__item-form mt-0" color="primary" variant="outlined" hide-details
+                            placeholder="例: E:\TV-Record\Trash"
+                            :density="is_form_dense ? 'compact' : 'default'"
+                            v-model="server_settings.video.exclude_scan_paths[index]">
+                        </v-text-field>
+                        <button v-ripple class="settings__item-delete-button"
+                            @click="server_settings.video.exclude_scan_paths.splice(index, 1)">
+                            <svg class="iconify iconify--fluent" width="20px" height="20px" viewBox="0 0 16 16">
+                                <path fill="currentColor" d="M7 3h2a1 1 0 0 0-2 0ZM6 3a2 2 0 1 1 4 0h4a.5.5 0 0 1 0 1h-.564l-1.205 8.838A2.5 2.5 0 0 1 9.754 15H6.246a2.5 2.5 0 0 1-2.477-2.162L2.564 4H2a.5.5 0 0 1 0-1h4Zm1 3.5a.5.5 0 0 0-1 0v5a.5.5 0 0 0 1 0v-5ZM9.5 6a.5.5 0 0 0-.5.5v5a.5.5 0 0 0 1 0v-5a.5.5 0 0 0-.5-.5Z"></path>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+                <v-btn class="mt-3" color="background-lighten-2" variant="flat" height="40px"
+                    @click="server_settings.video.exclude_scan_paths.push('')">
+                    <Icon icon="fluent:add-12-filled" height="17px" />
+                    <span class="ml-1">除外フォルダを追加</span>
+                </v-btn>
+            </div>
             <div class="settings__content-heading mt-6">
                 <Icon icon="fluent:image-multiple-16-filled" width="22px" />
                 <span class="ml-2">キャプチャ</span>
@@ -211,11 +277,12 @@
             <div class="settings__item">
                 <div class="settings__item-heading">アップロードしたキャプチャ画像の保存先フォルダの絶対パス</div>
                 <div class="settings__item-label">
-                    クライアントの [キャプチャの保存先] 設定で [KonomiTV サーバーにアップロード] または
+                    <router-link class="link" to="/settings/capture">[キャプチャ]</router-link> → [キャプチャの保存先] で [KonomiTV サーバーにアップロード] または
                     [ブラウザでのダウンロードと、KonomiTV サーバーへのアップロードを両方行う] が選択されているときに利用されます。<br>
                 </div>
                 <div class="settings__item-label mt-1" style="padding-bottom: 2px;">
-                    複数の保存先フォルダを指定できます。先頭から順に利用され、保存先フォルダがいっぱいになったら次の保存先フォルダに保存されます。<br>
+                    複数の保存先フォルダを指定できます。<br>
+                    先頭から順に利用され、保存先フォルダがいっぱいになったら次の保存先フォルダに保存されます。<br>
                 </div>
                 <div v-for="(folder, index) in server_settings.capture.upload_folders" :key="'upload-folder-' + index">
                     <div class="d-flex align-center mt-3">
@@ -238,6 +305,143 @@
                     <span class="ml-1">保存先フォルダを追加</span>
                 </v-btn>
             </div>
+            <div class="settings__content-heading mt-6">
+                <Icon icon="fluent:alert-16-filled" width="22px" />
+                <span class="ml-2">通知</span>
+            </div>
+            <div class="settings__item-label">
+                新しい録画ファイルが検出された時に外部サービスへ通知を送信します。<br>
+                複数の通知サービスを同時に有効にできます。<br>
+            </div>
+            <div v-for="(service, index) in server_settings.notifications.services" :key="'notification-service-' + index">
+                <div class="settings__item mt-4" style="border: 1px solid rgb(var(--v-theme-background-lighten-2)); border-radius: 8px; padding: 24px;">
+                    <div class="d-flex align-center mb-4">
+                        <div class="settings__item-heading" style="margin: 0; flex: 1;">通知サービス #{{ index + 1 }}</div>
+                        <button v-ripple class="settings__item-delete-button"
+                            @click="server_settings.notifications.services.splice(index, 1)">
+                            <svg class="iconify iconify--fluent" width="20px" height="20px" viewBox="0 0 16 16">
+                                <path fill="currentColor" d="M7 3h2a1 1 0 0 0-2 0ZM6 3a2 2 0 1 1 4 0h4a.5.5 0 0 1 0 1h-.564l-1.205 8.838A2.5 2.5 0 0 1 9.754 15H6.246a2.5 2.5 0 0 1-2.477-2.162L2.564 4H2a.5.5 0 0 1 0-1h4Zm1 3.5a.5.5 0 0 0-1 0v5a.5.5 0 0 0 1 0v-5ZM9.5 6a.5.5 0 0 0-.5.5v5a.5.5 0 0 0 1 0v-5a.5.5 0 0 0-.5-.5Z"></path>
+                            </svg>
+                        </button>
+                    </div>
+
+                    <div class="settings__item settings__item--switch mb-3">
+                        <label class="settings__item-heading" :for="'notification-enabled-' + index">この通知サービスを有効にする</label>
+                        <v-switch class="settings__item-switch" color="primary" hide-details
+                            :density="is_form_dense ? 'compact' : 'default'"
+                            :id="'notification-enabled-' + index"
+                            v-model="service.enabled">
+                        </v-switch>
+                    </div>
+
+                    <div class="settings__item mb-3">
+                        <div class="settings__item-heading">通知サービスの種類</div>
+                        <v-select class="settings__item-form" color="primary" variant="outlined" hide-details
+                            :density="is_form_dense ? 'compact' : 'default'"
+                            :items="[
+                                {title: 'Telegram', value: 'Telegram'},
+                                {title: 'Slack（将来実装予定）', value: 'Slack', disabled: true}
+                            ]"
+                            v-model="service.type">
+                        </v-select>
+                    </div>
+
+                    <template v-if="service.type === 'Telegram'">
+                        <div class="settings__item mb-3">
+                            <div class="settings__item-heading">Bot Token</div>
+                            <div class="settings__item-label">
+                                Telegram の BotFather から取得した Bot Token を入力してください。<br>
+                            </div>
+                            <v-text-field class="settings__item-form" color="primary" variant="outlined" hide-details
+                                placeholder="例: 123456789:ABCDEFghijklmnopQRSTUVwxyz"
+                                :density="is_form_dense ? 'compact' : 'default'"
+                                v-model="service.bot_token">
+                            </v-text-field>
+                        </div>
+                        <div class="settings__item">
+                            <div class="settings__item-heading">Chat ID</div>
+                            <div class="settings__item-label">
+                                通知を送信する先の Chat ID を入力してください。<br>
+                                個人チャットの場合は数字、グループチャットの場合は負の数字になります。<br>
+                            </div>
+                            <v-text-field class="settings__item-form" color="primary" variant="outlined" hide-details
+                                placeholder="例: 123456789 または -987654321"
+                                :density="is_form_dense ? 'compact' : 'default'"
+                                v-model="service.chat_id">
+                            </v-text-field>
+                        </div>
+                        <div class="settings__item">
+                            <div class="settings__item-heading">視聴ボタンの設定</div>
+                            <div class="settings__item-label">
+                                通知メッセージに表示される視聴ボタンを設定できます。<br>
+                                複数のボタンを設定可能です。未設定の場合、視聴ボタンは表示されません。<br>
+                            </div>
+                            <div v-if="!service.watch_urls">
+                                <v-btn class="mt-3" color="background-lighten-2" variant="flat" height="40px"
+                                    @click="service.watch_urls = []">
+                                    <Icon icon="fluent:add-12-filled" height="17px" />
+                                    <span class="ml-1">視聴ボタンを追加</span>
+                                </v-btn>
+                            </div>
+                            <div v-else>
+                                <div v-for="(watch_url, watch_url_index) in service.watch_urls" :key="'watch-url-' + watch_url_index">
+                                    <div class="d-flex align-center mt-3" style="gap: 12px;">
+                                        <v-text-field class="flex-grow-1" color="primary" variant="outlined" hide-details
+                                            label="ボタンテキスト"
+                                            placeholder="例: 🏠 ローカルで視聴"
+                                            :density="is_form_dense ? 'compact' : 'default'"
+                                            v-model="watch_url.text">
+                                        </v-text-field>
+                                        <v-text-field class="flex-grow-1" color="primary" variant="outlined" hide-details
+                                            label="ベースURL"
+                                            placeholder="例: https://internal.example.com"
+                                            :density="is_form_dense ? 'compact' : 'default'"
+                                            v-model="watch_url.base_url">
+                                        </v-text-field>
+                                        <button v-ripple class="settings__item-delete-button"
+                                            @click="service.watch_urls.splice(watch_url_index, 1)">
+                                            <svg class="iconify iconify--fluent" width="20px" height="20px" viewBox="0 0 16 16">
+                                                <path fill="currentColor" d="M7 3h2a1 1 0 0 0-2 0ZM6 3a2 2 0 1 1 4 0h4a.5.5 0 0 1 0 1h-.564l-1.205 8.838A2.5 2.5 0 0 1 9.754 15H6.246a2.5 2.5 0 0 1-2.477-2.162L2.564 4H2a.5.5 0 0 1 0-1h4Zm1 3.5a.5.5 0 0 0-1 0v5a.5.5 0 0 0 1 0v-5ZM9.5 6a.5.5 0 0 0-.5.5v5a.5.5 0 0 0 1 0v-5a.5.5 0 0 0-.5-.5Z"></path>
+                                            </svg>
+                                        </button>
+                                    </div>
+                                </div>
+                                <v-btn class="mt-3" color="background-lighten-2" variant="flat" height="40px"
+                                    @click="service.watch_urls.push({text: '', base_url: '', type: 'watch_url'})">
+                                    <Icon icon="fluent:add-12-filled" height="17px" />
+                                    <span class="ml-1">視聴ボタンを追加</span>
+                                </v-btn>
+                            </div>
+                        </div>
+                    </template>
+
+                    <template v-if="service.type === 'Slack'">
+                        <div class="settings__item">
+                            <div class="settings__item-heading">Webhook URL</div>
+                            <div class="settings__item-label">
+                                Slack の Incoming Webhook URL を入力してください。<br>
+                            </div>
+                            <v-text-field class="settings__item-form" color="primary" variant="outlined" hide-details
+                                placeholder="例: https://hooks.slack.com/services/..."
+                                :density="is_form_dense ? 'compact' : 'default'"
+                                v-model="service.webhook_url">
+                            </v-text-field>
+                        </div>
+                    </template>
+                </div>
+            </div>
+            <div class="d-flex align-center mt-3">
+                <v-btn color="background-lighten-2" variant="flat" height="40px"
+                    @click="addNotificationService()">
+                    <Icon icon="fluent:add-12-filled" height="17px" />
+                    <span class="ml-1">通知サービスを追加</span>
+                </v-btn>
+                <v-btn class="ml-3" color="background-lighten-2" variant="flat" height="40px"
+                    @click="testNotification()" :disabled="!hasEnabledNotificationServices">
+                    <Icon icon="fluent:speaker-2-16-filled" height="17px" />
+                    <span class="ml-1">テスト通知を送信</span>
+                </v-btn>
+            </div>
             <v-btn class="settings__save-button bg-secondary mt-6" variant="flat" @click="updateServerSettings()">
                 <Icon icon="fluent:save-16-filled" class="mr-2" height="23px" />サーバー設定を更新
             </v-btn>
@@ -258,10 +462,28 @@
                 <Icon icon="fluent:person-board-20-filled" height="20px" />
                 <span class="ml-1">アカウントの管理設定を開く</span>
             </v-btn>
+        </div>
+        <div class="settings__content">
             <div class="settings__content-heading mt-8">
                 <Icon icon="fluent:wrench-settings-20-filled" width="22px" />
                 <span class="ml-2">メンテナンス</span>
             </div>
+        </div>
+        <div class="settings__content" :class="{'settings__content--disabled': is_disabled}">
+            <div class="settings__item">
+                <div class="settings__item-heading">サーバーログの表示</div>
+                <div class="settings__item-label">
+                    KonomiTV サーバーの動作ログとアクセスログをリアルタイムで表示します。<br>
+                    サーバーの動作状況の確認やトラブルシューティングに役立ちます。<br>
+                </div>
+            </div>
+            <v-btn class="settings__save-button mt-5" color="background-lighten-2" variant="flat"
+                @click="server_log_dialog = !server_log_dialog">
+                <Icon icon="fluent:document-text-16-regular" height="20px" />
+                <span class="ml-2">サーバーログを表示</span>
+            </v-btn>
+        </div>
+        <div class="settings__content">
             <div class="settings__item">
                 <div class="settings__item-heading">KonomiTV のデータベースを更新</div>
                 <div class="settings__item-label">
@@ -274,6 +496,38 @@
                 <Icon icon="iconoir:database-backup" height="20px" />
                 <span class="ml-2">データベースを更新</span>
             </v-btn>
+            <div class="settings__item">
+                <div class="settings__item-heading">録画フォルダの一括スキャンを手動実行</div>
+                <div class="settings__item-label">
+                    録画フォルダ内のファイルは、通常 KonomiTV サーバーの起動時に自動的にスキャンされます。<br>
+                    録画ファイルが KonomiTV に正しく反映されていない場合にのみ実行してみてください。<br>
+                </div>
+                <div class="settings__item-label mt-1">
+                    <strong>大量の録画ファイルが保存されている環境では、処理完了まで数時間〜数日以上かかることがあります。</strong><br>
+                </div>
+            </div>
+            <v-btn class="settings__save-button mt-5" color="background-lighten-2" variant="flat"
+                @click="runBatchScan()">
+                <Icon icon="fluent:folder-sync-20-regular" height="20px" />
+                <span class="ml-2">録画フォルダの一括スキャンを手動実行</span>
+            </v-btn>
+            <div class="settings__item">
+                <div class="settings__item-heading">録画ファイルのバックグラウンド解析タスクを再実行</div>
+                <div class="settings__item-label">
+                    録画ファイルのメタデータ解析やサムネイル作成が完了していない場合に、これらの処理を再度実行します。<br>
+                    PC のシャットダウンなどで途中で中断してしまった場合は、このボタンから処理を再開できます。<br>
+                </div>
+                <div class="settings__item-label mt-1">
+                    <strong>大量の録画ファイルが保存されている環境では、処理完了まで数時間〜数日以上かかることがあります。</strong><br>
+                </div>
+            </div>
+            <v-btn class="settings__save-button mt-5" color="background-lighten-2" variant="flat"
+                @click="startBackgroundAnalysis()">
+                <Icon icon="fluent:book-arrow-clockwise-20-regular" height="20px" />
+                <span class="ml-2">バックグラウンド解析タスクを再実行</span>
+            </v-btn>
+        </div>
+        <div class="settings__content" :class="{'settings__content--disabled': is_disabled}">
             <div class="settings__item">
                 <div class="settings__item-heading text-error-lighten-1">KonomiTV サーバーを再起動</div>
                 <div class="settings__item-label">
@@ -303,13 +557,15 @@
             </v-btn>
         </div>
         <AccountManageSettings :modelValue="account_manage_settings_modal" @update:modelValue="account_manage_settings_modal = $event" />
+        <ServerLogDialog :modelValue="server_log_dialog" @update:modelValue="server_log_dialog = $event" />
     </SettingsBase>
 </template>
 <script lang="ts" setup>
 
-import { ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 
 import AccountManageSettings from '@/components/Settings/AccountManageSettings.vue';
+import ServerLogDialog from '@/components/Settings/ServerLogDialog.vue';
 import Message from '@/message';
 import Maintenance from '@/services/Maintenance';
 import Settings, { IServerSettings, IServerSettingsDefault } from '@/services/Settings';
@@ -320,6 +576,64 @@ import SettingsBase from '@/views/Settings/Base.vue';
 
 // フォームを小さくするかどうか
 const is_form_dense = Utils.isSmartphoneHorizontal();
+
+// 優先する地デジのエリアの選択肢
+const preferred_terrestrial_region_options = [
+    { title: '未設定', value: null },
+    { title: '北海道（札幌）', value: '北海道（札幌）' },
+    { title: '北海道（函館）', value: '北海道（函館）' },
+    { title: '北海道（旭川）', value: '北海道（旭川）' },
+    { title: '北海道（帯広）', value: '北海道（帯広）' },
+    { title: '北海道（釧路）', value: '北海道（釧路）' },
+    { title: '北海道（北見）', value: '北海道（北見）' },
+    { title: '北海道（室蘭）', value: '北海道（室蘭）' },
+    { title: '青森県', value: '青森県' },
+    { title: '岩手県', value: '岩手県' },
+    { title: '宮城県', value: '宮城県' },
+    { title: '秋田県', value: '秋田県' },
+    { title: '山形県', value: '山形県' },
+    { title: '福島県', value: '福島県' },
+    { title: '茨城県', value: '茨城県' },
+    { title: '栃木県', value: '栃木県' },
+    { title: '群馬県', value: '群馬県' },
+    { title: '埼玉県', value: '埼玉県' },
+    { title: '千葉県', value: '千葉県' },
+    { title: '東京都', value: '東京都' },
+    { title: '神奈川県', value: '神奈川県' },
+    { title: '新潟県', value: '新潟県' },
+    { title: '富山県', value: '富山県' },
+    { title: '石川県', value: '石川県' },
+    { title: '福井県', value: '福井県' },
+    { title: '山梨県', value: '山梨県' },
+    { title: '長野県', value: '長野県' },
+    { title: '岐阜県', value: '岐阜県' },
+    { title: '静岡県', value: '静岡県' },
+    { title: '愛知県', value: '愛知県' },
+    { title: '三重県', value: '三重県' },
+    { title: '滋賀県', value: '滋賀県' },
+    { title: '京都府', value: '京都府' },
+    { title: '大阪府', value: '大阪府' },
+    { title: '兵庫県', value: '兵庫県' },
+    { title: '奈良県', value: '奈良県' },
+    { title: '和歌山県', value: '和歌山県' },
+    { title: '鳥取県', value: '鳥取県' },
+    { title: '島根県', value: '島根県' },
+    { title: '岡山県', value: '岡山県' },
+    { title: '広島県', value: '広島県' },
+    { title: '山口県', value: '山口県' },
+    { title: '徳島県', value: '徳島県' },
+    { title: '香川県', value: '香川県' },
+    { title: '愛媛県', value: '愛媛県' },
+    { title: '高知県', value: '高知県' },
+    { title: '福岡県', value: '福岡県' },
+    { title: '佐賀県', value: '佐賀県' },
+    { title: '長崎県', value: '長崎県' },
+    { title: '熊本県', value: '熊本県' },
+    { title: '大分県', value: '大分県' },
+    { title: '宮崎県', value: '宮崎県' },
+    { title: '鹿児島県', value: '鹿児島県' },
+    { title: '沖縄県', value: '沖縄県' },
+];
 
 // ユーザー情報を取得し、もし管理者権限であれば無効化を解除
 const is_disabled = ref(true);
@@ -338,8 +652,19 @@ Settings.fetchServerSettings().then((settings) => {
     }
 });
 
+watch(() => server_settings.value.general.backend, (backend) => {
+    if (backend === 'EPGStation') {
+        server_settings.value.general.always_receive_tv_from_mirakurun = true;
+    }
+});
+
 // サーバー設定を更新する関数
 async function updateServerSettings() {
+
+    // EPGStation バックエンドでは放送波受信を必ず Mirakurun / mirakc に委譲する
+    if (server_settings.value.general.backend === 'EPGStation') {
+        server_settings.value.general.always_receive_tv_from_mirakurun = true;
+    }
 
     // custom_https_certificate と custom_https_private_key が空文字列の場合は null に変換
     if (server_settings.value.server.custom_https_certificate === '') {
@@ -362,6 +687,8 @@ async function updateServerSettings() {
 
 // ユーザー管理モーダルの表示状態
 const account_manage_settings_modal = ref(false);
+// サーバーログダイアログの表示状態
+const server_log_dialog = ref(false);
 
 // データベースを更新する関数
 async function updateDatabase() {
@@ -370,23 +697,87 @@ async function updateDatabase() {
     Message.success('データベースを更新しました。');
 }
 
+// 録画フォルダの一括スキャンを実行する関数
+async function runBatchScan() {
+    Message.info(
+        '録画フォルダの一括スキャンを開始しています...\n' +
+        '大量の録画ファイルが保存されている環境では、処理完了まで数時間〜数日以上かかることがあります。'
+    );
+    const result = await Maintenance.runBatchScan();
+    if (result === true) {
+        Message.success(
+            '録画フォルダの一括スキャンが完了しました。\n' +
+            'すべての録画ファイルがデータベースに同期されているはずです。'
+        );
+    }
+}
+
+// バックグラウンド解析タスクを開始する関数
+async function startBackgroundAnalysis() {
+    Message.info(
+        'バックグラウンド解析タスクを開始しています...\n' +
+        '大量の録画ファイルが保存されている環境では、処理完了まで数時間〜数日以上かかることがあります。'
+    );
+    const result = await Maintenance.startBackgroundAnalysis();
+    if (result === true) {
+        Message.success(
+            'バックグラウンド解析タスクの実行が完了しました。\n' +
+            'すべての録画番組のメタデータ解析/サムネイル生成が完了しているはずです。'
+        );
+    }
+}
+
 // KonomiTV サーバーの再起動を行う関数
 async function restartServer() {
-    await Maintenance.restartServer();
-    Message.show('KonomiTV サーバーを再起動しています...');
-    // バージョン情報が取得できるようになるまで待つ
-    await Utils.sleep(1.0);
-    while (await Version.fetchServerVersion(true) === null) {
+    const result = await Maintenance.restartServer();
+    if (result === true) {
+        Message.show('KonomiTV サーバーを再起動しています...');
+        // バージョン情報が取得できるようになるまで待つ
         await Utils.sleep(1.0);
+        while (await Version.fetchServerVersion(true) === null) {
+            await Utils.sleep(1.0);
+        }
+        Message.success('KonomiTV サーバーを再起動しました。');
     }
-    Message.success('KonomiTV サーバーを再起動しました。');
 }
 
 // KonomiTV サーバーのシャットダウンを行う関数
 async function shutdownServer() {
-    await Maintenance.shutdownServer();
-    Message.success('KonomiTV サーバーをシャットダウンしました。');
+    const result = await Maintenance.shutdownServer();
+    if (result === true) {
+        Message.success('KonomiTV サーバーをシャットダウンしました。');
+    }
+}
+
+// 通知サービスを追加する関数
+function addNotificationService() {
+    server_settings.value.notifications.services.push({
+        type: 'Telegram',
+        enabled: false,
+        bot_token: '',
+        chat_id: '',
+        webhook_url: '',
+        watch_urls: []
+    });
+}
+
+// 有効な通知サービスが存在するかを計算
+const hasEnabledNotificationServices = computed(() => {
+    return server_settings.value.notifications.services.some(service => service.enabled);
+});
+
+// テスト通知を送信する関数
+async function testNotification() {
+    if (!hasEnabledNotificationServices.value) {
+        Message.error('有効な通知サービスが設定されていません。');
+        return;
+    }
+
+    Message.show('テスト通知を送信しています...');
+    const result = await Maintenance.testNotification();
+    if (result === true) {
+        Message.success('テスト通知を送信しました。');
+    }
 }
 
 </script>
-

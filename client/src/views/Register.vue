@@ -3,6 +3,7 @@
         <HeaderBar />
         <main>
             <Navigation />
+            <SPHeaderBar :hide-on-smartphone-vertical="true" />
             <div class="register-container-wrapper d-flex align-center w-100 mb-13">
                 <v-card class="register-container px-10 pt-8 pb-11 mx-auto" elevation="10"
                     width="100%" max-width="450">
@@ -16,7 +17,8 @@
                             placeholder="ユーザー名" autofocus
                             :density="is_form_dense ? 'compact' : 'default'"
                             v-model="username"
-                            :rules="[username_validation]">
+                            :rules="[username_validation]"
+                            @keyup.enter="register()">
                         </v-text-field>
                         <v-text-field style="margin-top: 10px;" color="primary" variant="outlined"
                             placeholder="パスワード"
@@ -25,7 +27,8 @@
                             :type="password_showing ? 'text' : 'password'"
                             :rules="[password_validation]"
                             :append-inner-icon="password_showing ? 'mdi-eye' : 'mdi-eye-off'"
-                            @click:appendInner="password_showing = !password_showing">
+                            @click:appendInner="password_showing = !password_showing"
+                            @keyup.enter="register()">
                         </v-text-field>
                         <v-btn class="register-button mt-5" color="secondary" variant="flat" width="100%" height="56"
                             @click="register()">
@@ -45,6 +48,7 @@ import { VForm } from 'vuetify/components';
 
 import HeaderBar from '@/components/HeaderBar.vue';
 import Navigation from '@/components/Navigation.vue';
+import SPHeaderBar from '@/components/SPHeaderBar.vue';
 import useUserStore from '@/stores/UserStore';
 import Utils from '@/utils';
 
@@ -53,6 +57,7 @@ export default defineComponent({
     components: {
         HeaderBar,
         Navigation,
+        SPHeaderBar,
     },
     data() {
         return {

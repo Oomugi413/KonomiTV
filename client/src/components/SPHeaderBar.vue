@@ -1,18 +1,28 @@
 <template>
-    <header class="header" :class="{ 'search-active': is_search_active }">
-        <template v-if="!is_search_active">
+    <header class="header" :class="{ 'search-active': isSearchActive, 'header--hide-on-sp-vertical': props.hideOnSmartphoneVertical }">
+        <template v-if="!isSearchActive">
             <router-link v-ripple class="konomitv-logo" to="/tv/">
                 <img class="konomitv-logo__image" src="/assets/images/logo.svg" height="21">
             </router-link>
             <v-spacer></v-spacer>
-            <div v-ripple class="search-button" @click="activateSearch">
-                <Icon icon="fluent:search-20-filled" height="24px" />
+            <!-- 番組表コントロール用スロット -->
+            <slot name="timetable-controls"></slot>
+            <div class="header-actions">
+                <!-- スマホ縦画面では Navigation が非表示のため、ヘッダー側にバッジを残す -->
+                <OfflineDownloadBadge />
+                <RemoteDeviceActivator class="header-actions__cast" />
+                <div v-if="showSearchButton" v-ripple class="search-button" @click="activateSearch">
+                    <Icon icon="fluent:search-20-filled" height="24px" />
+                </div>
             </div>
         </template>
         <template v-else>
             <div class="search-box">
-                <input ref="search_input" type="text" :placeholder="search_placeholder"
-                    v-model="search_query" @keydown="handleKeyDown">
+                <div class="search-box__icon">
+                    <Icon icon="fluent:search-20-filled" height="20px" />
+                </div>
+                <input ref="searchInput" type="search" name="sp-header-search" enterkeyhint="search" :placeholder="searchPlaceholder"
+                    v-model="searchQuery" @keydown="handleKeyDown">
                 <div v-ripple class="search-box__close" @click="deactivateSearch">
                     <Icon icon="fluent:dismiss-20-filled" height="24px" />
                 </div>
@@ -22,66 +32,144 @@
 </template>
 <script lang="ts" setup>
 
-import { ref, computed, watch, onMounted } from 'vue';
+import { ref, computed, onMounted, watch } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
+
+import OfflineDownloadBadge from '@/components/OfflineDownloadBadge.vue';
+import RemoteDeviceActivator from '@/components/RemoteDeviceActivator.vue';
+
+// Props の定義
+const props = withDefaults(defineProps<{
+    // スマホ縦画面で非表示にするかどうか
+    // スマホ縦画面で従来 SPHeaderBar がなかったページ（設定ページ経由のページなど）で使用
+    hideOnSmartphoneVertical?: boolean;
+    searchQuery?: string;
+}>(), {
+    hideOnSmartphoneVertical: false,
+    searchQuery: undefined,
+});
+
+const emit = defineEmits<{
+    (e: 'update:searchQuery', searchQuery: string): void;
+    (e: 'search', searchQuery: string): void;
+}>();
 
 const router = useRouter();
 const route = useRoute();
-const is_search_active = ref(false);
-const search_query = ref('');
-const search_input = ref<HTMLInputElement | null>(null);
 
-const search_placeholder = computed(() => {
-    return route.path.startsWith('/videos') || route.path.startsWith('/mylist') || route.path.startsWith('/viewing-history')
-        ? '録画番組を検索...'
+// 検索入力フィールドの参照
+const searchInput = ref<HTMLInputElement | null>(null);
+
+// 検索窓の表示状態
+const isSearchActive = ref(false);
+
+// 検索クエリ
+const internalSearchQuery = ref('');
+
+const searchQuery = computed({
+    get: () => props.searchQuery ?? internalSearchQuery.value,
+    set: (value: string) => {
+        // 番組検索ページでは親の検索条件と同期し、それ以外ではヘッダー内の一時入力として扱う
+        if (props.searchQuery !== undefined) {
+            emit('update:searchQuery', value);
+        } else {
+            internalSearchQuery.value = value;
+        }
+    },
+});
+
+// 検索ボタンの表示判定
+// 番組表ページでは検索ボタンは表示するが、設定/ログイン/登録/キャプチャページでは非表示
+const showSearchButton = computed(() => {
+    const path = route.path;
+    return !path.startsWith('/captures') && !path.startsWith('/settings') && !path.startsWith('/login') && !path.startsWith('/register');
+});
+
+// 検索プレースホルダー
+const searchPlaceholder = computed(() => {
+    if (route.path.startsWith('/series')) {
+        return 'シリーズを検索...';
+    }
+    return isVideoSection(route.path)
+        ? '録画番組やシリーズを検索...'
         : '放送予定の番組を検索...';
 });
 
+// 動画セクションかどうかを判定
+const isVideoSection = (path: string) => {
+    return path.startsWith('/videos') ||
+           path.startsWith('/mylist') ||
+           path.startsWith('/watched-history');
+};
+
+// 検索パスを取得
 const getSearchPath = () => {
-    return route.path.startsWith('/videos') || route.path.startsWith('/mylist') || route.path.startsWith('/viewing-history')
+    if (route.path.startsWith('/series')) {
+        return '/series/';
+    }
+    return isVideoSection(route.path)
         ? '/videos/search'
         : '/tv/search';
 };
 
+// 検索窓を開く
 const activateSearch = () => {
-    is_search_active.value = true;
+    isSearchActive.value = true;
     // 次のティックで入力フォーカスを設定
     setTimeout(() => {
-        search_input.value?.focus();
+        searchInput.value?.focus();
     }, 0);
 };
 
+// 検索窓を閉じる
 const deactivateSearch = () => {
-    is_search_active.value = false;
-    search_query.value = '';
+    isSearchActive.value = false;
+    // 親がキーワードを管理している検索ページでは、閉じる操作だけで検索条件を消さない
+    if (props.searchQuery === undefined) {
+        internalSearchQuery.value = '';
+    }
 };
 
+// 検索を実行
+const executeSearch = () => {
+    // 番組検索ページでは空欄キーワードでも絞り込み検索できるため、空文字のままページ側へ渡す
+    if (props.searchQuery !== undefined) {
+        const trimmedSearchQuery = searchQuery.value.trim();
+        emit('update:searchQuery', trimmedSearchQuery);
+        emit('search', trimmedSearchQuery);
+        return;
+    }
+
+    if (searchQuery.value.trim()) {
+        const searchPath = getSearchPath();
+        router.push(`${searchPath}?query=${encodeURIComponent(searchQuery.value.trim())}`);
+    }
+};
+
+// キーボードイベントの処理
 const handleKeyDown = (event: KeyboardEvent) => {
-    if (event.key === 'Enter' && !event.isComposing) {
-        if (search_query.value.trim()) {
-            const search_path = getSearchPath();
-            router.push(`${search_path}?query=${encodeURIComponent(search_query.value.trim())}`);
-        }
+    if (event.key === 'Enter' && event.isComposing === false) {
+        executeSearch();
     } else if (event.key === 'Escape') {
         deactivateSearch();
     }
 };
 
-// 検索クエリの初期化関数
-const initialize_search_query = () => {
-    if (route.path.endsWith('/search') && route.query.query) {
-        search_query.value = decodeURIComponent(route.query.query as string);
-        is_search_active.value = true;
-    }
-};
-
 // コンポーネントのマウント時に初期化
 onMounted(() => {
-    initialize_search_query();
+    // 親がキーワードを管理していない検索ページでは、URL からヘッダー内の入力欄を復元する
+    if (props.searchQuery === undefined && route.path.endsWith('/search') && route.query.query) {
+        internalSearchQuery.value = decodeURIComponent(route.query.query as string);
+        isSearchActive.value = true;
+    }
 });
 
-// ルートの変更を監視して検索クエリを更新
-watch(() => route.fullPath, initialize_search_query);
+watch(() => props.searchQuery, (searchQueryValue) => {
+    // 検索ページでは結果見出しと同じキーワードをすぐ編集できるよう、入力欄を開いたままにする
+    if (searchQueryValue !== undefined) {
+        isSearchActive.value = true;
+    }
+}, { immediate: true });
 
 </script>
 <style lang="scss" scoped>
@@ -99,17 +187,92 @@ watch(() => route.fullPath, initialize_search_query);
         display: flex;
     }
 
+    // スマホ縦画面で非表示にするクラス
+    // スマホ縦画面で従来 SPHeaderBar がなかったページで使用
+    &--hide-on-sp-vertical {
+        @include smartphone-vertical {
+            display: none;
+        }
+    }
+
+    // スマホ横画面では左上隅に固定表示
+    @include smartphone-horizontal {
+        display: flex;
+        gap: 8px;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 210px;
+        padding: 0 12px;
+        padding-top: 0;
+        box-shadow: 0px 5px 5px -3px rgb(0 0 0 / 20%),
+                    0px 8px 10px 1px rgb(0 0 0 / 14%),
+                    0px 3px 14px 2px rgb(0 0 0 / 12%);
+        z-index: 40;
+    }
+    @include smartphone-horizontal-short {
+        width: 190px;
+    }
+
     &.search-active {
         padding: 0;
+        // スマホ横画面で検索アクティブ時は全幅に展開
+        @include smartphone-horizontal {
+            width: 100%;
+            padding: 0 8px;
+        }
     }
 
     .konomitv-logo {
         display: block;
         padding: 12px 8px;
+        margin-left: -6px;
         border-radius: 8px;
+        user-select: none;
+        @include smartphone-horizontal {
+            margin-left: 0;
+            padding: 8px 6px;
+        }
 
         &__image {
             display: block;
+            @include smartphone-horizontal {
+                height: 19px;
+            }
+        }
+    }
+
+    .v-spacer {
+        @include smartphone-horizontal {
+            display: none;
+        }
+    }
+
+    .header-actions {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+
+        > :deep(*) {
+            flex: 0 0 36px;
+        }
+
+        &__cast :deep(.v-btn) {
+            width: 36px;
+            height: 36px;
+        }
+
+        @include smartphone-horizontal {
+            gap: 2px;
+
+            > :deep(*) {
+                flex-basis: 28px;
+            }
+
+            &__cast :deep(.v-btn) {
+                width: 28px;
+                height: 28px;
+            }
         }
     }
 
@@ -118,10 +281,15 @@ watch(() => route.fullPath, initialize_search_query);
         align-items: center;
         justify-content: center;
         position: relative;
-        margin-right: -2px;
-        padding: 2px;
+        width: 36px;
+        height: 36px;
         border-radius: 8px;
         cursor: pointer;
+
+        @include smartphone-horizontal {
+            width: 28px;
+            height: 28px;
+        }
     }
 
     .search-box {
@@ -132,13 +300,36 @@ watch(() => route.fullPath, initialize_search_query);
         padding: 0 16px;
         padding-top: 14px;
 
+        @include smartphone-horizontal {
+            padding-top: 0px;
+        }
+
+        &__icon {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-right: 8px;
+            color: rgb(var(--v-theme-text-darken-1));
+
+            @include smartphone-horizontal {
+                margin-right: 16px;
+            }
+        }
+
         input {
             flex-grow: 1;
             height: 100%;
             border: none;
             background: transparent;
-            color: rgb(var(--v-theme-text-darken-1));
+            color: rgb(var(--v-theme-text));
             font-size: 16px;
+            // type="search" のデフォルトスタイルを無効化
+            -webkit-appearance: none;
+            appearance: none;
+
+            @include smartphone-horizontal {
+                font-size: 14px;
+            }
 
             &:focus {
                 outline: none;
@@ -146,6 +337,11 @@ watch(() => route.fullPath, initialize_search_query);
 
             &::placeholder {
                 color: rgb(var(--v-theme-text-darken-2));
+            }
+
+            // type="search" のキャンセルボタンを非表示
+            &::-webkit-search-cancel-button {
+                display: none;
             }
         }
 
@@ -158,6 +354,11 @@ watch(() => route.fullPath, initialize_search_query);
             padding: 2px;
             border-radius: 8px;
             cursor: pointer;
+
+            @include smartphone-horizontal {
+                width: 24px;
+                height: 24px;
+            }
         }
     }
 }

@@ -1,43 +1,49 @@
 
-import aiofiles
 import asyncio
-import emoji
 import datetime
-import ifaddr
 import os
-import ruamel.yaml
-import ruamel.yaml.scalarstring
-import rich
+import shutil
 import subprocess
 import time
+from collections.abc import Callable
 from enum import IntEnum
 from pathlib import Path
-from rich import box
-from rich import print
+from typing import Any, Literal, TypeVar, cast
+from zoneinfo import ZoneInfo
+
+import aiofiles
+import emoji
+import ifaddr
+import rich
+import ruamel.yaml
+import ruamel.yaml.scalarstring
+from rich import box, print
 from rich.console import Console
 from rich.padding import Padding
 from rich.panel import Panel
-from rich.progress import Progress
 from rich.progress import (
     BarColumn,
     DownloadColumn,
+    Progress,
     TextColumn,
     TimeElapsedColumn,
     TimeRemainingColumn,
     TransferSpeedColumn,
 )
-from rich.prompt import Confirm
-from rich.prompt import Prompt
+from rich.prompt import Confirm, Prompt
 from rich.rule import Rule
 from rich.style import Style
 from rich.table import Table
 from rich.text import TextType
-from typing import Any, Callable, cast, Literal, Optional, TypedDict, TypeVar
-from watchdog.events import FileCreatedEvent
-from watchdog.events import FileModifiedEvent
-from watchdog.events import FileSystemEventHandler
+from typing_extensions import TypedDict
+from watchdog.events import (
+    DirCreatedEvent,
+    DirModifiedEvent,
+    FileCreatedEvent,
+    FileModifiedEvent,
+    FileSystemEventHandler,
+)
 from watchdog.observers.polling import PollingObserver
-from zoneinfo import ZoneInfo
 
 
 class CustomPrompt(Prompt):
@@ -47,9 +53,10 @@ class CustomPrompt(Prompt):
         self,
         prompt: TextType = "",
         *,
-        console: Optional[Console] = None,
+        console: Console | None = None,
         password: bool = False,
-        choices: Optional[list[str]] = None,
+        choices: list[str] | None = None,
+        case_sensitive: bool = True,
         show_default: bool = True,
         show_choices: bool = True,
     ) -> None:
@@ -58,7 +65,15 @@ class CustomPrompt(Prompt):
             prompt = f'  {prompt}'  # 左に半角スペース2つ分余白を空ける
 
         # 親クラスのコンストラクタを実行
-        super().__init__(prompt, console=console, password=password, choices=choices, show_default=show_default, show_choices=show_choices)
+        super().__init__(
+            prompt,
+            console=console,
+            password=password,
+            choices=choices,
+            case_sensitive=case_sensitive,
+            show_default=show_default,
+            show_choices=show_choices,
+        )
 
         if self.choices is not None:
             self.illegal_choice_message = Padding(f'[prompt.invalid.choice][{"/".join(self.choices)}] のいずれかを選択してください！', (0, 2, 0, 2))
@@ -72,9 +87,10 @@ class CustomConfirm(Confirm):
         self,
         prompt: TextType = "",
         *,
-        console: Optional[Console] = None,
+        console: Console | None = None,
         password: bool = False,
-        choices: Optional[list[str]] = None,
+        choices: list[str] | None = None,
+        case_sensitive: bool = True,
         show_default: bool = True,
         show_choices: bool = True,
     ) -> None:
@@ -83,7 +99,15 @@ class CustomConfirm(Confirm):
             prompt = f'  {prompt}'  # 左に半角スペース2つ分余白を空ける
 
         # 親クラスのコンストラクタを実行
-        super().__init__(prompt, console=console, password=password, choices=choices, show_default=show_default, show_choices=show_choices)
+        super().__init__(
+            prompt,
+            console=console,
+            password=password,
+            choices=choices,
+            case_sensitive=case_sensitive,
+            show_default=show_default,
+            show_choices=show_choices,
+        )
 
 
 # ジェネリック型
@@ -128,21 +152,21 @@ class CtrlCmdConnectionCheckUtil:
     UNIX_EPOCH = datetime.datetime(1970, 1, 1, 9, tzinfo=TZ)
 
     __connect_timeout_sec: float
+    __pipe_dir: str
     __pipe_name: str
     __host: str | None
     __port: int
 
     def __init__(self, hostname: str, port: int | None) -> None:
         self.__connect_timeout_sec = 10  # 10秒でタイムアウト
-        self.__pipe_name = 'EpgTimerSrvNoWaitPipe'
+
+        # 初期値は名前付きパイプモード
+        self.__pipe_dir = '\\\\.\\pipe\\' if os.name == 'nt' else '/var/local/edcb/'
+        self.__pipe_name = 'EpgTimerSrvNoWaitPipe' if os.name == 'nt' else 'EpgTimerSrvPipe'
         self.__host = None
         self.__port = 0
 
-        if hostname == 'edcb-namedpipe':
-            # 特別に名前付きパイプモードにする
-            self.__pipe_name = 'EpgTimerSrvNoWaitPipe'
-            self.__host = None
-        else:
+        if hostname != 'edcb-namedpipe':
             # TCP/IP モードにする
             self.__host = hostname
             self.__port = cast(int, port)
@@ -172,11 +196,11 @@ class CtrlCmdConnectionCheckUtil:
 
     async def __sendAndReceive(self, buf: bytearray) -> tuple[int | None, bytes]:
         to = time.monotonic() + self.__connect_timeout_sec
-        if self.__host is None:
+        if os.name == 'nt' and self.__host is None:
             # 名前付きパイプモード
             while True:
                 try:
-                    async with aiofiles.open('\\\\.\\pipe\\' + self.__pipe_name, mode='r+b') as f:
+                    async with aiofiles.open(self.__pipe_dir + self.__pipe_name, mode='r+b') as f:
                         await f.write(buf)
                         await f.flush()
                         rbuf = await f.read(8)
@@ -198,9 +222,13 @@ class CtrlCmdConnectionCheckUtil:
                     break
             return None, b''
 
-        # TCP/IP モード
+        # UNIX ドメインソケットまたは TCP/IP モード
         try:
-            connection = await asyncio.wait_for(asyncio.open_connection(self.__host, self.__port), max(to - time.monotonic(), 0.))
+            if self.__host is None:
+                connection_future = asyncio.open_unix_connection(self.__pipe_dir + self.__pipe_name)
+            else:
+                connection_future = asyncio.open_connection(self.__host, self.__port)
+            connection = await asyncio.wait_for(connection_future, max(to - time.monotonic(), 0.))
             reader: asyncio.StreamReader = connection[0]
             writer: asyncio.StreamWriter = connection[1]
         except Exception:
@@ -346,7 +374,8 @@ def GetNetworkDriveList() -> list[dict[str, str]]:
     """
 
     # Windows 以外では実行しない
-    if os.name != 'nt': return []
+    if os.name != 'nt':
+        return []
 
     # winreg (レジストリを操作するための標準ライブラリ (Windows 限定) をインポート)
     import winreg
@@ -409,83 +438,67 @@ def GetNetworkInterfaceInformation() -> list[tuple[str, str]]:
 
 def IsDockerComposeV2() -> bool:
     """
-    インストールされている Docker Compose が V2 かどうか
+    インストールされている Docker Compose がサブコマンド形式 (V2 以降) かどうか
+
+    Docker Compose V2 以降は `docker compose` のようにサブコマンド形式で実行するが、
+    V1 では `docker-compose` のようにスタンドアロンコマンドとして実行する必要がある。
+    この関数は、`docker compose version` コマンドの終了コードで V2 以降かどうかを判定する。
 
     Returns:
-        bool: Docker Compose V2 なら True 、V1 (またはインストールされていない) なら False
+        bool: Docker Compose V2 以降 (サブコマンド形式) なら True、V1 (またはインストールされていない) なら False
     """
 
     # Windows では常に False (サポートしていないため)
-    if os.name == 'nt': return False
+    if os.name == 'nt':
+        return False
 
-    try:
-        # Docker Compose V2 の存在確認
-        docker_compose_v2_result = subprocess.run(
-            args = ['docker', 'compose', 'version'],
-            stdout = subprocess.PIPE,  # 標準出力をキャプチャする
-            stderr = subprocess.DEVNULL,  # 標準エラー出力を表示しない
-            text = True,  # 出力をテキストとして取得する
-        )
-        if docker_compose_v2_result.returncode == 0 and any(x in docker_compose_v2_result.stdout for x in
-                                                            ('Docker Compose version v2', 'Docker Compose version 2')):
-            return True  #  Docker Compose V2 がインストールされている
-    except FileNotFoundError:
-        pass
+    # Docker コマンドが PATH に存在するか確認
+    if shutil.which('docker') is None:
+        return False
 
-    # Docker Compose V2 がインストールされていないので消去法で V1 だと確定する
-    return False
+    # Docker Compose V2 以降 (サブコマンド形式) の存在確認
+    # バージョン文字列のパターンマッチングではなく、コマンドの終了コードで判定する
+    result = subprocess.run(
+        args = ['docker', 'compose', 'version'],
+        stdout = subprocess.DEVNULL,  # 標準出力を表示しない
+        stderr = subprocess.DEVNULL,  # 標準エラー出力を表示しない
+    )
+    return result.returncode == 0
 
 
 def IsDockerInstalled() -> bool:
     """
-    Linux に Docker + Docker Compose (V1, V2 は不問) がインストールされているかどうか
+    Linux に Docker + Docker Compose (V1, V2 以降は不問) がインストールされているかどうか
     Windows では Docker での構築はサポートしていない
 
     Returns:
-        bool: Docker + Docker Compose がインストールされていれば True 、インストールされていなければ False
+        bool: Docker + Docker Compose がインストールされていれば True、インストールされていなければ False
     """
 
     # Windows では常に False (サポートしていないため)
-    if os.name == 'nt': return False
-
-    try:
-
-        # Docker コマンドの存在確認
-        docker_result = subprocess.run(
-            args = ['/usr/bin/bash', '-c', 'type docker'],
-            stdout = subprocess.DEVNULL,  # 標準出力を表示しない
-            stderr = subprocess.DEVNULL,  # 標準エラー出力を表示しない
-        )
-        if docker_result.returncode != 0:
-            return False  # Docker がインストールされていない
-
-        # Docker Compose V2 の存在確認
-        docker_compose_v2_result = subprocess.run(
-            args = ['docker', 'compose', 'version'],
-            stdout = subprocess.PIPE,  # 標準出力をキャプチャする
-            stderr = subprocess.DEVNULL,  # 標準エラー出力を表示しない
-            text = True,  # 出力をテキストとして取得する
-        )
-        if (docker_compose_v2_result.returncode == 0 and
-            any(x in docker_compose_v2_result.stdout for x in ('Docker Compose version v2', 'Docker Compose version 2'))):
-            return True  # Docker と Docker Compose V2 がインストールされている
-
-        # Docker Compose V1 の存在確認
-        docker_compose_v1_result = subprocess.run(
-            args = ['docker-compose', 'version'],
-            stdout = subprocess.PIPE,  # 標準出力をキャプチャする
-            stderr = subprocess.DEVNULL,  # 標準エラー出力を表示しない
-            text = True,  # 出力をテキストとして取得する
-        )
-        if docker_compose_v1_result.returncode == 0 and 'docker-compose version 1' in docker_compose_v1_result.stdout:
-            return True  # Docker と Docker Compose V1 がインストールされている
-
-        return False  # Docker はインストールされているが、Docker Compose がインストールされていない
-
-    # subprocess.run() で万が一 FileNotFoundError が送出された場合、
-    # コマンドが存在しないことによる例外のため、インストールされていないものと判断する
-    except FileNotFoundError:
+    if os.name == 'nt':
         return False
+
+    # Docker コマンドが PATH に存在するか確認
+    if shutil.which('docker') is None:
+        return False  # Docker がインストールされていない
+
+    # Docker Compose V2 以降 (サブコマンド形式) の存在確認
+    # バージョン文字列のパターンマッチングではなく、コマンドの終了コードで判定する
+    docker_compose_v2_result = subprocess.run(
+        args = ['docker', 'compose', 'version'],
+        stdout = subprocess.DEVNULL,  # 標準出力を表示しない
+        stderr = subprocess.DEVNULL,  # 標準エラー出力を表示しない
+    )
+    if docker_compose_v2_result.returncode == 0:
+        return True  # Docker と Docker Compose V2 以降がインストールされている
+
+    # Docker Compose V1 (スタンドアロン形式) の存在確認
+    # shutil.which() で docker-compose コマンドの存在を確認
+    if shutil.which('docker-compose') is not None:
+        return True  # Docker と Docker Compose V1 がインストールされている
+
+    return False  # Docker はインストールされているが、Docker Compose がインストールされていない
 
 
 def IsGitInstalled() -> bool:
@@ -496,26 +509,9 @@ def IsGitInstalled() -> bool:
         bool: Git コマンドがインストールされていれば True 、インストールされていなければ False
     """
 
-    ## Windows
-    if os.name == 'nt':
-        result = subprocess.run(
-            args = ['C:/Windows/System32/where.exe', 'git'],
-            stdout = subprocess.DEVNULL,  # 標準出力を表示しない
-            stderr = subprocess.DEVNULL,  # 標準エラー出力を表示しない
-        )
-        if result.returncode == 0:
-            return True
-    ## Linux
-    else:
-        result = subprocess.run(
-            args = ['/usr/bin/bash', '-c', 'type git'],
-            stdout = subprocess.DEVNULL,  # 標準出力を表示しない
-            stderr = subprocess.DEVNULL,  # 標準エラー出力を表示しない
-        )
-        if result.returncode == 0:
-            return True
-
-    return False
+    # shutil.which() で git コマンドが PATH に存在するか確認
+    # Windows / Linux 両方で動作する
+    return shutil.which('git') is not None
 
 
 def RemoveEmojiIfLegacyTerminal(text: str) -> str:
@@ -555,7 +551,7 @@ def SaveConfig(config_yaml_path: Path, config_dict: dict[str, dict[str, Any]]) -
     yaml.width = 20
     yaml.indent(mapping=4, sequence=4, offset=4)
     try:
-        with open(config_yaml_path, mode='r', encoding='utf-8') as file:
+        with open(config_yaml_path, encoding='utf-8') as file:
             config_raw = yaml.load(file)
     except Exception as error:
         # 回復不可能
@@ -685,19 +681,19 @@ def RunKonomiTVServiceWaiter(platform_type: Literal['Windows', 'Linux', 'Linux-D
     class LogFolderWatchHandler(FileSystemEventHandler):
 
         # 何かしらログフォルダに新しいファイルが作成されたら、サービスが起動したものとみなす
-        def on_created(self, event: FileCreatedEvent) -> None:
+        def on_created(self, event: DirCreatedEvent | FileCreatedEvent) -> None:
             nonlocal is_service_started
             is_service_started = True
 
         # ログファイルが更新されたら、ログの中に Application startup complete. という文字列が含まれていないかを探す
         # ログの中に Application startup complete. という文字列が含まれていたら、KonomiTV サーバーの起動が完了したとみなす
-        def on_modified(self, event: FileModifiedEvent) -> None:
+        def on_modified(self, event: DirModifiedEvent | FileModifiedEvent) -> None:
             # もし on_created をハンドリングできなかった場合に備え、on_modified でもサービス起動フラグを立てる
             nonlocal is_service_started, is_server_started, is_programs_update_completed, is_error_occurred
             is_service_started = True
             # ファイルのみに限定（フォルダの変更も検知されることがあるが、当然フォルダは開けないのでエラーになる）
-            if Path(event.src_path).is_file() is True:
-                with open(event.src_path, mode='r', encoding='utf-8') as log:
+            if Path(str(event.src_path)).is_file() is True:
+                with open(event.src_path, encoding='utf-8') as log:
                     text = log.read()
                     if 'ERROR:' in text or 'Traceback (most recent call last):' in text:
                         # 何らかのエラーが発生したことが想定されるので、エラーフラグを立てる
@@ -746,7 +742,7 @@ def RunKonomiTVServiceWaiter(platform_type: Literal['Windows', 'Linux', 'Linux-D
     with progress:
         while is_server_started is False:
             if is_error_occurred is True:
-                with open(base_path / 'server/logs/KonomiTV-Server.log', mode='r', encoding='utf-8') as log:
+                with open(base_path / 'server/logs/KonomiTV-Server.log', encoding='utf-8') as log:
                     ShowSubProcessErrorLog(
                         error_message = 'KonomiTV サーバーの起動中に予期しないエラーが発生しました。',
                         error_log_name = 'KonomiTV サーバーのログ',
@@ -762,7 +758,7 @@ def RunKonomiTVServiceWaiter(platform_type: Literal['Windows', 'Linux', 'Linux-D
     with progress:
         while is_programs_update_completed is False:
             if is_error_occurred is True:
-                with open(base_path / 'server/logs/KonomiTV-Server.log', mode='r', encoding='utf-8') as log:
+                with open(base_path / 'server/logs/KonomiTV-Server.log', encoding='utf-8') as log:
                     ShowSubProcessErrorLog(
                         error_message = '番組情報の取得中に予期しないエラーが発生しました。',
                         error_log_name = 'KonomiTV サーバーのログ',

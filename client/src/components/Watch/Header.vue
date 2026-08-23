@@ -1,10 +1,13 @@
 <template>
     <header class="watch-header" :class="{'watch-header--video': playback_mode === 'Video'}">
         <router-link class="watch-header__back-icon" v-ripple :to="playback_mode === 'Live' ? '/tv/' : '/videos/'">
-            <Icon icon="fluent:arrow-left-12-filled" width="25px" />
+            <Icon icon="fluent:chevron-left-12-filled" width="21px" />
         </router-link>
-        <img class="watch-header__broadcaster" v-if="playback_mode === 'Live'"
-            :src="`${Utils.api_base_url}/channels/${channelsStore.channel.current.id}/logo`">
+        <div class="watch-header__broadcaster" v-if="playback_mode === 'Live'">
+            <div class="ch-sprite" :chid="channelsStore.channel.current.id">
+                <img loading="lazy" :src="`${Utils.api_base_url}/channels/${channelsStore.channel.current.id}/logo`">
+            </div>
+        </div>
         <span class="watch-header__program-title" v-html="ProgramUtils.decorateProgramInfo(
             playback_mode === 'Live' ? channelsStore.channel.current.program_present : playerStore.recorded_program, 'title'
         )"></span>
@@ -12,7 +15,10 @@
             {{ProgramUtils.getProgramTime(playback_mode === 'Live' ? channelsStore.channel.current.program_present : playerStore.recorded_program, true)}}
         </span>
         <v-spacer></v-spacer>
-        <span class="watch-header__now">{{time}}</span>
+        <span class="watch-header__now">
+            <Icon v-if="is_showing_original_broadcast_time" class="watch-header__timeshift-icon" icon="fluent:history-16-regular" width="16px" />
+            {{time}}
+        </span>
     </header>
 </template>
 <script lang="ts">
@@ -20,8 +26,11 @@
 import { mapStores } from 'pinia';
 import { defineComponent, PropType } from 'vue';
 
+import type { Dayjs } from 'dayjs';
+
 import useChannelsStore from '@/stores/ChannelsStore';
 import usePlayerStore from '@/stores/PlayerStore';
+import useSettingsStore from '@/stores/SettingsStore';
 import Utils, { dayjs, ProgramUtils } from '@/utils';
 
 export default defineComponent({
@@ -39,25 +48,83 @@ export default defineComponent({
             Utils: Object.freeze(Utils),
             ProgramUtils: Object.freeze(ProgramUtils),
 
-            // 現在時刻
+            // 現在時刻 (ライブ再生時は現在時刻、録画再生時は設定に応じて録画当時の時刻または現在時刻)
             time: dayjs().format(Utils.isSmartphoneHorizontal() ? 'HH:mm:ss' : 'YYYY/MM/DD HH:mm:ss'),
 
-            // 現在時刻更新用のインターバルの ID
-            time_interval_id: 0,
+            // 録画再生時の再生位置 (秒)
+            playback_position: 0,
+
+            // setTimeout の ID (beforeUnmount でクリアするために保持)
+            update_time_timer_id: 0 as ReturnType<typeof setTimeout> | number,
         };
     },
     computed: {
-        ...mapStores(useChannelsStore, usePlayerStore),
+        ...mapStores(useChannelsStore, usePlayerStore, useSettingsStore),
+
+        // 元の放送時刻を表示すべきかどうか
+        // 録画再生時かつ設定がオンの場合に true
+        is_showing_original_broadcast_time(): boolean {
+            return this.playback_mode === 'Video' && this.settingsStore.settings.show_original_broadcast_time_during_playback === true;
+        },
+    },
+    methods: {
+        formatTime(time_obj: Dayjs): string {
+            const is_sp_h = Utils.isSmartphoneHorizontal();
+            const formatted = time_obj.format(is_sp_h ? 'HH:mm:ss' : 'YYYY/MM/DD HH:mm:ss');
+            return Utils.apply28HourClock(formatted);
+        },
+        // 元の放送時刻を計算する
+        getOriginalBroadcastTime(): Dayjs {
+            const recorded_program = this.playerStore.recorded_program;
+            // 録画開始時刻を取得 (recording_start_time があればそちらを優先、なければ番組の開始時刻を使用)
+            const recording_start_time = recorded_program.recorded_video.recording_start_time ?? recorded_program.start_time;
+            // 録画開始時刻に再生位置を加算して元の放送時刻を計算
+            return dayjs(recording_start_time).add(this.playback_position, 'second');
+        },
+        updateTimeCore(): number {
+            // 元の放送時刻を表示すべき場合は、元の放送時刻を計算して表示
+            if (this.is_showing_original_broadcast_time === true) {
+                // 再生中の場合のみ、元の放送時刻を計算して表示
+                // 一時停止中の場合は、一時停止した時点の時刻がそのまま表示される
+                if (this.playerStore.is_video_paused === false) {
+                    this.time = this.formatTime(this.getOriginalBroadcastTime());
+                }
+                // 再生位置から計算した時刻なので、現在時刻の秒境界に同期させる必要はない
+                // 単に 1 秒ごとに更新する
+                return 1000;
+            } else {
+                // 通常は現在時刻を表示
+                const now = dayjs();
+                this.time = this.formatTime(now);
+                // 現在時刻モードでは秒の境界にぴったり合わせて更新
+                const ms = now.millisecond();
+                return ms > 800 ? 500 : 1000 - ms;
+            }
+        },
+        updateTime() {
+            this.update_time_timer_id = setTimeout(() => {
+                this.updateTime();
+            }, this.updateTimeCore());
+        },
     },
     created() {
-        // 現在時刻を 0.1 秒おきに更新
-        this.time_interval_id = window.setInterval(() => {
-            this.time = dayjs().format(Utils.isSmartphoneHorizontal() ? 'HH:mm:ss' : 'YYYY/MM/DD HH:mm:ss');
-        }, 0.1 * 1000);
+        // 初期表示の時刻を設定
+        this.time = this.formatTime(dayjs());
+        this.update_time_timer_id = setTimeout(() => {
+            this.updateTime();
+        }, 1000);
+
+        // 録画再生時: 再生位置が変更されたときに playback_position を更新
+        this.playerStore.event_emitter.on('PlaybackPositionChanged', (event) => {
+            this.playback_position = event.playback_position;
+            // シーク時は即座に表示を更新
+            if (this.is_showing_original_broadcast_time === true) {
+                this.time = this.formatTime(this.getOriginalBroadcastTime());
+            }
+        });
     },
     beforeUnmount() {
-        // インターバルをクリア
-        window.clearInterval(this.time_interval_id);
+        clearTimeout(this.update_time_timer_id);
     },
 });
 
@@ -102,9 +169,9 @@ export default defineComponent({
     &.watch-header--video {
         .watch-header__program-time {
             font-size: 13px;
-        }
-        .watch-header__now {
-            display: none;
+            @include smartphone-vertical {
+                display: none;
+            }
         }
     }
 
@@ -118,9 +185,9 @@ export default defineComponent({
             flex-shrink: 0;
             width: 40px;
             height: 40px;
-            left: -6px;
+            left: -8px;
             padding: 6px;
-            margin-right: 2px;
+            margin-right: -3px;
             border-radius: 50%;
             color: rgb(var(--v-theme-text));
         }
@@ -132,9 +199,9 @@ export default defineComponent({
             flex-shrink: 0;
             width: 36px;
             height: 36px;
-            left: -6px;
+            left: -8px;
             padding: 6px;
-            margin-right: 2px;
+            margin-right: -3px;
             border-radius: 50%;
             color: rgb(var(--v-theme-text));
         }
@@ -146,9 +213,9 @@ export default defineComponent({
             flex-shrink: 0;
             width: 36px;
             height: 36px;
-            left: -6px;
+            left: -8px;
             padding: 6px;
-            margin-right: 2px;
+            margin-right: -6px;
             border-radius: 50%;
             color: rgb(var(--v-theme-text));
         }
@@ -157,8 +224,12 @@ export default defineComponent({
     .watch-header__broadcaster {
         display: inline-block;
         flex-shrink: 0;
-        width: 64px;
-        height: 36px;
+        --ch-sprite-width: 64;
+        --ch-sprite-height: 36;
+        --ch-sprite-border-radius: 5;
+        width: calc(var(--ch-sprite-width) * 1px);
+        height: calc(var(--ch-sprite-height) * 1px);
+        border-radius: calc(var(--ch-sprite-border-radius) * 1px);
         margin-right: 18px;
         border-radius: 5px;
         background: linear-gradient(150deg, rgb(var(--v-theme-gray)), rgb(var(--v-theme-background-lighten-2)));
@@ -166,16 +237,16 @@ export default defineComponent({
         user-select: none;
 
         @include tablet-vertical {
-            width: 48px;
-            height: 28px;
+            --ch-sprite-width: 48;
+            --ch-sprite-height: 28;
+            --ch-sprite-border-radius: 4;
             margin-right: 12px;
-            border-radius: 4px;
         }
         @include smartphone-horizontal {
-            width: 36px;
-            height: 28px;
+            --ch-sprite-width: 36;
+            --ch-sprite-height: 28;
+            --ch-sprite-border-radius: 4;
             margin-right: 12px;
-            border-radius: 4px;
         }
         @include smartphone-vertical {
             display: none;
@@ -220,6 +291,8 @@ export default defineComponent({
     }
 
     .watch-header__now {
+        display: flex;
+        align-items: center;
         flex-shrink: 0;
         margin-left: 16px;
         font-size: 13px;
@@ -230,6 +303,12 @@ export default defineComponent({
         }
         @include smartphone-vertical {
             display: none;
+        }
+
+        .watch-header__timeshift-icon {
+            flex-shrink: 0;
+            margin-right: 4px;
+            opacity: 0.8;
         }
     }
 }

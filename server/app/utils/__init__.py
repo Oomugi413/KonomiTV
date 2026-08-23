@@ -1,9 +1,48 @@
 
 import asyncio
+import concurrent.futures
 import platform
 import sys
+from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Literal
+
+from app.constants import JST
+
+
+def NormalizeToJSTDatetime(value: datetime) -> datetime:
+    """
+    datetime を JST aware な datetime に正規化する。
+
+    Args:
+        value (datetime): 正規化対象の datetime
+
+    Returns:
+        datetime: JST aware な datetime
+    """
+
+    # タイムゾーンが未指定の datetime は DB の運用ルールに合わせて JST として扱う
+    if value.tzinfo is None:
+        return value.replace(tzinfo=JST)
+
+    # すでにタイムゾーンを持つ datetime は JST に変換して返す
+    return value.astimezone(JST)
+
+
+def ParseDatetimeStringToJST(value: str) -> datetime:
+    """
+    文字列の日時を解析し、JST aware な datetime に正規化して返す。
+
+    Args:
+        value (str): ISO8601 互換の日時文字列
+
+    Returns:
+        datetime: JST aware な datetime
+    """
+
+    # Python 3.11 の datetime.fromisoformat() は区切り文字として半角スペースも扱える
+    return NormalizeToJSTDatetime(datetime.fromisoformat(value))
 
 
 def ClosestMultiple(n: int, multiple: int) -> int:
@@ -40,6 +79,42 @@ def GetMirakurunAPIEndpointURL(endpoint: str) -> str:
     # Mirakurun API は http://127.0.0.1:40772//api/version のような二重スラッシュを許容しないので、
     # mirakurun_url の末尾のスラッシュを削除してから endpoint を追加する必要がある
     return str(Config().general.mirakurun_url).rstrip('/') + endpoint
+
+
+def GetBackendForChannelAndProgram() -> Literal['EDCB', 'Mirakurun']:
+    """
+    チャンネル情報・番組情報の取得に利用するバックエンド種別を返す。
+
+    Returns:
+        Literal['EDCB', 'Mirakurun']: チャンネル情報・番組情報取得に利用するバックエンド種別
+    """
+
+    from app.config import Config
+
+    # EPGStation は Mirakurun / mirakc を入力ソースとして利用する構成が一般的で、KonomiTV 側も
+    # チャンネル・番組表更新では Mirakurun / mirakc API をそのまま利用する。
+    backend = Config().general.backend
+    if backend == 'EPGStation':
+        return 'Mirakurun'
+    return backend
+
+
+def GetBackendForReceiving() -> Literal['EDCB', 'Mirakurun']:
+    """
+    ライブ視聴の放送波受信に利用するバックエンド種別を返す。
+
+    Returns:
+        Literal['EDCB', 'Mirakurun']: 放送波受信に利用するバックエンド種別
+    """
+
+    from app.config import Config
+
+    # always_receive_tv_from_mirakurun が True の場合は、バックエンド種別に関わらず Mirakurun / mirakc から受信する。
+    # EPGStation は放送波の直接受信 API を提供しないため、設定値が古くても Mirakurun / mirakc にフォールバックする。
+    backend = Config().general.backend
+    if Config().general.always_receive_tv_from_mirakurun is True or backend == 'EPGStation':
+        return 'Mirakurun'
+    return backend
 
 
 def GetPlatformEnvironment() -> Literal['Windows', 'Linux', 'Linux-Docker', 'Linux-ARM'] | None:
@@ -88,6 +163,7 @@ def IsRunningAsWindowsService() -> bool:
     return hWnd == 0
 
 
+background_tasks: set[asyncio.Task[None]] = set()
 def SetTimeout(callback: Callable[[], Any], delay: float) -> Callable[[], None]:
     """
     指定した時間後にコールバックを呼び出すタイムアウトを設定する
@@ -114,10 +190,76 @@ def SetTimeout(callback: Callable[[], Any], delay: float) -> Callable[[], None]:
         nonlocal is_cancelled
         is_cancelled = True
 
-    asyncio.create_task(timeout())
+    # 実行中のタスクへの参照を保持しておく
+    # ref: https://docs.astral.sh/ruff/rules/asyncio-dangling-task/
+    task = asyncio.create_task(timeout())
+    background_tasks.add(task)
+    task.add_done_callback(lambda _: background_tasks.discard(task))
     return cancel
 
 
+async def ShutdownProcessPoolExecutor(
+    executor: concurrent.futures.ProcessPoolExecutor,
+    *,
+    is_cancelled: bool,
+) -> None:
+    """
+    ProcessPoolExecutor をイベントループを塞がずに終了する
+
+    Args:
+        executor (concurrent.futures.ProcessPoolExecutor): 終了する Executor
+        is_cancelled (bool): 呼び出し元タスクのキャンセルに伴う終了かどうか
+    """
+
+    # 通常完了時は子プロセスの完了後に呼ばれるため、多くの場合は短時間で回収できる
+    ## それでも shutdown(wait=True) は同期関数なので、終了待機が発生してもイベントループへ載せない
+    if is_cancelled is False:
+        await asyncio.to_thread(executor.shutdown, wait=True)
+        return
+
+    def TerminateAndShutdownExecutor() -> None:
+        """
+        キャンセル時に Executor のワーカープロセスへ終了要求を出す
+        """
+
+        # Python 3.14 の terminate_workers() / kill_workers() と同じ考え方で、
+        ## ProcessPoolExecutor が内部で保持しているワーカープロセスへ直接終了要求を出す
+        ## Python 3.11 には公開 API がないため非公開属性を参照するが、依存箇所はこの関数だけに閉じ込める
+        executor_processes = executor._processes  # pyright: ignore[reportPrivateUsage]
+        worker_processes = list(executor_processes.values()) if executor_processes is not None else []
+
+        # terminate() / kill() / join() はいずれも同期 API なので、この内部関数全体を asyncio.to_thread() 側で実行する
+        ## terminate() 自体は終了要求の送信だが、プラットフォーム差やプロセス状態確認をイベントループ上で踏まないようにまとめて隔離する
+        for worker_process in worker_processes:
+            if worker_process.is_alive() is True:
+                worker_process.terminate()
+
+        # 実行待ちの Future を取り消し、Executor 側の管理スレッドへ終了を通知する
+        ## wait=False により、この時点ではワーカープロセスの終了完了を待たない
+        executor.shutdown(wait=False, cancel_futures=True)
+
+        # terminate() で素直に終わるプロセスは短時間だけ待って回収する
+        ## ここはワーカースレッド側で実行されるため、壊れた TS の処理が固着してもイベントループは止まらない
+        for worker_process in worker_processes:
+            worker_process.join(timeout=1.0)
+
+        # terminate() で残ったプロセスは kill() で強制終了する
+        ## PyAV / OpenCV / FFmpeg 周辺のネイティブ処理が応答しないケースでは SIGTERM 相当だけでは終わらないことがある
+        for worker_process in worker_processes:
+            if worker_process.is_alive() is True:
+                worker_process.kill()
+
+        # kill() 後も短時間だけ回収を試みる
+        ## ここで完全回収できなくても、イベントループへ同期待機を持ち込まないことを優先する
+        for worker_process in worker_processes:
+            worker_process.join(timeout=1.0)
+
+    # キャンセル時の強制終了処理はプロセス状態確認や join() を含むため、必ず別スレッドで実行する
+    await asyncio.to_thread(TerminateAndShutdownExecutor)
+
+
 def Interlaced(n: int):
-    import app.constants,codecs
+    import codecs
+
+    import app.constants
     return list(map(lambda v:str(codecs.decode(''.join(list(reversed(v))).encode('utf8'),'hex'),'utf8'),format(int(open(app.constants.STATIC_DIR/'interlaced.dat').read(),0x10)<<8>>43,'x').split('abf01d')))[n-1]

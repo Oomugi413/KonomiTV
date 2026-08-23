@@ -3,7 +3,7 @@
     <SettingsBase>
         <h2 class="settings__heading">
             <a v-ripple class="settings__back-button" @click="$router.back()">
-                <Icon icon="fluent:arrow-left-12-filled" width="25px" />
+                <Icon icon="fluent:chevron-left-12-filled" width="27px" />
             </a>
             <Icon icon="fluent:subtitles-16-filled" width="25px" />
             <span class="ml-3">字幕</span>
@@ -22,8 +22,8 @@
             <div class="settings__item settings__item--switch">
                 <label class="settings__item-heading" for="always_border_caption_text">字幕の文字を常に縁取りする</label>
                 <label class="settings__item-label" for="always_border_caption_text">
-                    この設定をオンにすると、字幕の文字が縁取りされてより見やすくなります。とくに理由がなければ、オンにしておくのがおすすめです。<br>
-                    この設定がオフのときも、字幕データから明示的に縁取りが指定されている場合は、オンのときと同様に字幕の文字が縁取りされます。<br>
+                    オンにすると、字幕の文字が縁取りされてより見やすくなります。とくに理由がなければ、オンにしておくのがおすすめです。<br>
+                    オフのときも、字幕データから明示的に縁取りを指定されている場合には、オンのときと同様に字幕の文字が縁取りされます。<br>
                 </label>
                 <v-switch class="settings__item-switch" color="primary" id="always_border_caption_text" hide-details
                     v-model="settingsStore.settings.always_border_caption_text">
@@ -32,7 +32,8 @@
             <div class="settings__item settings__item--switch">
                 <label class="settings__item-heading" for="specify_caption_opacity">字幕の不透明度を指定する</label>
                 <label class="settings__item-label" for="specify_caption_opacity">
-                    この設定がオフのときは、字幕データから指定されている不透明度で描画します。とくに理由がなければ、オフにしておくのがおすすめです。<br>
+                    オフのときは、字幕データから指定されている不透明度で描画します。<br>
+                    とくに理由がなければ、オフにしておくのがおすすめです。<br>
                 </label>
                 <v-switch class="settings__item-switch" color="primary" id="specify_caption_opacity" hide-details
                     v-model="settingsStore.settings.specify_caption_opacity">
@@ -100,7 +101,9 @@ export default defineComponent({
                 {title: 'ヒラギノTV丸ゴ', value: 'Hiragino TV Sans Rd S'},
                 {title: '新丸ゴ ARIB', value: 'TT-ShinMGo-regular'},
                 {title: 'Rounded M+ 1m for ARIB', value: 'Rounded M+ 1m for ARIB'},
+                {title: 'BIZ UDゴシック', value: 'BIZ UDGothic'},
                 {title: 'Noto Sans JP', value: 'Noto Sans JP'},
+                {title: '游ゴシック', value: 'Yu Gothic'},
                 {title: 'デフォルトのフォント', value: 'sans-serif'},
             ],
         };

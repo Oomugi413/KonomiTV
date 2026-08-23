@@ -3,11 +3,12 @@
         <HeaderBar />
         <main>
             <Navigation />
+            <SPHeaderBar :hide-on-smartphone-vertical="true" />
             <v-card class="settings-container d-flex px-5 py-5 mx-auto" elevation="0" width="100%" max-width="1000">
                 <nav class="settings-navigation">
                     <h1 class="mt-2 d-flex align-center" style="font-size: 24px;">
                         <a v-ripple class="settings-navigation__back-button" @click="$router.back()">
-                            <Icon icon="fluent:arrow-left-12-filled" width="25px" />
+                            <Icon icon="fluent:chevron-left-12-filled" width="27px" />
                         </a>
                         <span>設定</span>
                     </h1>
@@ -41,9 +42,13 @@
                         <Icon icon="bi:chat-left-text-fill" width="26px" style="padding: 0 2px;" />
                         <span class="ml-4">ニコニコ実況</span>
                     </v-btn>
+                    <v-btn variant="flat" class="settings-navigation__button" to="/settings/bangumi">
+                        <Icon icon="fluent:movies-and-tv-20-filled" width="26px" />
+                        <span class="ml-4">Bangumi 連携</span>
+                    </v-btn>
                     <v-btn variant="flat" class="settings-navigation__button" to="/settings/twitter">
                         <Icon icon="fa-brands:twitter" width="26px" style="padding: 0 1px;" />
-                        <span class="ml-4">Twitter</span>
+                        <span class="ml-4">Twitter / Bluesky 連携</span>
                     </v-btn>
                     <v-btn variant="flat" class="settings-navigation__button" to="/settings/server">
                         <Icon icon="fluent:server-surface-16-filled" width="26px" />
@@ -58,6 +63,7 @@
 
 import HeaderBar from '@/components/HeaderBar.vue';
 import Navigation from '@/components/Navigation.vue';
+import SPHeaderBar from '@/components/SPHeaderBar.vue';
 
 </script>
 <style lang="scss" scoped>
@@ -108,13 +114,19 @@ import Navigation from '@/components/Navigation.vue';
         .settings-navigation__back-button {
             display: none;
             position: relative;
-            left: -6px;
+            left: -8px;
             padding: 6px;
             border-radius: 50%;
             color: rgb(var(--v-theme-text));
             cursor: pointer;
             @include smartphone-vertical {
                 display: flex;
+            }
+
+            + span {
+                @include smartphone-vertical {
+                    margin-left: -4px;
+                }
             }
         }
 

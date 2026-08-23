@@ -1,36 +1,32 @@
 
 import asyncio
 import hashlib
-import httpx
 import json
-import pathlib
-from datetime import datetime
-from datetime import timedelta
-from fastapi import APIRouter
-from fastapi import Depends
-from fastapi import HTTPException
-from fastapi import Path
-from fastapi import Request
-from fastapi import status
-from fastapi.responses import FileResponse
-from fastapi.responses import JSONResponse
-from fastapi.responses import Response
+from datetime import datetime, timedelta
+from typing import Annotated, Any
+
+import anyio
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Path, Request, status
+from fastapi.responses import FileResponse, Response
 from fastapi.security.utils import get_authorization_scheme_param
 from tortoise import connections
-from typing import Annotated, Any
-from zoneinfo import ZoneInfo
 
-from app import logging
-from app import schemas
+from app import logging, schemas
 from app.config import Config
-from app.constants import HTTPX_CLIENT, LOGO_DIR, VERSION
+from app.constants import HTTPX_CLIENT, JST, LOGO_DIR, VERSION
 from app.models.Channel import Channel
 from app.routers.UsersRouter import GetCurrentUser
 from app.streams.LiveStream import LiveStream
-from app.utils import GetMirakurunAPIEndpointURL
+from app.utils import (
+    GetBackendForChannelAndProgram,
+    GetMirakurunAPIEndpointURL,
+    ParseDatetimeStringToJST,
+)
 from app.utils.edcb.CtrlCmdUtil import CtrlCmdUtil
 from app.utils.edcb.EDCBUtil import EDCBUtil
-from app.utils.Jikkyo import Jikkyo
+from app.utils.JikkyoClient import JikkyoClient
+from app.utils.TSInformation import TSInformation
 
 
 # ルーター
@@ -50,7 +46,7 @@ async def GetChannel(channel_id: Annotated[str, Path(description='チャンネ�
     else:
         channel = await Channel.filter(display_channel_id=channel_id).get_or_none()
     if channel is None:
-        logging.error(f'[ChannelsRouter][GetChannel] Specified display_channel_id was not found [display_channel_id: {channel_id}]')
+        logging.error(f'[ChannelsRouter][GetChannel] Specified display_channel_id was not found. [display_channel_id: {channel_id}]')
         raise HTTPException(
             status_code = status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail = 'Specified display_channel_id was not found',
@@ -67,18 +63,21 @@ async def GetChannel(channel_id: Annotated[str, Path(description='チャンネ�
 )
 async def ChannelsAPI():
     """
-    地デジ (GR)・BS・CS・CATV・SKY (SPHD)・STARDIGIO それぞれ全てのチャンネルの情報を取得する。
+    地デジ (GR)・BS・CS・CATV・SKY (SPHD)・BS4K それぞれ全てのチャンネルの情報を取得する。
     """
 
     # 現在時刻
-    now = datetime.now(ZoneInfo('Asia/Tokyo'))
+    now = datetime.now(JST)
 
     # タスク
     tasks = []
 
     # チャンネル情報を取得
+    # remocon_id (リモコン番号) を第一ソートキー、channel_number (チャンネル番号) を第二ソートキーとしてソート
+    # Tortoise ORM では order_by() を複数回チェーンすると最後の order_by() だけが有効になるため、
+    # 必ず order_by('remocon_id', 'channel_number') のように引数で指定する必要がある
     channels: list[Channel]
-    tasks.append(Channel.filter(is_watchable=True).order_by('channel_number').order_by('remocon_id'))
+    tasks.append(Channel.filter(is_watchable=True).order_by('remocon_id', 'channel_number'))
 
     # データベースの生のコネクションを取得
     # 地デジ・BS・CS を合わせると 18000 件近くになる番組情報を SQLite かつ ORM で絞り込んで素早く取得するのは無理があるらしい
@@ -129,7 +128,7 @@ async def ChannelsAPI():
         'CS': [],
         'CATV': [],
         'SKY': [],
-        'STARDIGIO': [],
+        'BS4K': [],
     }
 
     # チャンネルごとに実行
@@ -151,6 +150,12 @@ async def ChannelsAPI():
             'is_subchannel': channel.is_subchannel,
             'is_radiochannel': channel.is_radiochannel,
             'is_watchable': True,
+            # 地デジチャンネルの地域名のリスト (デバッグ用)
+            # 広域放送局の場合は複数の地域名が含まれる
+            # 地デジ以外のチャンネルまたは地域が特定できない場合は None
+            'terrestrial_regions': (
+                TSInformation.getRegionNamesFromNetworkID(channel.network_id) if channel.type == 'GR' else None
+            ),
             'is_display': True,
             'viewer_count': 0,
             'program_present': None,
@@ -215,20 +220,20 @@ async def ChannelsAPI():
             # JSON データで格納されているカラムをデコードする
             ## ついでに SQL 文で設定した is_present / program_order フィールドを削除
             ## 現在の番組か次の番組かを判定するために使っているフィールドだが、もう判定は終わったので必要ない
-            ## あとなぜか DateTime 型の文字列値が正しい ISO8601 フォーマットになっていないので、ここで整形する
+            ## DB 由来の日時文字列は utils 側で JST aware datetime に正規化してから ISO8601 文字列にする
             ## 真偽値も SQLite では 0/1 で管理されているため、bool 型に変換する
             if channel_dict['program_present'] is not None:
                 channel_dict['program_present']['detail'] = json.loads(channel_dict['program_present']['detail'])
-                channel_dict['program_present']['start_time'] = channel_dict['program_present']['start_time'].replace(' ', 'T')
-                channel_dict['program_present']['end_time'] = channel_dict['program_present']['end_time'].replace(' ', 'T')
+                channel_dict['program_present']['start_time'] = ParseDatetimeStringToJST(channel_dict['program_present']['start_time']).isoformat()
+                channel_dict['program_present']['end_time'] = ParseDatetimeStringToJST(channel_dict['program_present']['end_time']).isoformat()
                 channel_dict['program_present']['is_free'] = bool(channel_dict['program_present']['is_free'])
                 channel_dict['program_present']['genres'] = json.loads(channel_dict['program_present']['genres'])
                 channel_dict['program_present'].pop('is_present')
                 channel_dict['program_present'].pop('program_order')
             if channel_dict['program_following'] is not None:
                 channel_dict['program_following']['detail'] = json.loads(channel_dict['program_following']['detail'])
-                channel_dict['program_following']['start_time'] = channel_dict['program_following']['start_time'].replace(' ', 'T')
-                channel_dict['program_following']['end_time'] = channel_dict['program_following']['end_time'].replace(' ', 'T')
+                channel_dict['program_following']['start_time'] = ParseDatetimeStringToJST(channel_dict['program_following']['start_time']).isoformat()
+                channel_dict['program_following']['end_time'] = ParseDatetimeStringToJST(channel_dict['program_following']['end_time']).isoformat()
                 channel_dict['program_following']['is_free'] = bool(channel_dict['program_following']['is_free'])
                 channel_dict['program_following']['genres'] = json.loads(channel_dict['program_following']['genres'])
                 channel_dict['program_following'].pop('is_present')
@@ -247,9 +252,8 @@ async def ChannelsAPI():
         ## 後から filter() で絞り込むのだと効率が悪い
         result[channel_dict['type']].append(channel_dict)
 
-    # JSONResponse を直接返すことで、通常自動的に行われる重いバリデーションや整形処理を回避できる
-    ## チャンネル情報は情報量が多くすべてのチャンネルに対してバリデーションを行うと重くなるため、検証をスキップしてパフォーマンスを向上させる
-    return JSONResponse(result)
+    # Pydantic v2 ではバリデーションが高速化されているため、通常通り Pydantic モデルを返す
+    return schemas.LiveChannels.model_validate(result)
 
 
 @router.get(
@@ -267,6 +271,13 @@ async def ChannelAPI(
 
     # 現在と次の番組情報を取得
     channel.program_present, channel.program_following = await channel.getCurrentAndNextProgram()
+
+    # 地デジチャンネルの地域名のリストを設定 (デバッグ用)
+    # 広域放送局の場合は複数の地域名が含まれる
+    # 地デジ以外のチャンネルまたは地域が特定できない場合は None
+    channel.terrestrial_regions = (
+        TSInformation.getRegionNamesFromNetworkID(channel.network_id) if channel.type == 'GR' else None
+    )
 
     # チャンネル情報を返却
     return channel
@@ -291,24 +302,25 @@ async def ChannelLogoAPI(
     指定されたチャンネルに紐づくロゴを取得する。
     """
 
-    async def GetLogoFilePath(channel: Channel) -> pathlib.Path | None:
+    async def GetLogoFilePath(channel: Channel) -> anyio.Path | None:
         """ 同梱されているロゴの中からチャンネルに対応するロゴファイルのパスを取得する """
 
         # 放送波から取得できるロゴはどっちみち画質が悪いし、取得できていないケースもありうる
         # そのため、同梱されているロゴがあればそれを返すようにする
         ## ロゴは NID32736-SID1024.png のようなファイル名の PNG ファイル (256x256) を想定
-        if await asyncio.to_thread(pathlib.Path.exists, LOGO_DIR / f'{channel.id}.png') is True:
-            return LOGO_DIR / f'{channel.id}.png'
+        logo_dir = anyio.Path(str(LOGO_DIR))
+        if await (logo_dir /f'{channel.id}.png').exists():
+            return logo_dir / f'{channel.id}.png'
 
         # ***** ロゴが全国共通なので、チャンネル名の前方一致で決め打ち *****
 
         # NHK総合
         if channel.type == 'GR' and channel.name.startswith('NHK総合'):
-            return LOGO_DIR / 'NID32736-SID1024.png'
+            return logo_dir / 'NID32736-SID1024.png'
 
         # NHKEテレ
         if channel.type == 'GR' and channel.name.startswith('NHKEテレ'):
-            return LOGO_DIR / 'NID32737-SID1032.png'
+            return logo_dir / 'NID32737-SID1032.png'
 
         # 複数の地域で放送しているケーブルテレビの場合、コミュニティチャンネル (自主放送) の NID と SID は地域ごとに異なる
         # さらにコミュニティチャンネルの NID-SID は CATV 間で稀に重複していることがあるため、チャンネル名から決め打ちで判定する
@@ -316,48 +328,48 @@ async def ChannelLogoAPI(
 
         # J:COMテレビ
         if channel.type == 'GR' and channel.name.startswith('J:COMテレビ'):
-            return LOGO_DIR / 'community-channels/J：COMテレビ.png'
+            return logo_dir / 'community-channels/J：COMテレビ.png'
 
         # J:COMチャンネル
         if channel.type == 'GR' and channel.name.startswith('J:COMチャンネル'):
-            return LOGO_DIR / 'community-channels/J：COMチャンネル.png'
+            return logo_dir / 'community-channels/J：COMチャンネル.png'
 
         # イッツコムch10
         if channel.type == 'GR' and channel.name.startswith('イッツコムch10'):
-            return LOGO_DIR / 'community-channels/イッツコムch10.png'
+            return logo_dir / 'community-channels/イッツコムch10.png'
 
         # イッツコムch11
         if channel.type == 'GR' and channel.name.startswith('イッツコムch11'):
-            return LOGO_DIR / 'community-channels/イッツコムch11.png'
+            return logo_dir / 'community-channels/イッツコムch11.png'
 
         # スカパー！ナビ1
         if channel.type == 'GR' and channel.name.startswith('スカパー！ナビ1'):
-            return LOGO_DIR / 'community-channels/スカパー！ナビ1.png'
+            return logo_dir / 'community-channels/スカパー！ナビ1.png'
 
         # スカパー！ナビ2
         if channel.type == 'GR' and channel.name.startswith('スカパー！ナビ2'):
-            return LOGO_DIR / 'community-channels/スカパー！ナビ2.png'
+            return logo_dir / 'community-channels/スカパー！ナビ2.png'
 
         # eo光チャンネル
         if channel.type == 'GR' and channel.name.startswith('eo光チャンネル'):
-            return LOGO_DIR / 'community-channels/eo光チャンネル.png'
+            return logo_dir / 'community-channels/eo光チャンネル.png'
 
         # ZTV
         if channel.type == 'GR' and channel.name.startswith('ZTV'):
-            return LOGO_DIR / 'community-channels/ZTV.png'
+            return logo_dir / 'community-channels/ZTV.png'
 
         # BaycomCH
         if channel.type == 'GR' and channel.name.startswith('BaycomCH'):
-            return LOGO_DIR / 'community-channels/BaycomCH.png'
+            return logo_dir / 'community-channels/BaycomCH.png'
 
         # ベイコム12CH
         if channel.type == 'GR' and channel.name.startswith('ベイコム12CH'):
-            return LOGO_DIR / 'community-channels/ベイコム12CH.png'
+            return logo_dir / 'community-channels/ベイコム12CH.png'
 
         # スターデジオ
         ## 本来は局ロゴは存在しないが、見栄えが悪いので 100 チャンネルすべてで同じ局ロゴを表示する
-        if channel.type == 'STARDIGIO':
-            return LOGO_DIR / 'NID1-SID400.png'
+        if channel.type == 'SKY' and 400 <= channel.service_id <= 499:
+            return logo_dir / 'NID1-SID400.png'
 
         # ***** サブチャンネルのロゴを取得 *****
 
@@ -369,8 +381,8 @@ async def ChannelLogoAPI(
             main_channel = await Channel.filter(network_id=channel.network_id).order_by('service_id').first()
 
             # メインチャンネルが存在し、ロゴも存在する
-            if main_channel is not None and await asyncio.to_thread(pathlib.Path.exists, LOGO_DIR / f'{main_channel.id}.png') is True:
-                return LOGO_DIR / f'{main_channel.id}.png'
+            if main_channel is not None and await (logo_dir / f'{main_channel.id}.png').exists():
+                return logo_dir / f'{main_channel.id}.png'
 
         # BS でかつサブチャンネルのみ、メインチャンネルにロゴがあればそれを利用する
         if channel.type == 'BS' and channel.is_subchannel is True:
@@ -388,8 +400,8 @@ async def ChannelLogoAPI(
             main_channel = await Channel.filter(network_id=channel.network_id, service_id=main_service_id).first()
 
             # メインチャンネルが存在し、ロゴも存在する
-            if main_channel is not None and await asyncio.to_thread(pathlib.Path.exists, LOGO_DIR / f'{main_channel.id}.png') is True:
-                return LOGO_DIR / f'{main_channel.id}.png'
+            if main_channel is not None and await (logo_dir / f'{main_channel.id}.png').exists():
+                return logo_dir / f'{main_channel.id}.png'
 
         return None
 
@@ -426,8 +438,8 @@ async def ChannelLogoAPI(
             if logo is not None and len(logo) > 0:
                 return (logo, logo_media_type)
 
-        # Mirakurun バックエンドの場合
-        elif Config().general.backend == 'Mirakurun':
+        # Mirakurun / EPGStation バックエンドの場合
+        elif GetBackendForChannelAndProgram() == 'Mirakurun':
 
             # Mirakurun 形式のサービス ID
             # NID と SID を 5 桁でゼロ埋めした上で int に変換する
@@ -470,7 +482,7 @@ async def ChannelLogoAPI(
     if channel_id == 'NID0-SID0' or channel_id == 'gr000':
         return FileResponse(LOGO_DIR / 'default.png', headers={
             'Cache-Control': CACHE_CONTROL,
-            'ETag': GetETag('default'.encode()),
+            'ETag': GetETag(b'default'),
         })
     channel = await GetChannel(channel_id)
 
@@ -516,7 +528,7 @@ async def ChannelLogoAPI(
     # 同梱のロゴファイルも Mirakurun や EDCB からのロゴもない場合は、デフォルトのロゴ画像を返す
     return FileResponse(LOGO_DIR / 'default.png', headers={
         'Cache-Control': CACHE_CONTROL,
-        'ETag': GetETag('default'.encode()),
+        'ETag': GetETag(b'default'),
     })
 
 
@@ -549,5 +561,5 @@ async def ChannelJikkyoWebSocketInfoAPI(
             pass
 
     # ニコニココメント送受信用 WebSocket API の情報を取得する
-    jikkyo = Jikkyo(channel.network_id, channel.service_id)
-    return await jikkyo.fetchWebSocketInfo(current_user)
+    jikkyo_client = JikkyoClient(channel.network_id, channel.service_id)
+    return await jikkyo_client.fetchWebSocketInfo(current_user)

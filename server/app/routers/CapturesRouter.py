@@ -1,15 +1,11 @@
 
-import asyncio
 import errno
-import puremagic
 import shutil
-from fastapi import APIRouter
-from fastapi import File
-from fastapi import HTTPException
-from fastapi import status
-from fastapi import UploadFile
 from pathlib import Path
 from typing import Annotated, cast
+
+import puremagic
+from fastapi import APIRouter, File, HTTPException, UploadFile, status
 
 from app import logging
 from app.config import Config
@@ -27,12 +23,13 @@ router = APIRouter(
     summary = 'キャプチャ画像アップロード API',
     status_code = status.HTTP_204_NO_CONTENT,
 )
-async def CaptureUploadAPI(
+def CaptureUploadAPI(
     image: Annotated[UploadFile, File(description='アップロードするキャプチャ画像 (JPEG or PNG)。')],
 ):
     """
     クライアント側でキャプチャした画像をサーバーにアップロードする。<br>
-    アップロードされた画像は、サーバー設定で指定されたフォルダに保存される。
+    アップロードされた画像は、サーバー設定で指定されたフォルダに保存される。<br>
+    同期ファイル I/O を伴うため敢えて同期関数として実装している。
     """
 
     # 画像が JPEG または PNG かをチェック
@@ -86,8 +83,8 @@ async def CaptureUploadAPI(
 
         # キャプチャを保存
         try:
-            with await asyncio.to_thread(open, filepath, mode='wb') as buffer:
-                await asyncio.to_thread(shutil.copyfileobj, image.file, buffer)
+            with open(filepath, mode='wb') as buffer:
+                shutil.copyfileobj(image.file, buffer)
         except PermissionError:
             logging.error('[CapturesRouter][CaptureUploadAPI] Permission denied to save the file.')
             raise HTTPException(
@@ -107,7 +104,7 @@ async def CaptureUploadAPI(
                     detail = 'No space left on the device',
                 )
             else:
-                logging.error(f'[CapturesRouter][CaptureUploadAPI] Unexpected OSError: {ex}')
+                logging.error('[CapturesRouter][CaptureUploadAPI] Unexpected OSError:', exc_info=ex)
                 raise HTTPException(
                     status_code = status.HTTP_422_UNPROCESSABLE_ENTITY,
                     detail = 'Unexpected error occurred while saving the file',

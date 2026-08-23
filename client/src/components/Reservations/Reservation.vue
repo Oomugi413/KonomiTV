@@ -1,0 +1,1378 @@
+<template>
+    <div v-ripple class="reservation" :class="{
+        'reservation--disabled': isDisplayDisabled,
+        'reservation--compact-tablet-horizontal': compactOnTabletHorizontal,
+    }"
+        @click="handleContentClick">
+        <div class="reservation__container">
+            <!-- 左側：優先度と有効・無効スイッチ -->
+            <div class="reservation__controls">
+                <div v-if="shouldShowProgramSearchAddButton" class="reservation__program-search-action" @click="handleAddButtonClick">
+                    <v-btn
+                        class="reservation__program-search-add"
+                        :color="programSearchActionColor"
+                        :disabled="isProgramSearchActionDisabled"
+                        :loading="isAddingReservation"
+                        :title="programSearchActionLabel"
+                        icon
+                        size="x-small"
+                        variant="flat">
+                        <Icon :icon="programSearchActionIcon" width="18px" height="18px" />
+                    </v-btn>
+                </div>
+                <div v-else class="reservation__priority">
+                    <div class="reservation__priority-badge">{{ reservation.record_settings.priority }}</div>
+                    <div class="reservation__priority-label">優先度</div>
+                </div>
+                <div v-if="!shouldShowProgramSearchAddButton && !reservation.is_recording_in_progress" class="reservation__toggle" @click="handleSwitchClick">
+                    <v-switch
+                        v-model="isEnabled"
+                        color="primary"
+                        density="compact"
+                        hide-details
+                        @update:model-value="handleToggleEnabled"
+                        @click="handleSwitchClick"
+                    ></v-switch>
+                    <div class="reservation__toggle-label">{{ isEnabled ? '有効' : '無効' }}</div>
+                </div>
+                <div v-else-if="!shouldShowProgramSearchAddButton" class="reservation__recording">
+                    <div class="reservation__recording-icon"></div>
+                </div>
+            </div>
+
+            <!-- 中央：番組情報 -->
+            <div class="reservation__content">
+                <div class="reservation__content-header">
+                    <div class="reservation__content-title"
+                        v-html="ProgramUtils.decorateProgramInfo(reservation.program, 'title')"></div>
+                    <div class="reservation__content-status">
+                        <v-chip v-if="countdownStatusLabel !== null"
+                            class="reservation__content-countdown"
+                            color="info"
+                            size="small"
+                            variant="tonal"
+                        >
+                            <Icon icon="fluent:clock-20-filled" width="12px" height="12px" class="mr-1" />
+                            {{ countdownStatusLabel }}
+                        </v-chip>
+                        <v-chip
+                            class="reservation__content-status-chip"
+                            :color="displayStatusColor"
+                            size="small"
+                            variant="tonal"
+                        >
+                            <Icon :icon="displayStatusIcon" width="12px" height="12px" class="mr-1" />
+                            {{ displayStatusLabel }}
+                        </v-chip>
+                    </div>
+                </div>
+
+                <div class="reservation__content-meta">
+                    <div class="reservation__content-meta-broadcaster">
+                        <img v-if="broadcasterLogoURL !== null"
+                            class="reservation__content-meta-broadcaster-icon"
+                            loading="lazy"
+                            decoding="async"
+                            :src="broadcasterLogoURL"
+                            @error="onLogoError">
+                        <div v-else class="reservation__content-meta-broadcaster-icon"></div>
+                        <span class="reservation__content-meta-broadcaster-name">Ch: {{ reservation.channel.channel_number }} {{ reservation.channel.name }}</span>
+                    </div>
+                    <!-- スマホ版のみ：時刻表示 -->
+                    <div class="reservation__content-meta-time">{{ ProgramUtils.getProgramTime(reservation.program) }}</div>
+                    <div v-if="!shouldShowProgramSearchAddButton"
+                        class="reservation__content-meta-size-comment"
+                        :class="{
+                            'reservation__content-meta-size-comment--without-comment': !reservation.comment,
+                            'reservation__content-meta-size-comment--with-countdown': countdownStatusLabel !== null,
+                        }">
+                        <div v-if="reservation.comment" class="reservation__content-meta-comment">
+                            <Icon icon="fluent:note-20-filled" width="14px" height="14px" class="reservation__content-meta-comment-icon" />
+                            <span class="reservation__content-meta-comment-text">{{ reservation.comment }}</span>
+                        </div>
+                        <div class="reservation__content-meta-size">
+                            <Icon icon="fluent:hard-drive-20-filled" width="14px" height="14px" class="reservation__content-meta-size-icon" />
+                            約 {{ Utils.formatBytes(reservation.estimated_recording_file_size, 1, true) }}
+                        </div>
+                    </div>
+                    <!-- PC版のみ：上段右側の時刻表示 -->
+                    <div class="reservation__content-meta-time-pc">
+                        {{ ProgramUtils.getProgramTime(reservation.program) }}
+                    </div>
+                </div>
+
+                <div class="reservation__content-description-container"
+                    :class="{
+                        'reservation__content-description-container--with-comment': !shouldShowProgramSearchAddButton && reservation.comment,
+                    }">
+                    <div class="reservation__content-description"
+                        v-html="ProgramUtils.decorateProgramInfo(reservation.program, 'description')"></div>
+                    <!-- 狭い画面ではコメントと推定録画容量を概要行の右側にまとめる -->
+                    <div v-if="!shouldShowProgramSearchAddButton" class="reservation__content-description-side"
+                        :class="{
+                            'reservation__content-description-side--with-comment': reservation.comment,
+                        }">
+                        <div v-if="reservation.comment" class="reservation__content-description-comment">
+                            <Icon icon="fluent:note-20-filled" width="14px" height="14px" class="reservation__content-description-comment-icon" />
+                            <span class="reservation__content-description-comment-text">{{ reservation.comment }}</span>
+                        </div>
+                        <div class="reservation__content-description-size">
+                            <Icon icon="fluent:hard-drive-20-filled" width="14px" height="14px" class="reservation__content-description-size-icon" />
+                            約 {{ Utils.formatBytes(reservation.estimated_recording_file_size, 1, true) }}
+                        </div>
+                    </div>
+                    <!-- PC・タブレット横版：概要行の右側に推定録画容量を表示 -->
+                    <div v-if="!shouldShowProgramSearchAddButton" class="reservation__content-description-size-pc">
+                        <Icon icon="fluent:hard-drive-20-filled" width="14px" height="14px" class="reservation__content-description-size-icon" />
+                        約 {{ Utils.formatBytes(reservation.estimated_recording_file_size, 1, true) }}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</template>
+<script lang="ts" setup>
+
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+
+import Message from '@/message';
+import Reservations, { IReservation } from '@/services/Reservations';
+import Utils, { ProgramUtils, dayjs } from '@/utils';
+
+// Props
+const props = defineProps<{
+    reservation: IReservation;
+    compactOnTabletHorizontal?: boolean;
+    isProgramSearchResult?: boolean;
+}>();
+
+// Emits
+const emit = defineEmits<{
+    (e: 'deleted', reservation_id: number): void;
+    (e: 'click', reservation: IReservation): void;
+    (e: 'added', reservation: IReservation): void;
+}>();
+
+// 有効・無効の状態を管理
+const isEnabled = ref(props.reservation.record_settings.is_enabled);
+const isUpdating = ref(false);
+const isAddingReservation = ref(false);
+const currentTime = ref(dayjs());
+let currentTimeUpdateTimer: ReturnType<typeof setInterval> | null = null;
+
+// 番組情報の終了時刻から、予約操作を出してよい状態かをカード内で判定する
+const isPastProgram = computed(() => dayjs(props.reservation.program.end_time).isBefore(currentTime.value));
+
+// id: -1 のモック予約データだけを未予約として扱い、実予約は録画予約一覧と同じ表示に戻す
+const shouldShowProgramSearchAddButton = computed(() => {
+    return props.reservation.id === -1;
+});
+
+// 検索結果の予約追加ボタンは、放送済み・送信中の状態で操作を止める
+const isProgramSearchActionDisabled = computed(() => {
+    return isPastProgram.value === true || isAddingReservation.value === true;
+});
+
+// 録画予約一覧では無効予約だけ薄くし、番組検索では終了済みの番組だけ状態を弱める
+const isDisplayDisabled = computed(() => {
+    if (props.isProgramSearchResult === true) {
+        return isPastProgram.value === true || isEnabled.value === false;
+    }
+    return isEnabled.value === false;
+});
+
+const programSearchActionLabel = computed(() => {
+    if (isPastProgram.value === true) {
+        return '終了済み';
+    }
+    return '録画追加';
+});
+
+const programSearchActionIcon = computed(() => {
+    if (isPastProgram.value === true) {
+        return 'fluent:clock-dismiss-20-filled';
+    }
+    return 'fluent:add-16-filled';
+});
+
+const programSearchActionColor = computed(() => {
+    if (isAddingReservation.value === true) {
+        return 'primary';
+    }
+    return isProgramSearchActionDisabled.value === true ? 'background-lighten-2' : 'primary';
+});
+
+const displayStatusLabel = computed(() => {
+    // 番組検索を開いたまま放送終了を跨いだ場合は、録画可否ではなく現在の番組状態を優先する
+    if (props.isProgramSearchResult === true && isPastProgram.value === true) {
+        return '放送終了';
+    }
+    return getReservationStatusLabel(props.reservation);
+});
+
+const countdownStatusLabel = computed(() => {
+    if (isPastProgram.value === true) {
+        return null;
+    }
+
+    const now = currentTime.value;
+    const startTime = dayjs(props.reservation.program.start_time);
+    const endTime = dayjs(props.reservation.program.end_time);
+    if (shouldShowProgramSearchAddButton.value === true && now.isSameOrAfter(startTime) && now.isBefore(endTime)) {
+        // 検索結果画面かつ予約が入っていない番組では、「録画中」ツールチップが表示されないため、
+        // 代わりに放送中である旨をツールチップに表示する
+        return '放送中';
+    }
+
+    if (props.reservation.is_recording_in_progress === true || now.isSameOrAfter(startTime)) {
+        return null;
+    }
+
+    const diffMinutes = startTime.diff(now, 'minute');
+    if (diffMinutes > 12 * 60) {
+        return null;
+    }
+
+    const hours = Math.floor(diffMinutes / 60);
+    const minutes = diffMinutes % 60;
+    if (hours === 0) {
+        return `${minutes}分後`;
+    }
+    if (minutes === 0) {
+        return `${hours}時間後`;
+    }
+    return `${hours}時間${minutes}分後`;
+});
+
+const displayStatusIcon = computed(() => {
+    // 終了済み番組は録画可否のチェックアイコンを出すと、操作可能に見えてしまう
+    if (props.isProgramSearchResult === true && isPastProgram.value === true) {
+        return 'fluent:clock-dismiss-20-filled';
+    }
+    return getReservationStatusIcon(props.reservation);
+});
+
+const displayStatusColor = computed(() => {
+    // 終了済み番組は追加ボタンと同じく、録画できない状態として弱い色に落とす
+    if (props.isProgramSearchResult === true && isPastProgram.value === true) {
+        return 'grey';
+    }
+    return getReservationStatusColor(props.reservation);
+});
+
+const broadcasterLogoURL = computed(() => {
+    // 検索結果のモック予約データでは、KonomiTV に存在しないチャンネルを API に問い合わせない
+    if (props.reservation.channel.channel_number === '---' && props.reservation.channel.name === props.reservation.program.channel_id) {
+        return null;
+    }
+    return `${Utils.api_base_url}/channels/${props.reservation.channel.id}/logo`;
+});
+
+// propsの変更を監視
+watch(() => props.reservation.record_settings.is_enabled, (newValue) => {
+    isEnabled.value = newValue;
+});
+
+onMounted(() => {
+    // 放送開始・終了を跨いだまま一覧を開いていると、チップと予約追加ボタンの状態が古くなる
+    currentTimeUpdateTimer = setInterval(() => {
+        currentTime.value = dayjs();
+    }, 30 * 1000);
+});
+
+onBeforeUnmount(() => {
+    // 仮想スクロールやページ遷移でカードが破棄された後に時刻更新だけが残らないよう止める
+    if (currentTimeUpdateTimer !== null) {
+        clearInterval(currentTimeUpdateTimer);
+        currentTimeUpdateTimer = null;
+    }
+});
+
+// ロゴ取得に失敗したら API への再リクエストを止め、背景だけのプレースホルダーとして残す
+const onLogoError = (event: Event) => {
+    const target = event.target as HTMLImageElement;
+    const placeholder = document.createElement('div');
+    placeholder.className = target.className;
+    target.replaceWith(placeholder);
+};
+
+// 予約状態のラベルを取得
+const getReservationStatusLabel = (reservation: IReservation): string => {
+    if (reservation.is_recording_in_progress) {
+        return '録画中';
+    }
+
+    switch (reservation.recording_availability) {
+        case 'Full':
+            return '録画可能';
+        case 'Partial':
+            return '一部のみ録画可能';
+        case 'Unavailable':
+            return 'チューナー不足';
+        default:
+            return '不明';
+    }
+};
+
+// 予約状態のアイコンを取得
+const getReservationStatusIcon = (reservation: IReservation): string => {
+    if (reservation.is_recording_in_progress) {
+        return 'fluent:record-16-filled';
+    }
+
+    switch (reservation.recording_availability) {
+        case 'Full':
+            return 'fluent:checkmark-16-filled';
+        case 'Partial':
+            return 'fluent:warning-16-filled';
+        case 'Unavailable':
+            return 'fluent:dismiss-circle-16-filled';
+        default:
+            return 'fluent:question-circle-16-filled';
+    }
+};
+
+// 予約状態の色を取得
+const getReservationStatusColor = (reservation: IReservation): string => {
+    if (reservation.is_recording_in_progress) {
+        return 'primary';
+    }
+
+    switch (reservation.recording_availability) {
+        case 'Full':
+            return 'success';
+        case 'Partial':
+            return 'warning';
+        case 'Unavailable':
+            return 'error';
+        default:
+            return 'grey';
+    }
+};
+
+// コンテンツクリック時の処理
+const handleContentClick = () => {
+    emit('click', props.reservation);
+};
+
+// 有効・無効の切り替え処理
+const handleToggleEnabled = async () => {
+    if (isUpdating.value) return;
+
+    isUpdating.value = true;
+    try {
+        // 録画設定を更新
+        const updatedSettings = {
+            ...props.reservation.record_settings,
+            is_enabled: isEnabled.value,
+        };
+
+        const result = await Reservations.updateReservation(props.reservation.id, updatedSettings);
+        if (result) {
+            const message = isEnabled.value
+                ? '録画予約を有効にしました。\n番組開始時刻になると自動的に録画が開始されます。'
+                : '録画予約を無効にしました。\n番組開始時刻までに再度予約を有効にしない限り、この番組は録画されません。';
+            Message.success(message);
+        } else {
+            // 失敗時は元の状態に戻す
+            isEnabled.value = props.reservation.record_settings.is_enabled;
+        }
+    } catch (error) {
+        console.error('Failed to update reservation:', error);
+        // 失敗時は元の状態に戻す
+        isEnabled.value = props.reservation.record_settings.is_enabled;
+    } finally {
+        isUpdating.value = false;
+    }
+};
+
+// 番組検索結果での追加ボタンがクリックされた時、詳細ドロワーを開く代わりに予約を追加する
+const handleAddButtonClick = async (event: Event) => {
+    event.stopPropagation();
+
+    if (isProgramSearchActionDisabled.value === true) {
+        return;
+    }
+
+    isAddingReservation.value = true;
+    try {
+        const isSuccess = await Reservations.addReservation(props.reservation.program.id, props.reservation.record_settings);
+        if (isSuccess === true) {
+            Message.success('録画予約を追加しました。');
+            emit('added', props.reservation);
+        }
+    } catch (error) {
+        console.error('Failed to add reservation:', error);
+        Message.error('録画予約の追加に失敗しました。');
+    } finally {
+        isAddingReservation.value = false;
+    }
+};
+
+// スイッチ領域のクリック時の処理（ドロワー開閉を防止）
+const handleSwitchClick = (event: Event) => {
+    event.stopPropagation();
+};
+
+</script>
+<style lang="scss" scoped>
+
+.reservation {
+    display: flex;
+    position: relative;
+    width: 100%;
+    min-height: auto;
+    padding: 0px 16px;
+    color: rgb(var(--v-theme-text));
+    background: rgb(var(--v-theme-background-lighten-1));
+    transition: background-color 0.15s, opacity 0.15s;
+    text-decoration: none;
+    user-select: none;
+    box-sizing: border-box;
+    content-visibility: auto;
+    @include tablet-vertical {
+        padding: 0px 12px;
+    }
+    @include smartphone-horizontal {
+        padding: 0px 12px;
+    }
+    @include smartphone-vertical {
+        padding: 0px 9px;
+    }
+
+    // タッチデバイスでは hover 効果を設定しない
+    @media (hover: hover) {
+        &:hover {
+            background: rgb(var(--v-theme-background-lighten-2));
+        }
+    }
+
+    &--disabled {
+        background: rgba(var(--v-theme-background), 0.6);
+        .reservation__priority, .reservation__content {
+            opacity: 0.6;
+        }
+    }
+
+    &__container {
+        display: flex;
+        align-items: center;
+        width: 100%;
+        // 検索ページの狭い右カラムでは、子要素側の省略表示へ幅を渡す
+        min-width: 0;
+        min-height: auto;
+        padding: 8px 3px;
+        @include tablet-horizontal {
+            padding: 8px 0px;
+        }
+        @include tablet-vertical {
+            padding: 8px 0px;
+        }
+        @include smartphone-horizontal {
+            padding: 6px 0px;
+        }
+        @include smartphone-vertical {
+            padding: 8px 0px;
+        }
+    }
+
+    &__controls {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        flex-shrink: 0;
+        margin-right: 16px;
+        @include smartphone-vertical {
+            margin-right: 8px;
+        }
+    }
+
+    &__priority {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        padding: 0px 6px;  // 下のスイッチと幅を揃えるため
+        margin-bottom: 6px;
+        @include smartphone-vertical {
+            margin-bottom: 12px;
+        }
+
+        &-badge {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 22px;
+            height: 22px;
+            border-radius: 50%;
+            background: rgb(var(--v-theme-primary));
+            color: white;
+            font-size: 13px;
+            font-weight: 600;
+            margin-bottom: 3px;
+            @include smartphone-vertical {
+                width: 24px;
+                height: 24px;
+                font-size: 12px;
+                margin-bottom: 2px;
+            }
+        }
+
+        &-label {
+            font-size: 10px;
+            color: rgb(var(--v-theme-text-darken-1));
+            text-align: center;
+            @include smartphone-vertical {
+                font-size: 9px;
+            }
+        }
+    }
+
+    &__program-search-action {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 42px;
+        @include smartphone-vertical {
+            width: 39px;
+        }
+    }
+
+    &__program-search-add {
+        --v-btn-width: 18px !important;
+        --v-btn-height: 18px !important;
+        @include smartphone-vertical {
+            --v-btn-width: 14px !important;
+            --v-btn-height: 14px !important;
+        }
+    }
+
+    .reservation__recording-icon {
+        margin: auto;
+        width: 21px;
+        height: 21px;
+        border: 7px solid #515151;
+        border-radius: 50%;
+        background-color: #EF5350;
+        box-shadow: 0 3px 4px 0 rgba(0, 0, 0, .14), 0 3px 3px -2px rgba(0, 0, 0, .2), 0 1px 8px 0 rgba(0, 0, 0, .12);
+        transition: 1s cubic-bezier(0.22, 0.61, 0.36, 1);
+        position: relative;
+        display: block;
+        content: '';
+        box-sizing: border-box;
+        overflow: visible;
+        text-align: left;
+        animation: recording-background-color 2s infinite ease-in-out;
+        @include smartphone-vertical {
+            width: 19px;
+            height: 19px;
+            border: 6px solid #515151;
+        }
+
+        &:before {
+            width: 13px;
+            height: 13px;
+            background: rgba(239, 83, 80, 0.2);
+            border-radius: 50%;
+            position: absolute;
+            margin-top: -3px;
+            margin-left: -3px;
+            content: '';
+            transition: 1s cubic-bezier(0.22, 0.61, 0.36, 1);
+            @include smartphone-vertical {
+                width: 9px;
+                height: 9px;
+            }
+        }
+
+        // 中心の赤丸が点滅するアニメーション
+        @keyframes recording-background-color {
+            0% { background-color: rgba(239, 83, 80, 0.7); }
+            50% { background-color: rgba(239, 83, 80, 1); }
+            100% { background-color: rgba(239, 83, 80, 0.7); }
+        }
+    }
+
+    &__toggle {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+
+        :deep(.v-switch) {
+            .v-selection-control {
+                min-height: unset;
+            }
+            .v-selection-control__wrapper {
+                height: 18px;
+                @include smartphone-vertical {
+                    height: 16px;
+                }
+            }
+        }
+
+        &-label {
+            font-size: 10px;
+            color: rgb(var(--v-theme-text-darken-1));
+            text-align: center;
+            margin-top: 2px;
+            @include smartphone-vertical {
+                font-size: 9px;
+            }
+        }
+    }
+
+    &__content {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        flex-grow: 1;
+        min-width: 0;
+        cursor: pointer;
+        border-radius: 6px;
+        transition: background-color 0.15s;
+
+        &-header {
+            display: flex;
+            align-items: center;
+            min-width: 0;
+            margin-bottom: 2px;
+            @include desktop {
+                margin-bottom: 4px;
+            }
+            @include tablet-horizontal {
+                margin-bottom: 4px;
+            }
+            @include tablet-vertical {
+                margin-bottom: 4px;
+            }
+            @include smartphone-vertical {
+                // 右上の状態チップはカード全体ではなく、本文列の右端へそろえる
+                position: relative;
+            }
+        }
+
+        &-title {
+            flex-grow: 1;
+            min-width: 0;
+            font-size: 17px;
+            font-weight: 600;
+            font-feature-settings: "palt" 1;
+            letter-spacing: 0.07em;
+            line-height: 1.35;
+            margin-right: 12px;
+            overflow: hidden;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+            @include tablet-vertical {
+                display: -webkit-box;
+                font-size: 14px;
+                line-height: 1.4;
+                white-space: normal;
+                -webkit-line-clamp: 2;
+                -webkit-box-orient: vertical;
+            }
+            @include smartphone-horizontal {
+                font-size: 14px;
+            }
+            @include smartphone-vertical {
+                position: relative;
+                display: -webkit-box;
+                font-size: 13px;
+                line-height: 1.45;
+                width: 100%;
+                margin-right: 0px;
+                padding-right: 96px;
+                white-space: normal;
+                -webkit-line-clamp: 2;
+                -webkit-box-orient: vertical;
+            }
+        }
+
+        &-status {
+            display: flex;
+            align-items: center;
+            column-gap: 5px;
+            margin-right: -1.5px;  // 錯視対策
+            flex-shrink: 0;
+            min-width: 0;
+            overflow: hidden;
+
+            :deep(.v-chip) {
+                min-width: 0;
+                flex-shrink: 0;
+                padding-inline: 9px;
+
+                .v-chip__content {
+                    overflow: hidden;
+                    white-space: nowrap;
+                    text-overflow: ellipsis;
+                }
+
+                @include tablet-vertical {
+                    height: 22px !important;
+                    font-size: 11px !important;
+                    padding: 0 6px !important;
+                }
+                @include smartphone-horizontal {
+                    height: 22px !important;
+                    font-size: 11px !important;
+                    padding: 0 6px !important;
+                }
+                @include smartphone-vertical {
+                    height: 22px !important;
+                    font-size: 11px !important;
+                    padding: 0 6px !important;
+                }
+            }
+
+            @include smartphone-vertical {
+                position: absolute;
+                top: 0px;
+                right: 1.5px;
+                flex-direction: column;
+                align-items: flex-end;
+                row-gap: 4px;
+                overflow: visible;
+            }
+        }
+
+        &-status-chip {
+            @include smartphone-vertical {
+                order: 1;
+            }
+        }
+
+        &-countdown {
+            display: none;
+            flex-shrink: 1;
+            max-width: 145px;
+            @include desktop {
+                display: inline-flex;
+            }
+            @include tablet-horizontal {
+                display: inline-flex;
+            }
+            @include tablet-vertical {
+                display: inline-flex;
+            }
+            @include smartphone-horizontal {
+                display: inline-flex;
+            }
+            @include smartphone-vertical {
+                display: inline-flex;
+                order: 2;
+                flex-shrink: 0;
+                max-width: 92px;
+            }
+        }
+
+        &-meta {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 10px 0px;
+            margin-bottom: 2px;
+            font-size: 13.8px;
+            min-width: 0;
+            overflow: hidden;
+            @include desktop {
+                flex-wrap: nowrap;
+            }
+            @include tablet-horizontal {
+                flex-wrap: nowrap;
+                row-gap: 4px;
+            }
+            @include tablet-vertical {
+                gap: 3px 6px;
+            }
+            @include smartphone-horizontal {
+                gap: 3px 6px;
+            }
+            @include smartphone-vertical {
+                row-gap: 1px;
+                font-size: 12px;
+                margin-bottom: 0px;
+            }
+
+            &-broadcaster {
+                display: flex;
+                align-items: center;
+                min-width: 0;
+                font-size: 13.5px;
+                @include desktop {
+                    // PC版では放送局の幅を適切に制限
+                    flex: 0 0 auto;
+                    min-width: 230px;
+                }
+                @include tablet-horizontal {
+                    flex: 0 0 auto;
+                    min-width: 200px;
+                }
+                @include tablet-vertical {
+                    flex: 1;  // 時刻表示を右側に寄せる
+                }
+                @include smartphone-horizontal {
+                    flex: 1;  // 時刻表示を右側に寄せる
+                }
+                @include smartphone-vertical {
+                    width: 100%;  // 事実上常に時刻表示が下に来るようにする
+                    margin-bottom: 1px;
+                }
+
+                &-icon {
+                    flex-shrink: 0;
+                    width: 28px;
+                    height: 16px;
+                    margin-right: 10px;
+                    border-radius: 2px;
+                    background: linear-gradient(150deg, rgb(var(--v-theme-gray)), rgb(var(--v-theme-background-lighten-2)));
+                    object-fit: cover;
+                    @include smartphone-vertical {
+                        width: 24px;
+                        height: 14px;
+                        margin-right: 4px;
+                    }
+                }
+
+                &-name {
+                    color: rgb(var(--v-theme-text-darken-1));
+                    white-space: nowrap;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    @include tablet-vertical {
+                        font-size: 13px;
+                    }
+                    @include smartphone-horizontal {
+                        font-size: 13px;
+                    }
+                    @include smartphone-vertical {
+                        margin-left: 4px;
+                        font-size: 12px;
+                    }
+                }
+            }
+
+            // スマホ版のみ：時刻表示
+            &-time {
+                display: inline-block;
+                flex-shrink: 0;
+                color: rgb(var(--v-theme-text-darken-1));
+                border-left: 1px solid rgb(var(--v-theme-text-darken-1));
+                padding-left: 10px;
+                height: 16px;
+                font-size: 13.5px;
+                line-height: 15.5px;
+                white-space: nowrap;
+                @include desktop {
+                    display: none;  // PC版では非表示
+                }
+                @include tablet-horizontal {
+                    display: none;  // タブレット横版でも非表示
+                }
+                @include tablet-vertical {
+                    margin-left: 0px;
+                    border-left: none;
+                    padding-left: 0px;
+                    font-size: 12px;
+                }
+                @include smartphone-horizontal {
+                    margin-left: 0px;
+                    border-left: none;
+                    padding-left: 0px;
+                    font-size: 12px;
+                }
+                @include smartphone-vertical {
+                    margin-left: 0px;
+                    border-left: none;
+                    padding-left: 0px;
+                    font-size: 11.4px;
+                    width: 100%;  // コメントがない時に常にストレージ情報が下に来るようにする
+                }
+            }
+
+            // PC版のみ：上段右側の時刻表示
+            &-time-pc {
+                display: none;  // デフォルトは非表示
+                @include desktop {
+                    display: inline-block;
+                    flex-shrink: 0;
+                    margin-left: auto;
+                    color: rgb(var(--v-theme-text-darken-1));
+                    height: 16px;
+                    font-size: 13.5px;
+                    white-space: nowrap;
+                    min-width: 231px;  // 実測値
+                    text-align: left;
+                }
+                @include tablet-horizontal {
+                    display: inline-block;
+                    flex-shrink: 0;
+                    margin-left: auto;
+                    color: rgb(var(--v-theme-text-darken-1));
+                    height: 16px;
+                    font-size: 13.5px;
+                    white-space: nowrap;
+                    min-width: 231px;  // 実測値
+                    text-align: left;
+                }
+            }
+
+            &-size-comment {
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                flex-grow: 1;
+                justify-content: flex-end;
+                min-width: 0;
+                overflow: hidden;
+
+                @include desktop {
+                    // PC版では容量を非表示（下段に別途表示）
+                    .reservation__content-meta-size {
+                        display: none;
+                    }
+                    // コメント部分のみ表示し、左寄せ
+                    justify-content: flex-start;
+                    margin-left: 10px;
+                }
+                @include tablet-horizontal {
+                    .reservation__content-meta-size {
+                        display: none;
+                    }
+                    justify-content: flex-start;
+                    margin-left: 10px;
+                }
+                @include tablet-vertical {
+                    display: none;
+                }
+                @include smartphone-horizontal {
+                    display: none;
+                }
+                @include smartphone-vertical {
+                    display: none;
+                }
+
+                &--without-comment {
+                    // メモ欄がない予約でもストレージ情報を右端に寄せる
+                    justify-content: flex-end;
+                }
+            }
+
+            &-size,
+            &-comment {
+                display: flex;
+                align-items: center;
+                color: rgb(var(--v-theme-text-darken-1));
+                font-size: 12.5px;
+                @include tablet-vertical {
+                    font-size: 12px;
+                }
+                @include smartphone-horizontal {
+                    font-size: 12px;
+                }
+                @include smartphone-vertical {
+                    font-size: 11px;
+                }
+            }
+            &-size {
+                display: flex;
+                align-items: center;
+                white-space: nowrap;
+                flex-shrink: 0;
+
+                &-icon {
+                    flex-shrink: 0;
+                    margin-right: 4px;
+                }
+            }
+            &-comment {
+                min-width: 0;
+                flex: 1 1 0;
+                display: flex;
+                align-items: center;
+                overflow: hidden;
+
+                @include desktop {
+                    margin-right: 16px;
+                    border-left: 1px solid rgb(var(--v-theme-text-darken-1));
+                    padding-left: 10px;
+                }
+                @include tablet-horizontal {
+                    margin-right: 12px;
+                    border-left: 1px solid rgb(var(--v-theme-text-darken-1));
+                    padding-left: 10px;
+                }
+
+                &-text {
+                    white-space: nowrap;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                }
+
+                &-icon {
+                    flex-shrink: 0;
+                    margin-right: 4px;
+                }
+            }
+        }
+
+        // 概要と右側補助情報のコンテナ
+        &-description-container {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) max-content;
+            align-items: center;
+            column-gap: 12px;
+            margin-top: 2px;
+            min-width: 0;
+
+            @include desktop {
+                align-items: center;  // PC版では中央揃え
+            }
+            @include tablet-vertical {
+                column-gap: 8px;
+                margin-top: 2px;
+            }
+            @include smartphone-horizontal {
+                column-gap: 8px;
+                margin-top: 2px;
+            }
+            @include smartphone-vertical {
+                column-gap: 8px;
+                margin-top: 2px;
+            }
+
+            &--with-comment {
+                @include tablet-vertical {
+                    // 概要・コメント・容量を親の列で分け、概要だけが残り幅を受け持つ
+                    grid-template-columns: minmax(0, 1fr) fit-content(28em) max-content;
+                }
+                @include smartphone-horizontal {
+                    // 横幅に余裕があるスマホ横では、コメントを最大幅まで表示してから省略する
+                    grid-template-columns: minmax(0, 1fr) fit-content(28em) max-content;
+                }
+
+                @include smartphone-vertical {
+                    // スマホ縦では概要を隠し、コメントと容量だけを同じ行に残す
+                    grid-template-columns: minmax(0, 1fr) max-content;
+                    column-gap: 6px;
+                }
+
+                .reservation__content-description {
+                    @include smartphone-vertical {
+                        // スマホ縦では概要とコメントを同時に出すと両方読めなくなるため、
+                        // コメントがある予約だけ概要行をコメント表示へ譲る
+                        display: none;
+                    }
+                }
+
+                .reservation__content-description-comment {
+                    @include smartphone-vertical {
+                        // 概要を非表示にした行では、コメントが容量の左側の残り幅を使う
+                        grid-column: 1;
+                    }
+                }
+
+                .reservation__content-description-size {
+                    @include tablet-vertical {
+                        // 容量は右端に固定し、コメントや概要の省略に巻き込まない
+                        grid-column: 3;
+                    }
+                    @include smartphone-horizontal {
+                        // 容量は右端に固定し、コメントや概要の省略に巻き込まない
+                        grid-column: 3;
+                    }
+                    @include smartphone-vertical {
+                        grid-column: 2;
+                    }
+                }
+            }
+        }
+
+        &-description {
+            grid-column: 1;
+            min-width: 0;
+            margin-right: 0px;
+            color: rgb(var(--v-theme-text-darken-1));
+            font-size: 11.5px;
+            line-height: 1.55;
+            font-feature-settings: "palt" 1;
+            letter-spacing: 0.07em;
+            overflow: hidden;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+            @include tablet-vertical {
+                font-size: 11px;
+            }
+            @include smartphone-horizontal {
+                font-size: 11px;
+            }
+            @include smartphone-vertical {
+                font-size: 10.5px;
+                line-height: 1.45;
+            }
+        }
+
+        &-description-side {
+            display: none;
+            min-width: 0;
+            margin-left: auto;
+            color: rgb(var(--v-theme-text-darken-1));
+            white-space: nowrap;
+
+            @include tablet-vertical {
+                // 子要素を親の列に直接載せ、右側の入れ物自体が幅を持たないようにする
+                display: contents;
+                font-size: 12px;
+            }
+            @include smartphone-horizontal {
+                // 子要素を親の列に直接載せ、右側の入れ物自体が幅を持たないようにする
+                display: contents;
+                font-size: 12px;
+            }
+            @include smartphone-vertical {
+                // コメントありのスマホ縦でも、コメントと容量を親の2列に直接配置する
+                display: contents;
+                font-size: 11px;
+            }
+        }
+
+        &-description-comment {
+            display: flex;
+            align-items: center;
+            justify-content: end;
+            grid-column: 2;
+            // 短いコメントは全文を読ませ、長いコメントだけをこの要素内で省略する
+            min-width: 0;
+            max-width: 28em;
+            overflow: hidden;
+            @include tablet-horizontal {
+                max-width: 23em;
+            }
+            @include tablet-vertical {
+                max-width: 23em;
+            }
+            @include smartphone-horizontal {
+                max-width: 24em;
+            }
+            @include smartphone-vertical {
+                max-width: unset;
+            }
+
+            &-icon {
+                flex-shrink: 0;
+                margin-right: 4px;
+            }
+
+            &-text {
+                // 省略対象は本文だけに限定し、ノートアイコンは常に残す
+                flex-grow: 1;
+                flex-shrink: 1;
+                flex-basis: auto;
+                min-width: 0;
+                overflow: hidden;
+                white-space: nowrap;
+                text-overflow: ellipsis;
+            }
+        }
+
+        &-description-size {
+            display: flex;
+            align-items: center;
+            grid-column: 2;
+            justify-self: end;
+            flex-shrink: 0;
+            min-width: max-content;
+            white-space: nowrap;
+        }
+
+        // PC・タブレット横版：概要行の容量表示（右側）
+        &-description-size-pc {
+            display: none;  // デフォルトは非表示
+            @include desktop {
+                display: flex;
+                align-items: center;
+                grid-column: 2;
+                justify-self: end;
+                flex-shrink: 0;
+                margin-left: auto;
+                padding-left: 12px;  // 左側との余白
+                color: rgb(var(--v-theme-text-darken-1));
+                font-size: 12.5px;
+                white-space: nowrap;
+                justify-content: flex-end;
+            }
+            @include tablet-horizontal {
+                display: flex;
+                align-items: center;
+                grid-column: 2;
+                justify-self: end;
+                flex-shrink: 0;
+                margin-left: auto;
+                padding-left: 12px;  // 左側との余白
+                color: rgb(var(--v-theme-text-darken-1));
+                font-size: 12.5px;
+                white-space: nowrap;
+                justify-content: flex-end;
+            }
+        }
+
+        .reservation__content-description-size-icon {
+            flex-shrink: 0;
+            margin-right: 4px;
+        }
+    }
+
+    &__recording {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+
+        &-icon {
+            margin-bottom: 3px;
+            @include smartphone-vertical {
+                margin-bottom: 2px;
+            }
+        }
+
+        &-label {
+            font-size: 10px;
+            color: rgb(var(--v-theme-text-darken-1));
+            text-align: center;
+            @include smartphone-vertical {
+                font-size: 9px;
+            }
+        }
+    }
+
+    &--compact-tablet-horizontal {
+        @include tablet-horizontal {
+            .reservation__content-header {
+                position: relative;
+                align-items: flex-start;
+            }
+
+            .reservation__content-title {
+                font-size: 14px;
+                line-height: 1.45;
+                width: 100%;
+                margin-right: 0px;
+                padding-right: 80px;  // 「録画可能」などのチップの表示幅分
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
+
+            .reservation__content-status {
+                position: absolute;
+                top: 0px;
+                right: 1.5px;
+                flex-direction: column;
+                align-items: flex-end;
+                row-gap: 4px;
+                overflow: visible;
+
+                :deep(.v-chip) {
+                    height: 22px !important;
+                    padding: 0px 7px !important;
+                    font-size: 11px !important;
+                }
+            }
+
+            .reservation__content-status-chip {
+                // 番組検索のタブレット横表示は右カラムが狭いため、スマホ縦画面と同じ縦積みにする
+                order: 1;
+            }
+
+            .reservation__content-countdown {
+                display: inline-flex;
+                order: 2;
+                flex-shrink: 0;
+                max-width: 92px;
+            }
+
+            .reservation__content-meta {
+                flex-wrap: wrap;
+                gap: 2px 6px;
+                margin-bottom: 0px;
+                font-size: 12px;
+            }
+
+            .reservation__content-meta-broadcaster {
+                width: 100%;
+                min-width: 0;
+                margin-bottom: 1px;
+                font-size: 12px;
+            }
+
+            .reservation__content-meta-broadcaster-icon {
+                width: 24px;
+                height: 14px;
+                margin-right: 4px;
+            }
+
+            .reservation__content-meta-broadcaster-name {
+                margin-left: 4px;
+                font-size: 12px;
+            }
+
+            .reservation__content-meta-time {
+                display: inline-block;
+                width: 100%;
+                height: 16px;
+                margin-left: 0px;
+                padding-left: 0px;
+                border-left: none;
+                font-size: 11.4px;
+                line-height: 15.5px;
+            }
+
+            .reservation__content-meta-time-pc {
+                display: none;
+            }
+
+            .reservation__content-meta-size-comment {
+                display: none;
+            }
+
+            .reservation__content-meta-size {
+                display: flex;
+            }
+
+            .reservation__content-meta-comment {
+                margin-right: 0px;
+                padding-left: 0px;
+                border-left: none;
+                font-size: 12px;
+            }
+
+            .reservation__content-description-container {
+                display: grid;
+                grid-template-columns: minmax(0, 1fr) max-content;
+                column-gap: 8px;
+                margin-top: 2px;
+            }
+
+            .reservation__content-description-container--with-comment {
+                // タブレット横のコンパクト表示でも、概要・コメント・容量を同じ3列で扱う
+                grid-template-columns: minmax(0, 1fr) fit-content(28em) max-content;
+            }
+
+            .reservation__content-description-side {
+                display: contents;
+                font-size: 11px;
+            }
+
+            .reservation__content-description-side--with-comment {
+                .reservation__content-description-size {
+                    // 容量を3列目へ置き、コメントが長い場合は2列目の中だけで省略する
+                    grid-column: 3;
+                }
+            }
+
+            .reservation__content-description-size-pc {
+                display: none;
+            }
+        }
+    }
+}
+
+</style>

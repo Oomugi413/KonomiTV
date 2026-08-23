@@ -2,13 +2,18 @@
     <div class="watch-panel"
          @mousemove="playerStore.event_emitter.emit('SetControlDisplayTimer', {event: $event})">
         <div class="watch-panel__header">
-            <div v-ripple class="panel-close-button" @click="playerStore.is_panel_display = false">
+            <div v-ripple class="panel-close-button"
+                @click="closePanel">
                 <Icon class="panel-close-button__icon" icon="akar-icons:chevron-right" width="25px" />
                 <span class="panel-close-button__text">閉じる</span>
             </div>
             <v-spacer></v-spacer>
             <div class="panel-broadcaster" v-if="playback_mode === 'Live'">
-                <img class="panel-broadcaster__icon" :src="`${Utils.api_base_url}/channels/${channelsStore.channel.current.id}/logo`">
+                <div class="panel-broadcaster__icon">
+                    <div class="ch-sprite" :chid="channelsStore.channel.current.id">
+                        <img loading="lazy" :src="`${Utils.api_base_url}/channels/${channelsStore.channel.current.id}/logo`">
+                    </div>
+                </div>
                 <div class="panel-broadcaster__number">{{channelsStore.channel.current.channel_number}}</div>
                 <div class="panel-broadcaster__name">{{channelsStore.channel.current.name}}</div>
             </div>
@@ -26,13 +31,14 @@
                 :class="{'watch-panel__content--active': panel_active_tab === 'Comment'}" />
             <Twitter class="watch-panel__content" :playback_mode="playback_mode"
                 :class="{'watch-panel__content--active': panel_active_tab === 'Twitter'}" />
-            <button v-ripple class="watch-panel__content-remocon-button elevation-8" v-if="playback_mode === 'Live'"
-                :class="{'watch-panel__content-remocon-button--active': panel_active_tab === 'Program' || panel_active_tab === 'Channel'}"
+            <button v-ripple class="watch-panel__content-remocon-button elevation-8" v-if="show_remocon"
+                :class="{'watch-panel__content-remocon-button--active': remocon_panel_active}"
                 @click="playerStore.is_remocon_display = !playerStore.is_remocon_display">
                 <Icon class="panel-close-button__icon" icon="material-symbols:remote-gen" width="25px" />
             </button>
-            <Remocon class="watch-panel__remocon" v-if="playback_mode === 'Live'"
-                :modelValue="(panel_active_tab === 'Program' || panel_active_tab === 'Channel') && playerStore.is_remocon_display === true"
+            <Remocon class="watch-panel__remocon" v-if="show_remocon"
+                :modelValue="remocon_panel_active && playerStore.is_remocon_display === true"
+                :dataBroadcasting="playerStore.is_data_broadcasting_display"
                 @update:modelValue="playerStore.is_remocon_display = $event" />
         </div>
         <div class="watch-panel__navigation">
@@ -125,7 +131,30 @@ export default defineComponent({
             } else {
                 return this.playerStore.video_panel_active_tab;
             }
+        },
+
+        // MMT/TLV 録画では B62 データ放送を操作できるため、ライブと同じリモコンを表示する
+        show_remocon(): boolean {
+            return this.playback_mode === 'Live' ||
+                this.playerStore.recorded_program?.recorded_video.container_format === 'MMT/TLV';
+        },
+
+        remocon_panel_active(): boolean {
+            if (this.playback_mode === 'Live') {
+                return this.panel_active_tab === 'Program' || this.panel_active_tab === 'Channel';
+            }
+            return this.panel_active_tab === 'RecordedProgram' || this.panel_active_tab === 'Series';
         }
+    },
+    methods: {
+        closePanel(): void {
+            // データ放送中のパネル表示は通常のユーザー設定と分離し、アプリケーションを終了せずに折り畳む。
+            if (this.playerStore.is_data_broadcasting_display) {
+                this.playerStore.is_data_broadcasting_panel_display = false;
+                return;
+            }
+            this.playerStore.is_panel_display = false;
+        },
     }
 });
 
@@ -134,11 +163,15 @@ export default defineComponent({
 
 .watch-panel {
     display: flex;
+    position: relative;
     flex-direction: column;
     flex-shrink: 0;
     width: 352px;
     height: 100%;
     background: rgb(var(--v-theme-background));
+    // データ放送中は DPlayer 全体が z-index: 1 になるため、パネルにも stacking context を作り、
+    // リモコンだけでなくヘッダーの「閉じる」と下部ナビゲーションも確実に操作できるようにする。
+    z-index: 2;
     @include tablet-vertical {
         width: 100%;
         height: auto;
@@ -207,9 +240,12 @@ export default defineComponent({
             &__icon {
                 display: inline-block;
                 flex-shrink: 0;
-                width: 43px;
-                height: 24px;
-                border-radius: 3px;
+                --ch-sprite-width: 43;
+                --ch-sprite-height: 24;
+                --ch-sprite-border-radius: 3;
+                width: calc(var(--ch-sprite-width) * 1px);
+                height: calc(var(--ch-sprite-height) * 1px);
+                border-radius: calc(var(--ch-sprite-border-radius) * 1px);
                 background: linear-gradient(150deg, rgb(var(--v-theme-gray)), rgb(var(--v-theme-background-lighten-2)));
                 object-fit: cover;
                 user-select: none;
@@ -257,6 +293,7 @@ export default defineComponent({
             }
             &--active {
                 opacity: 1;
+                z-index: 15;
                 visibility: visible;
                 content-visibility: auto;
             }
@@ -277,7 +314,7 @@ export default defineComponent({
             transition: opacity 0.2s, visibility 0.2s;
             opacity: 0;
             visibility: hidden;
-            z-index: 10;
+            z-index: 20;
 
             @media (hover: none) {
                 transition: none;

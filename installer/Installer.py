@@ -3,38 +3,66 @@ import asyncio
 import json
 import os
 import platform
-import psutil
-import py7zr
-import requests
-import ruamel.yaml
 import shutil
 import subprocess
 import tarfile
 import tempfile
 import urllib.parse
+import zipfile
 from pathlib import Path
+from typing import Any, Literal, cast
+
+import psutil
+import py7zr
+import requests
+import ruamel.yaml
 from rich import print
 from rich.padding import Padding
-from typing import Any, cast, Literal
 
-from Utils import CreateBasicInfiniteProgress
-from Utils import CreateDownloadProgress
-from Utils import CreateDownloadInfiniteProgress
-from Utils import CreateRule
-from Utils import CreateTable
-from Utils import CtrlCmdConnectionCheckUtil
-from Utils import CustomConfirm
-from Utils import CustomPrompt
-from Utils import GetNetworkInterfaceInformation
-from Utils import IsDockerComposeV2
-from Utils import IsDockerInstalled
-from Utils import IsGitInstalled
-from Utils import RemoveEmojiIfLegacyTerminal
-from Utils import RunKonomiTVServiceWaiter
-from Utils import RunSubprocess
-from Utils import RunSubprocessDirectLogOutput
-from Utils import SaveConfig
-from Utils import ShowPanel
+from Utils import (
+    CreateBasicInfiniteProgress,
+    CreateDownloadInfiniteProgress,
+    CreateDownloadProgress,
+    CreateRule,
+    CreateTable,
+    CtrlCmdConnectionCheckUtil,
+    CustomConfirm,
+    CustomPrompt,
+    GetNetworkInterfaceInformation,
+    IsDockerComposeV2,
+    IsDockerInstalled,
+    IsGitInstalled,
+    RemoveEmojiIfLegacyTerminal,
+    RunKonomiTVServiceWaiter,
+    RunSubprocess,
+    RunSubprocessDirectLogOutput,
+    SaveConfig,
+    ShowPanel,
+)
+
+
+# NVIDIA GPU のうち、製品名だけで NVENC が搭載されていないと判定できる機種名
+## NVIDIA のサポート表にない古い機種もあるため、実機の報告と製品仕様を確認できた機種だけを列挙する
+## GT 705 は NVENC 対応リビジョンの日本国内での発売を確認できないため除外対象に含める
+## GT 630・GT 710・GT 720 は NVENC 対応の GK208 版が日本国内で発売されているため除外対象に含めない
+## GT 730 は NVENC 非搭載の Fermi 版と対応する Kepler 版が同じ製品名で日本国内に流通しているため除外対象に含めない
+NVIDIA_GPU_NAMES_WITHOUT_NVENC: tuple[str, ...] = (
+    'GeForce GT 610',
+    'GeForce GT 620',
+    'GeForce GT 625',
+    'GeForce GT 705',
+    'GeForce GT 1010',
+    'GeForce GT 1030',
+    'GeForce MX110',
+    'GeForce MX130',
+    'GeForce MX150',
+    'GeForce MX230',
+    'GeForce MX250',
+    'GeForce MX330',
+    'GeForce MX350',
+    'GeForce MX450',
+    'GeForce MX570 A',
+)
 
 
 def Installer(version: str) -> None:
@@ -62,7 +90,7 @@ def Installer(version: str) -> None:
         is_docker_installed = IsDockerInstalled()
         if is_docker_installed is True and is_arm_device is False:
             ShowPanel([
-                f'お使いの PC には Docker と Docker Compose {"V2" if IsDockerComposeV2() else "V1"} がインストールされています。',
+                f'お使いの PC には Docker と Docker Compose {"V2 以降" if IsDockerComposeV2() else "V1"} がインストールされています。',
                 'Docker + Docker Compose を使ってインストールしますか？',
             ], padding=(1, 2, 1, 2))
 
@@ -110,11 +138,11 @@ def Installer(version: str) -> None:
     if platform_type == 'Windows':
         table_02.add_row('なお、C:\\Users・C:\\Program Files 以下と、日本語(全角)が含まれるパス、')
         table_02.add_row('半角スペースを含むパスは不具合の原因となるため、避けてください。')
-        table_02.add_row('パスの入力例: C:\\DTV\\KonomiTV')
+        table_02.add_row('入力例: C:\\DTV\\KonomiTV')
     elif platform_type == 'Linux' or platform_type == 'Linux-Docker':
         table_02.add_row('なお、日本語(全角)が含まれるパス、半角スペースを含むパスは')
         table_02.add_row('不具合の原因となるため、避けてください。')
-        table_02.add_row('パスの入力例: /opt/KonomiTV')
+        table_02.add_row('入力例: /opt/KonomiTV')
     print(Padding(table_02, (1, 2, 1, 2)))
 
     # インストール先のフォルダを取得
@@ -334,7 +362,7 @@ def Installer(version: str) -> None:
         # ARM 環境のみ、もし  /proc/device-tree/compatible が存在し、その中に "rockchip" と "rk35" という文字列が含まれていたら、
         # Rockchip SoC 搭載の ARM SBC と判断して rkmppenc を利用可能とする
         if platform_type == 'Linux' and Path('/proc/device-tree/compatible').exists():
-            with open('/proc/device-tree/compatible', mode='r', encoding='utf-8') as compatible_file:
+            with open('/proc/device-tree/compatible', encoding='utf-8') as compatible_file:
                 compatible_data = compatible_file.read()
                 if 'rockchip' in compatible_data and 'rk35' in compatible_data:
                     rkmppenc_available = '✅利用できます'
@@ -350,8 +378,16 @@ def Installer(version: str) -> None:
             vceencc_available = f'✅利用できます (AMD GPU: {gpu_name})'
             default_encoder = 'VCEEncC'
         elif 'NVIDIA' in gpu_name or 'Geforce' in gpu_name:
-            nvencc_available = f'✅利用できます (NVIDIA GPU: {gpu_name})'
-            default_encoder = 'NVEncC'
+            # NVIDIA GPU でも NVENC 自体を搭載していない機種は NVEncC の候補から除外
+            ## 機種名の表記揺れを吸収しつつ、未知の新製品を誤って除外しないよう既知の非対応機種との部分一致で判定する
+            normalized_gpu_name = gpu_name.casefold()
+            has_nvenc = all(
+                unsupported_gpu_name.casefold() not in normalized_gpu_name
+                for unsupported_gpu_name in NVIDIA_GPU_NAMES_WITHOUT_NVENC
+            )
+            if has_nvenc is True:
+                nvencc_available = f'✅利用できます (NVIDIA GPU: {gpu_name})'
+                default_encoder = 'NVEncC'
         elif 'Intel' in gpu_name:
             qsvencc_available = f'✅利用できます (Intel GPU: {gpu_name})'
             default_encoder = 'QSVEncC'
@@ -389,35 +425,99 @@ def Installer(version: str) -> None:
             CustomPrompt.ask('利用するエンコーダー', default=default_encoder, choices=['FFmpeg', 'rkmppenc']),
         )
 
-    # ***** アップロードしたキャプチャ画像の保存先フォルダのパス *****
+    # ***** 録画済み番組の保存先フォルダのパス *****
 
     table_06 = CreateTable()
-    table_06.add_column('06. アップロードしたキャプチャ画像の保存先フォルダのパスを入力してください。')
-    table_06.add_row('クライアントの [キャプチャの保存先] 設定で [KonomiTV サーバーにアップロード] または')
-    table_06.add_row('[ブラウザでのダウンロードと、KonomiTV サーバーへのアップロードを両方行う] を選択したときに利用されます。')
+    table_06.add_column('06. 録画済み番組の保存先フォルダを入力してください。')
     if platform_type == 'Windows':
-        table_06.add_row('パスの入力例: E:\\TV-Capture')
+        table_06.add_row('入力例: E:\\TV-Record')
     elif platform_type == 'Linux' or platform_type == 'Linux-Docker':
-        table_06.add_row('パスの入力例: /mnt/hdd/TV-Capture')
+        table_06.add_row('入力例: /mnt/hdd/TV-Record')
+    table_06.add_row('複数のフォルダを指定するには、パスを1つずつ入力してください。')
+    table_06.add_row('入力を終了する場合は、何も入力せずに Enter キーを押してください。')
     print(Padding(table_06, (1, 2, 1, 2)))
 
-    # キャプチャ画像の保存先フォルダのパスを取得
-    capture_upload_folder: Path
-    while True:
+    # 録画フォルダのリスト
+    recorded_folders: list[str] = []
 
+    # 録画フォルダを1つずつ入力
+    while True:
         # 入力プロンプト (バリデーションに失敗し続ける限り何度でも表示される)
-        capture_upload_folder = Path(CustomPrompt.ask('アップロードしたキャプチャ画像の保存先フォルダのパス'))
+        recorded_folder = CustomPrompt.ask('録画フォルダのパス')
+
+        # 何も入力されなかった場合は入力を終了
+        if recorded_folder == '':
+            # 1つも入力されていない場合は再度入力を促す
+            if len(recorded_folders) == 0:
+                print(Padding('[red]少なくとも1つの録画フォルダを指定してください。', (0, 2, 0, 2)))
+                continue
+            break
+
+        # 入力されたパスを Path オブジェクトに変換
+        recorded_folder_path = Path(recorded_folder)
 
         # バリデーション
-        if capture_upload_folder.is_absolute() is False:
-            print(Padding('[red]アップロードしたキャプチャ画像の保存先フォルダは絶対パスで入力してください。', (0, 2, 0, 2)))
+        if recorded_folder_path.is_absolute() is False:
+            print(Padding('[red]録画フォルダは絶対パスで入力してください。', (0, 2, 0, 2)))
             continue
-        if capture_upload_folder.exists() is False:
-            print(Padding('[red]アップロードしたキャプチャ画像の保存先フォルダが存在しません。', (0, 2, 0, 2)))
+        if recorded_folder_path.exists() is False:
+            print(Padding('[red]指定された録画フォルダが存在しません。', (0, 2, 0, 2)))
+            continue
+        if recorded_folder_path.is_dir() is False:
+            print(Padding('[red]指定されたパスはフォルダではありません。', (0, 2, 0, 2)))
             continue
 
-        # すべてのバリデーションを通過したのでループを抜ける
-        break
+        # 現在指定されているフォルダの一覧を表示
+        recorded_folders.append(str(recorded_folder_path))
+        print(Padding(f'[green]現在指定されている録画フォルダ: {", ".join(recorded_folders)}', (0, 2, 0, 2)))
+
+    # ***** アップロードしたキャプチャ画像の保存先フォルダのパス *****
+
+    table_07 = CreateTable()
+    table_07.add_column('07. アップロードしたキャプチャ画像の保存先フォルダのパスを入力してください。')
+    table_07.add_row('クライアントの [キャプチャの保存先] 設定で [KonomiTV サーバーにアップロード] または')
+    table_07.add_row('[ブラウザでのダウンロードと、KonomiTV サーバーへのアップロードを両方行う] を選択したときに利用されます。')
+    if platform_type == 'Windows':
+        table_07.add_row('入力例: E:\\TV-Capture')
+    elif platform_type == 'Linux' or platform_type == 'Linux-Docker':
+        table_07.add_row('入力例: /mnt/hdd/TV-Capture')
+    table_07.add_row('複数のフォルダを指定するには、パスを1つずつ入力してください。')
+    table_07.add_row('入力を終了する場合は、何も入力せずに Enter キーを押してください。')
+    print(Padding(table_07, (1, 2, 1, 2)))
+
+    # キャプチャ画像の保存フォルダのリスト
+    capture_upload_folders: list[str] = []
+
+    # 録画フォルダを1つずつ入力
+    while True:
+        # 入力プロンプト (バリデーションに失敗し続ける限り何度でも表示される)
+        capture_upload_folder = CustomPrompt.ask('アップロードしたキャプチャ画像の保存先フォルダのパス')
+
+        # 何も入力されなかった場合は入力を終了
+        if capture_upload_folder == '':
+            # 1つも入力されていない場合は再度入力を促す
+            if len(capture_upload_folders) == 0:
+                print(Padding('[red]少なくとも1つのキャプチャ画像の保存先フォルダを指定してください。', (0, 2, 0, 2)))
+                continue
+            break
+
+        # 入力されたパスを Path オブジェクトに変換
+        capture_upload_folder_path = Path(capture_upload_folder)
+
+        # バリデーション
+        if capture_upload_folder_path.is_absolute() is False:
+            print(Padding('[red]キャプチャ画像の保存先フォルダは絶対パスで入力してください。', (0, 2, 0, 2)))
+            continue
+        if capture_upload_folder_path.exists() is False:
+            print(Padding('[red]指定されたキャプチャ画像の保存先フォルダが存在しません。', (0, 2, 0, 2)))
+            continue
+        if capture_upload_folder_path.is_dir() is False:
+            print(Padding('[red]指定されたパスはフォルダではありません。', (0, 2, 0, 2)))
+            continue
+
+        # 現在指定されているフォルダの一覧を表示
+        capture_upload_folders.append(str(capture_upload_folder_path))
+        print(Padding(f'[green]現在指定されているキャプチャ画像の保存先フォルダ: {", ".join(capture_upload_folders)}', (0, 2, 0, 2)))
 
     # ***** ソースコードのダウンロード *****
 
@@ -428,9 +528,11 @@ def Installer(version: str) -> None:
     if is_git_installed is True:
 
         # git clone でソースコードをダウンロード
+        ## latest の場合は master ブランチを、それ以外は指定されたバージョンのタグをチェックアウト
+        revision = 'master' if version == 'latest' else f'v{version}'
         result = RunSubprocess(
             'KonomiTV のソースコードを Git でダウンロードしています…',
-            ['git', 'clone', '-b', f'v{version}', 'https://github.com/tsukumijima/KonomiTV.git', install_path.name],
+            ['git', 'clone', '-b', revision, 'https://github.com/tsukumijima/KonomiTV.git', install_path.name],
             cwd = install_path.parent,
             error_message = 'KonomiTV のソースコードのダウンロード中に予期しないエラーが発生しました。',
             error_log_name = 'Git のエラーログ',
@@ -447,7 +549,11 @@ def Installer(version: str) -> None:
         progress = CreateDownloadInfiniteProgress()
 
         # GitHub からソースコードをダウンロード
-        source_code_response = requests.get(f'https://codeload.github.com/tsukumijima/KonomiTV/zip/refs/tags/v{version}')
+        ## latest の場合は master ブランチを、それ以外は指定されたバージョンのタグをダウンロード
+        if version == 'latest':
+            source_code_response = requests.get('https://codeload.github.com/tsukumijima/KonomiTV/zip/refs/heads/master')
+        else:
+            source_code_response = requests.get(f'https://codeload.github.com/tsukumijima/KonomiTV/zip/refs/tags/v{version}')
         task_id = progress.add_task('', total=None)
 
         # ダウンロードしたデータを随時一時ファイルに書き込む
@@ -462,7 +568,10 @@ def Installer(version: str) -> None:
 
         # ソースコードを解凍して展開
         shutil.unpack_archive(source_code_file.name, install_path.parent, format='zip')
-        shutil.move(install_path.parent / f'KonomiTV-{version}/', install_path)
+        if version == 'latest':
+            shutil.move(install_path.parent / 'KonomiTV-master/', install_path)
+        else:
+            shutil.move(install_path.parent / f'KonomiTV-{version}/', install_path)
         Path(source_code_file.name).unlink()
 
     # ***** リッスンポートの重複チェック *****
@@ -505,7 +614,7 @@ def Installer(version: str) -> None:
 
         # config.yaml から既定の設定値を取得
         config_dict: dict[str, dict[str, Any]]
-        with open(install_path / 'config.yaml', mode='r', encoding='utf-8') as file:
+        with open(install_path / 'config.yaml', encoding='utf-8') as file:
             config_dict = dict(ruamel.yaml.YAML().load(file))
 
         # サーバー設定データの一部を事前に取得しておいた値で置き換え
@@ -517,8 +626,8 @@ def Installer(version: str) -> None:
             config_dict['general']['mirakurun_url'] = mirakurun_url
         config_dict['general']['encoder'] = encoder
         config_dict['server']['port'] = server_port
-        config_dict['video']['recorded_folders'] = []  # TODO: 本来はインストーラーで設定できるべき
-        config_dict['capture']['upload_folders'] = [str(capture_upload_folder)]
+        config_dict['video']['recorded_folders'] = recorded_folders
+        config_dict['capture']['upload_folders'] = capture_upload_folders
 
         # サーバー設定データを保存
         SaveConfig(install_path / 'config.yaml', config_dict)
@@ -536,39 +645,53 @@ def Installer(version: str) -> None:
         progress = CreateDownloadProgress()
 
         # GitHub からサードパーティーライブラリをダウンロード
-        thirdparty_file = 'thirdparty-windows.7z'
+        if version == 'latest':
+            thirdparty_base_url = 'https://nightly.link/tsukumijima/KonomiTV/workflows/build_thirdparty.yaml/master/'
+        else:
+            thirdparty_base_url = f'https://github.com/tsukumijima/KonomiTV/releases/download/v{version}/'
+        thirdparty_compressed_file_name = 'thirdparty-windows.7z'
         if platform_type == 'Linux' and is_arm_device is False:
-            thirdparty_file = 'thirdparty-linux.tar.xz'
+            thirdparty_compressed_file_name = 'thirdparty-linux.tar.xz'
         elif platform_type == 'Linux' and is_arm_device is True:
-            thirdparty_file = 'thirdparty-linux-arm.tar.xz'
-        thirdparty_base_url = f'https://github.com/tsukumijima/KonomiTV/releases/download/v{version}/'
-        thirdparty_url = thirdparty_base_url + thirdparty_file
+            thirdparty_compressed_file_name = 'thirdparty-linux-arm.tar.xz'
+        thirdparty_url = thirdparty_base_url + thirdparty_compressed_file_name
+        if version == 'latest':
+            thirdparty_url = thirdparty_url + '.zip'
         thirdparty_response = requests.get(thirdparty_url, stream=True)
         task_id = progress.add_task('', total=float(thirdparty_response.headers['Content-length']))
 
         # ダウンロードしたデータを随時一時ファイルに書き込む
-        thirdparty_file = tempfile.NamedTemporaryFile(mode='wb', delete=False)
+        thirdparty_compressed_file = tempfile.NamedTemporaryFile(mode='wb', delete=False)
         with progress:
             for chunk in thirdparty_response.iter_content(chunk_size=1048576):  # サイズが大きいので1MBごとに読み込み
-                thirdparty_file.write(chunk)
+                thirdparty_compressed_file.write(chunk)
                 progress.update(task_id, advance=len(chunk))
-        thirdparty_file.close()  # 解凍する前に close() してすべて書き込ませておくのが重要
+        thirdparty_compressed_file.close()  # 解凍する前に close() してすべて書き込ませておくのが重要
 
         # サードパーティーライブラリを解凍して展開
         print(Padding('サードパーティーライブラリを展開しています… (数秒～数十秒かかります)', (1, 2, 0, 2)))
         progress = CreateBasicInfiniteProgress()
         progress.add_task('', total=None)
         with progress:
+
+            # latest のみ、圧縮ファイルがさらに zip で包まれているので、それを解凍
+            thirdparty_compressed_file_path = thirdparty_compressed_file.name
+            if version == 'latest':
+                with zipfile.ZipFile(thirdparty_compressed_file.name, mode='r') as zip_file:
+                    zip_file.extractall(install_path / 'server/')
+                thirdparty_compressed_file_path = install_path / 'server' / thirdparty_compressed_file_name
+                Path(thirdparty_compressed_file.name).unlink()
+
             if platform_type == 'Windows':
                 # Windows: 7-Zip 形式のアーカイブを解凍
-                with py7zr.SevenZipFile(thirdparty_file.name, mode='r') as seven_zip:
+                with py7zr.SevenZipFile(thirdparty_compressed_file_path, mode='r') as seven_zip:
                     seven_zip.extractall(install_path / 'server/')
             elif platform_type == 'Linux':
                 # Linux: tar.xz 形式のアーカイブを解凍
                 ## 7-Zip だと (おそらく) ファイルパーミッションを保持したまま圧縮することができない？ため、あえて tar.xz を使っている
-                with tarfile.open(thirdparty_file.name, mode='r:xz') as tar_xz:
+                with tarfile.open(thirdparty_compressed_file_path, mode='r:xz') as tar_xz:
                     tar_xz.extractall(install_path / 'server/')
-            Path(thirdparty_file.name).unlink()
+            Path(thirdparty_compressed_file_path).unlink()
             # server/thirdparty/.gitkeep が消えてたらもう一度作成しておく
             if Path(install_path / 'server/thirdparty/.gitkeep').exists() is False:
                 Path(install_path / 'server/thirdparty/.gitkeep').touch()
@@ -604,17 +727,6 @@ def Installer(version: str) -> None:
         if result is False:
             return  # 処理中断
 
-        # ***** データベースのアップグレード *****
-
-        result = RunSubprocess(
-            'データベースをアップグレードしています…',
-            [python_executable_path, '-m', 'poetry', 'run', 'aerich', 'upgrade'],
-            cwd = install_path / 'server/',  # カレントディレクトリを KonomiTV サーバーのベースディレクトリに設定
-            error_message = 'データベースのアップグレード中に予期しないエラーが発生しました。'
-        )
-        if result is False:
-            return  # 処理中断
-
     # Linux-Docker: docker-compose.yaml を生成し、Docker イメージをビルド
     elif platform_type == 'Linux-Docker':
 
@@ -629,7 +741,7 @@ def Installer(version: str) -> None:
             shutil.copyfile(install_path / 'docker-compose.example.yaml', install_path / 'docker-compose.yaml')
 
             # docker-compose.yaml の内容を読み込む
-            with open(install_path / 'docker-compose.yaml', mode='r', encoding='utf-8') as file:
+            with open(install_path / 'docker-compose.yaml', encoding='utf-8') as file:
                 text = file.read()
 
             # GPU が1個も搭載されていない特殊な環境の場合
@@ -658,6 +770,7 @@ def Installer(version: str) -> None:
                     '    #     reservations:\n'
                     '    #       devices:\n'
                     '    #         - driver: nvidia\n'
+                    '    #           count: all\n'
                     '    #           capabilities: [compute, utility, video]'
                 )
                 # 置換後の config.yaml の記述
@@ -667,6 +780,7 @@ def Installer(version: str) -> None:
                     '        reservations:\n'
                     '          devices:\n'
                     '            - driver: nvidia\n'
+                    '              count: all\n'
                     '              capabilities: [compute, utility, video]'
                 )
                 text = text.replace(old_text, new_text)
@@ -749,10 +863,12 @@ def Installer(version: str) -> None:
                     ])
                     ShowPanel([
                         'Intel Media Driver は以下のコマンドでインストールできます。',
+                        'Ubuntu 24.04 LTS:',
+                        '[cyan]curl -fsSL https://repositories.intel.com/gpu/intel-graphics.key | sudo gpg --yes --dearmor --output /usr/share/keyrings/intel-graphics-keyring.gpg && echo \'deb [arch=amd64 signed-by=/usr/share/keyrings/intel-graphics-keyring.gpg] https://repositories.intel.com/gpu/ubuntu noble unified\' | sudo tee /etc/apt/sources.list.d/intel-gpu-noble.list > /dev/null && sudo apt update && sudo apt install -y intel-media-va-driver-non-free intel-opencl-icd libigfxcmrt7 libmfx1 libmfxgen1 libva-drm2 libva-x11-2[/cyan]',
                         'Ubuntu 22.04 LTS:',
-                        '[cyan]curl -fsSL https://repositories.intel.com/gpu/intel-graphics.key | sudo gpg --dearmor --yes -o /usr/share/keyrings/intel-graphics-keyring.gpg && echo \'deb [arch=amd64 signed-by=/usr/share/keyrings/intel-graphics-keyring.gpg] https://repositories.intel.com/gpu/ubuntu jammy client\' | sudo tee /etc/apt/sources.list.d/intel-graphics.list > /dev/null && sudo apt update && sudo apt install -y intel-media-va-driver-non-free intel-opencl-icd libmfxgen1[/cyan]',
+                        '[cyan]curl -fsSL https://repositories.intel.com/gpu/intel-graphics.key | sudo gpg --yes --dearmor --output /usr/share/keyrings/intel-graphics-keyring.gpg && echo \'deb [arch=amd64 signed-by=/usr/share/keyrings/intel-graphics-keyring.gpg] https://repositories.intel.com/gpu/ubuntu jammy unified\' | sudo tee /etc/apt/sources.list.d/intel-gpu-jammy.list > /dev/null && sudo apt update && sudo apt install -y intel-media-va-driver-non-free intel-opencl-icd libigfxcmrt7 libmfx1 libmfxgen1 libva-drm2 libva-x11-2[/cyan]',
                         'Ubuntu 20.04 LTS:',
-                        '[cyan]curl -fsSL https://repositories.intel.com/graphics/intel-graphics.key | sudo gpg --dearmor --yes -o /usr/share/keyrings/intel-graphics-keyring.gpg && echo \'deb [arch=amd64 signed-by=/usr/share/keyrings/intel-graphics-keyring.gpg] https://repositories.intel.com/gpu/ubuntu focal client\' | sudo tee /etc/apt/sources.list.d/intel-graphics.list > /dev/null && sudo apt update && sudo apt install -y intel-media-va-driver-non-free intel-opencl-icd libmfxgen1[/cyan]',
+                        '[cyan]curl -fsSL https://repositories.intel.com/gpu/intel-graphics.key | sudo gpg --yes --dearmor --output /usr/share/keyrings/intel-graphics-keyring.gpg && echo \'deb [arch=amd64 signed-by=/usr/share/keyrings/intel-graphics-keyring.gpg] https://repositories.intel.com/gpu/ubuntu focal client\' | sudo tee /etc/apt/sources.list.d/intel-graphics.list > /dev/null && sudo apt update && sudo apt install -y intel-media-va-driver-non-free intel-opencl-icd libigfxcmrt7 libmfx1 libmfxgen1 libva-drm2 libva-x11-2[/cyan]',
                     ], padding=(0, 2, 0, 2))
                     ShowPanel([
                         'QSVEncC (--check-hw) のログ:\n' + result1.stdout.strip(),
@@ -844,14 +960,14 @@ def Installer(version: str) -> None:
                 ])
                 ShowPanel([
                     'AMDGPU-PRO Driver のインストーラーは以下のコマンドでダウンロードできます。',
-                    'Ubuntu 20.04 LTS: [cyan]curl -LO https://repo.radeon.com/amdgpu-install/23.40.3/ubuntu/focal/amdgpu-install_6.0.60003-1_all.deb[/cyan]',
-                    'Ubuntu 22.04 LTS: [cyan]curl -LO https://repo.radeon.com/amdgpu-install/23.40.3/ubuntu/jammy/amdgpu-install_6.0.60003-1_all.deb[/cyan]',
+                    'Ubuntu 24.04 LTS: [cyan]curl -LO https://repo.radeon.com/amdgpu-install/6.4.4/ubuntu/noble/amdgpu-install_6.4.60404-1_all.deb[/cyan]',
+                    'Ubuntu 22.04 LTS: [cyan]curl -LO https://repo.radeon.com/amdgpu-install/6.4.4/ubuntu/jammy/amdgpu-install_6.4.60404-1_all.deb[/cyan]',
                 ], padding=(0, 2, 0, 2))
                 ShowPanel([
                     'AMDGPU-PRO Driver は以下のコマンドでインストール/アップデートできます。',
                     '事前に AMDGPU-PRO Driver のインストーラーをダウンロードしてから実行してください。',
                     'インストール/アップデート完了後は、システムの再起動が必要です。',
-                    '[cyan]sudo apt install -y ./amdgpu-install_6.0.60003-1_all.deb && sudo apt update && sudo amdgpu-install -y --accept-eula --usecase=graphics,amf,opencl --opencl=rocr,legacy --no-32[/cyan]',
+                    '[cyan]sudo apt install -y ./amdgpu-install_6.4.60404-1_all.deb && sudo apt update && sudo amdgpu-install -y --accept-eula --usecase=graphics,amf,opencl --opencl=rocr --vulkan=amdvlk --no-32[/cyan]',
                 ], padding=(0, 2, 0, 2))
                 ShowPanel([
                     'VCEEncC のログ:\n' + result.stdout.strip(),
@@ -882,7 +998,7 @@ def Installer(version: str) -> None:
                 ShowPanel([
                     'RK3588/RK3588S 向けの Mali GPU Driver は、以下のコマンドでインストールできます。',
                     'インストール完了後は、システムの再起動が必要です。',
-                    '[cyan]curl -LO https://github.com/tsukumijima/libmali-rockchip/releases/download/v1.9-1-55611b0/libmali-valhall-g610-g13p0-wayland-gbm_1.9-1_arm64.deb && sudo apt install -y ./libmali-valhall-g610-g13p0-wayland-gbm_1.9-1_arm64.deb && rm libmali-valhall-g610-g13p0-wayland-gbm_1.9-1_arm64.deb && curl -LO https://github.com/tsukumijima/rockchip-multimedia-config/releases/download/v1.0.2-1/rockchip-multimedia-config_1.0.2-1_all.deb && sudo apt install -y ./rockchip-multimedia-config_1.0.2-1_all.deb && rm rockchip-multimedia-config_1.0.2-1_all.deb[/cyan]',
+                    '[cyan]curl -LO https://github.com/tsukumijima/libmali-rockchip/releases/download/v1.9-1-3238416/libmali-valhall-g610-g13p0-wayland-gbm_1.9-1_arm64.deb && sudo apt install -y ./libmali-valhall-g610-g13p0-wayland-gbm_1.9-1_arm64.deb && rm libmali-valhall-g610-g13p0-wayland-gbm_1.9-1_arm64.deb && curl -LO https://github.com/tsukumijima/rockchip-multimedia-config/releases/download/v1.0.2-1/rockchip-multimedia-config_1.0.2-1_all.deb && sudo apt install -y ./rockchip-multimedia-config_1.0.2-1_all.deb && rm rockchip-multimedia-config_1.0.2-1_all.deb[/cyan]',
                 ], padding=(0, 2, 0, 2))
                 ShowPanel([
                     'rkmppenc のログ:\n' + result.stdout.strip(),
@@ -919,6 +1035,10 @@ def Installer(version: str) -> None:
 
     if platform_type == 'Windows':
 
+        # Windows サービス管理スクリプトは Poetry 経由ではなく、仮想環境の Python 実行ファイルを直接実行する
+        ## Poetry 経由だと Windows で shell 解釈の影響を受け、パスワード中の記号が崩れる可能性がある
+        venv_python_executable_path = install_path / 'server/.venv/Scripts/python.exe'
+
         # 現在ログオン中のユーザー名を取得
         ## PowerShell の [Environment]::UserName を使う
         current_user_name_default = subprocess.run(
@@ -928,33 +1048,33 @@ def Installer(version: str) -> None:
             text = True,  # 出力をテキストとして取得する
         ).stdout.strip()
 
-        table_07 = CreateTable()
-        table_07.add_column(f'07. KonomiTV の Windows サービスの実行ユーザー名を入力してください。')
-        table_07.add_row('KonomiTV の Windows サービスを一般ユーザーの権限で起動するために利用します。')
-        table_07.add_row('ほかのユーザー権限で実行したい場合は、そのユーザー名を入力してください。')
-        table_07.add_row(f'Enter キーを押すと、現在ログオン中のユーザー ({current_user_name_default}) が利用されます。')
-        print(Padding(table_07, (0, 2, 0, 2)))
+        table_08 = CreateTable()
+        table_08.add_column('08. KonomiTV の Windows サービスの実行ユーザー名を入力してください。')
+        table_08.add_row('KonomiTV の Windows サービスを一般ユーザーの権限で起動するために利用します。')
+        table_08.add_row('ほかのユーザー権限で実行したい場合は、そのユーザー名を入力してください。')
+        table_08.add_row(f'Enter キーを押すと、現在ログオン中のユーザー ({current_user_name_default}) が利用されます。')
+        print(Padding(table_08, (0, 2, 0, 2)))
 
         # ユーザー名を入力
-        current_user_name: str = CustomPrompt.ask(f'KonomiTV の Windows サービスの実行ユーザー名', default=current_user_name_default)
+        current_user_name: str = CustomPrompt.ask('KonomiTV の Windows サービスの実行ユーザー名', default=current_user_name_default)
 
-        table_08 = CreateTable()
-        table_08.add_column(f'08. ユーザー ({current_user_name}) のパスワードを入力してください。')
-        table_08.add_row('KonomiTV の Windows サービスを一般ユーザーの権限で起動するために利用します。')
-        table_08.add_row('入力されたパスワードがそれ以外の用途に利用されることはありません。')
-        table_08.add_row('間違ったパスワードを入力すると、KonomiTV が起動できなくなります。')
-        table_08.add_row('Enter キーを押す前に、正しいパスワードかどうか今一度確認してください。')
-        table_08.add_row('なお、PIN などのほかの認証方法には対応していません。')
-        table_08.add_row(CreateRule())
-        table_08.add_row('ログオン中のユーザーにパスワードを設定していない場合は、簡単なものでいいので')
-        table_08.add_row('何かパスワードを設定してから、その設定したパスワードを入力してください。')
-        table_08.add_row('なお、パスワードの設定後にインストーラーを起動し直す必要はありません。')
-        table_08.add_row(CreateRule())
-        table_08.add_row('ごく稀に、正しいパスワードを指定したのにログオンできない場合があります。')
-        table_08.add_row('その場合は、一度インストーラーを Ctrl+C で中断し、インストーラーの')
-        table_08.add_row('実行ファイルを Shift + 右クリック → [別のユーザーとして実行] から、')
-        table_08.add_row('ログオン中のユーザーとパスワードを指定して再度実行してみてください。')
-        print(Padding(table_08, (1, 2, 1, 2)))
+        table_09 = CreateTable()
+        table_09.add_column(f'09. ユーザー ({current_user_name}) のパスワードを入力してください。')
+        table_09.add_row('KonomiTV の Windows サービスを一般ユーザーの権限で起動するために利用します。')
+        table_09.add_row('入力されたパスワードがそれ以外の用途に利用されることはありません。')
+        table_09.add_row('間違ったパスワードを入力すると、KonomiTV が起動できなくなります。')
+        table_09.add_row('Enter キーを押す前に、正しいパスワードかどうか今一度確認してください。')
+        table_09.add_row('なお、PIN などのほかの認証方法には対応していません。')
+        table_09.add_row(CreateRule())
+        table_09.add_row('ログオン中のユーザーにパスワードを設定していない場合は、簡単なものでいいので')
+        table_09.add_row('何かパスワードを設定してから、その設定したパスワードを入力してください。')
+        table_09.add_row('なお、パスワードの設定後にインストーラーを起動し直す必要はありません。')
+        table_09.add_row(CreateRule())
+        table_09.add_row('ごく稀に、正しいパスワードを指定したのにログオンできない場合があります。')
+        table_09.add_row('その場合は、一度インストーラーを Ctrl+C で中断し、インストーラーの')
+        table_09.add_row('実行ファイルを Shift + 右クリック → [別のユーザーとして実行] から、')
+        table_09.add_row('ログオン中のユーザーとパスワードを指定して再度実行してみてください。')
+        print(Padding(table_09, (1, 2, 1, 2)))
 
         # ユーザーのパスワードを取得
         while True:
@@ -975,7 +1095,7 @@ def Installer(version: str) -> None:
             with progress:
                 service_install_result = subprocess.run(
                     args = [
-                        python_executable_path, '-m', 'poetry', 'run', 'python', 'KonomiTV-Service.py', 'install',
+                        venv_python_executable_path, 'KonomiTV-Service.py', 'install',
                         '--username', current_user_name, '--password', current_user_password,
                     ],
                     cwd = install_path / 'server/',  # カレントディレクトリを KonomiTV サーバーのベースディレクトリに設定
@@ -998,7 +1118,7 @@ def Installer(version: str) -> None:
             progress.add_task('', total=None)
             with progress:
                 service_start_result = subprocess.run(
-                    args = [python_executable_path, '-m', 'poetry', 'run', 'python', 'KonomiTV-Service.py', 'start'],
+                    args = [venv_python_executable_path, 'KonomiTV-Service.py', 'start'],
                     cwd = install_path / 'server/',  # カレントディレクトリを KonomiTV サーバーのベースディレクトリに設定
                     stdout = subprocess.PIPE,  # 標準出力をキャプチャする
                     stderr = subprocess.DEVNULL,  # 標準エラー出力を表示しない

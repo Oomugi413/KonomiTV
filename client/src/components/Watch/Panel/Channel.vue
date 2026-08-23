@@ -17,14 +17,19 @@
             <Swiper class="channels-list" :space-between="32" :auto-height="true" :touch-start-prevent-default="false"
                 :observer="true" :observe-parents="true"
                 @swiper="swiper_instance = $event"
-                @slide-change="active_tab_index = $event.activeIndex">
+                @slide-change="active_tab_index = $event.activeIndex"
+                @slide-change-transition-end="onSlideChangeTransitionEnd">
                 <SwiperSlide v-for="[channels_type, channels] in Array.from(channelsStore.channels_list_with_pinned_for_watch)" :key="channels_type">
                     <div class="channels">
                         <router-link v-ripple class="channel" draggable="false"
                             v-for="channel in channels" :key="channel.id" :to="`/tv/watch/${channel.display_channel_id}`">
                             <!-- 以下では Icon コンポーネントを使うとチャンネルが多いときに高負荷になるため、意図的に SVG を直書きしている -->
                             <div class="channel__broadcaster">
-                                <img class="channel__broadcaster-icon" :src="`${Utils.api_base_url}/channels/${channel.id}/logo`">
+                                <div class="channel__broadcaster-icon">
+                                    <div class="ch-sprite" :chid="channel.id">
+                                        <img loading="lazy" :src="`${Utils.api_base_url}/channels/${channel.id}/logo`">
+                                    </div>
+                                </div>
                                 <div class="channel__broadcaster-content">
                                     <span class="channel__broadcaster-name">Ch: {{channel.channel_number}} {{channel.name}}</span>
                                     <div class="channel__broadcaster-force"
@@ -96,13 +101,30 @@ export default defineComponent({
 
             // Swiper のインスタンス
             swiper_instance: null as SwiperClass | null,
+
+            // 各タブのスクロール位置を保存するオブジェクト
+            tab_scroll_positions: {} as Record<number, number>,
+
+            // Swiper のアニメーション中かどうか
+            is_swiper_transitioning: false,
         };
     },
     computed: {
         ...mapStores(useChannelsStore, usePlayerStore),
     },
     watch: {
-        active_tab_index() {
+        active_tab_index(newIndex: number, oldIndex: number) {
+            // Swiper アニメーション開始
+            this.is_swiper_transitioning = true;
+
+            // 前のタブのスクロール位置を保存
+            if (oldIndex !== undefined) {
+                const container = document.querySelector<HTMLDivElement>('.channels-list-container');
+                if (container) {
+                    this.tab_scroll_positions[oldIndex] = container.scrollTop;
+                }
+            }
+
             // content-visibility: auto の指定の関係でうまく計算されないことがある Swiper の autoHeight を強制的に再計算する
             this.swiper_instance?.updateAutoHeight();
             // 現在なアクティブなタブを Swiper 側に随時反映する
@@ -126,8 +148,14 @@ export default defineComponent({
         this.swiper_instance?.updateAutoHeight();
 
         // .channels-list-container がスクロールされたときに Swiper の autoHeight を再計算する
-        document.querySelector<HTMLDivElement>('.channels-list-container')?.addEventListener('scroll', () => {
+        const container = document.querySelector<HTMLDivElement>('.channels-list-container');
+        container?.addEventListener('scroll', () => {
             this.swiper_instance?.updateAutoHeight();
+            // 現在のタブのスクロール位置を常に保存しておく
+            // ただし、Swiper のアニメーション中は更新しない（意図しない位置更新を防ぐため）
+            if (!this.is_swiper_transitioning) {
+                this.tab_scroll_positions[this.active_tab_index] = container.scrollTop;
+            }
         }, { passive: true });
 
         // 既定のパネルのアクティブなタブがチャンネルタブ (つまりもうこのタブが表示されている) 場合は、さらに 0.1 秒間隔で 2 秒間繰り返す
@@ -138,6 +166,16 @@ export default defineComponent({
                 this.swiper_instance?.updateAutoHeight();
             }
         }
+    },
+    methods: {
+        // Swiper のスライド切り替えアニメーション完了後に新しいタブのスクロール位置を復元
+        onSlideChangeTransitionEnd() {
+            const container = document.querySelector<HTMLDivElement>('.channels-list-container');
+            if (container) {
+                container.scrollTop = this.tab_scroll_positions[this.active_tab_index] || 0;
+            }
+            this.is_swiper_transitioning = false;
+        },
     },
 });
 
@@ -341,21 +379,24 @@ export default defineComponent({
 
                     .channel__broadcaster {
                         display: flex;
-                        height: 28px;
+                        --ch-sprite-height: 28;
+                        height: calc(var(--ch-sprite-height) * 1px);
                         @include smartphone-horizontal {
-                            height: 24px;
+                            --ch-sprite-height: 24;
                         }
 
                         &-icon {
                             display: inline-block;
                             flex-shrink: 0;
-                            width: 48px;
-                            height: 100%;
-                            border-radius: 4px;
+                            --ch-sprite-width: 48;
+                            --ch-sprite-border-radius: 4;
+                            width: calc(var(--ch-sprite-width) * 1px);
+                            height: calc(var(--ch-sprite-height) * 1px);
+                            border-radius: calc(var(--ch-sprite-border-radius) * 1px);
                             background: linear-gradient(150deg, rgb(var(--v-theme-gray)), rgb(var(--v-theme-background-lighten-2)));
                             object-fit: cover;
                             @include smartphone-horizontal {
-                                width: 46px;
+                                --ch-sprite-width: 46;
                             }
                         }
 
@@ -420,14 +461,18 @@ export default defineComponent({
                             -webkit-line-clamp: 2;  // 2行までに制限
                             -webkit-box-orient: vertical;
                             @include smartphone-horizontal {
+                                display: block;
                                 margin-top: 5px;
                                 font-size: 12.5px;
-                                -webkit-line-clamp: 1;  // 1行までに制限
+                                white-space: nowrap;
+                                text-overflow: ellipsis;
                             }
                             @include smartphone-vertical {
+                                display: block;
                                 margin-top: 5px;
                                 font-size: 12.5px;
-                                -webkit-line-clamp: 1;  // 1行までに制限
+                                white-space: nowrap;
+                                text-overflow: ellipsis;
                             }
                         }
 

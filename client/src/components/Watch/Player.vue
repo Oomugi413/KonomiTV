@@ -3,9 +3,14 @@
         'watch-player--loading': playerStore.is_loading,
         'watch-player--virtual-keyboard-display': playerStore.is_virtual_keyboard_display && Utils.hasActiveElementClass('dplayer-comment-input'),
         'watch-player--video': playback_mode === 'Video',
+        'watch-player--pure-black': settingsStore.settings.use_pure_black_player_background,
+        'watch-player--data-broadcasting': playerStore.is_data_broadcasting_display,
     }">
         <div class="watch-player__background-wrapper">
-            <div class="watch-player__background" :class="{'watch-player__background--display': playerStore.is_background_display}"
+            <div class="watch-player__background" :class="{
+                'watch-player__background--display': playerStore.is_background_display,
+                'watch-player__background--background-hide': settingsStore.settings.show_player_background_image === false,
+            }"
                 :style="{backgroundImage: `url(${playerStore.background_url})`}">
                 <img class="watch-player__background-logo" src="/assets/images/logo.svg">
             </div>
@@ -14,67 +19,107 @@
             :class="{'watch-player__buffering--display': playerStore.is_video_buffering}">
         </v-progress-circular>
         <div class="watch-player__dplayer"></div>
+        <div class="watch-player__dplayer-setting-cover"
+            :class="{'watch-player__dplayer-setting-cover--display': playerStore.is_player_setting_panel_open}"
+            @click="handleSettingCoverClick"></div>
         <div class="watch-player__button"
                 @mousemove="playerStore.event_emitter.emit('SetControlDisplayTimer', {event: $event})"
                 @touchmove="playerStore.event_emitter.emit('SetControlDisplayTimer', {event: $event})"
                 @click="playerStore.event_emitter.emit('SetControlDisplayTimer', {event: $event})">
-            <div v-ripple class="switch-button switch-button-up" v-ftooltip.top="'前のチャンネル'" v-if="playback_mode === 'Live'"
-                @click="playerStore.is_zapping = true; $router.push({path: `/tv/watch/${channelsStore.channel.previous.display_channel_id}`})">
+            <div v-ripple class="switch-button switch-button-up"
+                v-ftooltip.top="settingsStore.settings.tv_channel_up_down_buttons_reverse ? '次のチャンネル' : '前のチャンネル'" v-if="playback_mode === 'Live'"
+                @click="playerStore.is_zapping = true; $router.push({path: `/tv/watch/${settingsStore.settings.tv_channel_up_down_buttons_reverse ? channelsStore.channel.next.display_channel_id : channelsStore.channel.previous.display_channel_id}`})">
                 <Icon class="switch-button-icon" icon="fluent:ios-arrow-left-24-filled" width="32px" style="transform: rotate(90deg)" />
             </div>
             <div v-ripple class="switch-button switch-button-panel"
-                :class="{'switch-button-panel--open': playerStore.is_panel_display}"
-                @click="playerStore.is_panel_display = !playerStore.is_panel_display">
+                :class="{'switch-button-panel--open': playerStore.is_data_broadcasting_display ?
+                    playerStore.is_data_broadcasting_panel_display : playerStore.is_panel_display}"
+                @click="togglePanel">
                 <Icon class="switch-button-icon" icon="fluent:navigation-16-filled" width="32px" />
             </div>
-            <div v-ripple class="switch-button switch-button-down" v-ftooltip.bottom="'次のチャンネル'" v-if="playback_mode === 'Live'"
-                    @click="playerStore.is_zapping = true; $router.push({path: `/tv/watch/${channelsStore.channel.next.display_channel_id}`})">
+            <div v-ripple class="switch-button switch-button-down"
+                    v-ftooltip.bottom="settingsStore.settings.tv_channel_up_down_buttons_reverse ? '前のチャンネル' : '次のチャンネル'" v-if="playback_mode === 'Live'"
+                    @click="playerStore.is_zapping = true; $router.push({path: `/tv/watch/${settingsStore.settings.tv_channel_up_down_buttons_reverse ? channelsStore.channel.previous.display_channel_id : channelsStore.channel.next.display_channel_id}`})">
                 <Icon class="switch-button-icon" icon="fluent:ios-arrow-right-24-filled" width="33px" style="transform: rotate(90deg)" />
             </div>
         </div>
     </div>
 </template>
-<script lang="ts">
+<script setup lang="ts">
 
-import { mapStores } from 'pinia';
-import { defineComponent, PropType } from 'vue';
+import { PropType } from 'vue';
 
 import useChannelsStore from '@/stores/ChannelsStore';
 import usePlayerStore from '@/stores/PlayerStore';
+import useSettingsStore from '@/stores/SettingsStore';
 import Utils from '@/utils';
 
-export default defineComponent({
-    name: 'Watch-Player',
-    props: {
-        playback_mode: {
-            type: String as PropType<'Live' | 'Video'>,
-            required: true,
-        },
+// Props の定義
+defineProps({
+    playback_mode: {
+        type: String as PropType<'Live' | 'Video'>,
+        required: true,
     },
-    data() {
-        return {
-            // ユーティリティをテンプレートで使えるように
-            Utils: Object.freeze(Utils),
-        };
-    },
-    computed: {
-        ...mapStores(useChannelsStore, usePlayerStore),
-    }
 });
+
+// Store の初期化
+const channelsStore = useChannelsStore();
+const playerStore = usePlayerStore();
+const settingsStore = useSettingsStore();
+
+const togglePanel = () => {
+    // データ放送中は通常のパネル設定を変更せず、今回のアプリケーション表示中だけ開閉状態を切り替える
+    if (playerStore.is_data_broadcasting_display) {
+        playerStore.is_data_broadcasting_panel_display = !playerStore.is_data_broadcasting_panel_display;
+        return;
+    }
+    playerStore.is_panel_display = !playerStore.is_panel_display;
+};
+
+// watch-player__dplayer-setting-cover がクリックされたとき、設定パネルを閉じる
+const handleSettingCoverClick = () => {
+    const dplayer_mask = document.querySelector<HTMLDivElement>('.dplayer-mask');
+    if (dplayer_mask) {
+        // dplayer-mask をクリックすることで、player.setting.hide() が内部的に呼び出され、設定パネルが閉じられる
+        dplayer_mask.click();
+    }
+};
 
 </script>
 <style lang="scss">
 
 // DPlayer のデフォルトスタイルを上書き
 .watch-player__dplayer {
-    svg circle, svg path {
+    @include smartphone-vertical {
+        overflow: visible !important;
+    }
+    svg:not(.dplayer-aribb62-subtitle *) circle,
+    svg:not(.dplayer-aribb62-subtitle *) path {
         fill: rgb(var(--v-theme-text)) !important;
     }
     .dplayer-video-wrap {
         background: transparent !important;
+
+        // ARIB HTML5 の iframe / receiver 背景 / external video plane が共有する描画領域を、
+        // 右パネルの開閉やウインドウ比率にかかわらず親要素内へ 16:9 で contain する。
+        &:has(> .dplayer-video-wrap-aspect > .dplayer-tlv-data-broadcast) {
+            container-type: size;
+
+            .dplayer-video-wrap-aspect {
+                width: min(100cqw, calc(100cqh * 16 / 9));
+                height: min(100cqh, calc(100cqw * 9 / 16));
+            }
+        }
+
         .dplayer-video-wrap-aspect {
             transition: opacity 0.2s cubic-bezier(0.4, 0.38, 0.49, 0.94);
             opacity: 1;
+        }
+        // ARIB STD-B62 字幕・文字スーパーは、receiver 背景 (z=0)・外部映像面 (z=1)・
+        // application canvas / HDR → SDR 変換 canvas (z=2) のすべてより手前に表示する。
+        // DPlayer が実行時に生成する要素の DOM 順序には依存せず、放送映像の合成順を明示する。
+        .dplayer-tlv-media-plane > .dplayer-aribb62-subtitle {
+            z-index: 3;
         }
         .dplayer-danmaku {
             max-width: 100%;
@@ -104,6 +149,10 @@ export default defineComponent({
             // ローディング表示は自前でやるため不要
             display: none !important;
         }
+    }
+    // データ放送の外部 video plane より DPlayer 自身の情報パネルを常に手前に表示する
+    .dplayer-info-panel {
+        z-index: 3;
     }
     .dplayer-controller-mask {
         height: 82px !important;
@@ -146,6 +195,15 @@ export default defineComponent({
             bottom: 54px !important;
             width: calc(100% - 68px - (18px * 2));
             box-sizing: border-box;
+            @include tablet-vertical {
+                width: calc(100% - (18px * 2));
+            }
+            @include smartphone-horizontal {
+                width: calc(100% - (18px * 2));
+            }
+            @include smartphone-vertical {
+                width: calc(100% - (18px * 2));
+            }
         }
         .dplayer-icons {
             bottom: auto !important;
@@ -309,26 +367,18 @@ export default defineComponent({
     }
     .dplayer-setting-box {
         z-index: 10 !important;
+        &.dplayer-setting-box-audio {
+            clip-path: inset(calc(100% - var(--tlv-audio-panel-height, 114px)) 0 0 round 7px) !important;
+        }
         @include tablet-vertical {
             height: calc(100% - 60px) !important;
         }
-        @include smartphone-vertical {
-            height: calc(100% - 60px) !important;
-        }
         .dplayer-setting-origin-panel {
+            .dplayer-setting-item.dplayer-setting-lshaped-screen-crop,
             .dplayer-setting-item.dplayer-setting-keyboard-shortcut {
                 // Document Picture-in-Picture ウインドウでは非表示
                 @media all and (display-mode: picture-in-picture) {
                     display: none;
-                }
-            }
-        }
-        .dplayer-setting-audio-panel {
-            // 副音声がない番組で副音声を選択できないように
-            .dplayer-setting-audio-item.dplayer-setting-audio-item--disabled {
-                pointer-events: none;  // クリックイベントを無効化
-                .dplayer-label {
-                    color: #AAAAAA;  // グレーアウト
                 }
             }
         }
@@ -353,6 +403,29 @@ export default defineComponent({
         .dplayer-controller {
             padding-left: calc(68px + 30px) !important;
             padding-right: calc(0px + 30px) !important;
+            .dplayer-bar-wrap {
+                bottom: 51px !important;
+                width: calc(100% - 68px - (30px * 2));
+                @include tablet-vertical {
+                    width: calc(100% - (18px * 2));
+                }
+                @include smartphone-horizontal {
+                    width: calc(100% - (18px * 2));
+                }
+                @include smartphone-vertical {
+                    // スマホ縦画面のみ、シークバーをプレイヤーの下辺に配置
+                    width: 100%;
+                    left: 0px !important;
+                    bottom: -6px !important;
+                    z-index: 100;
+                }
+                .dplayer-thumb {
+                    // タッチデバイスのみ、コントロール表示時は常にシークバーのつまみを表示する
+                    @media (hover: none) {
+                        transform: scale(1) !important;
+                    }
+                }
+            }
             @include tablet-vertical {
                 padding-left: calc(0px + 18px) !important;
                 padding-right: calc(0px + 18px) !important;
@@ -364,19 +437,6 @@ export default defineComponent({
             @include smartphone-vertical {
                 padding-left: calc(0px + 18px) !important;
                 padding-right: calc(0px + 18px) !important;
-            }
-            .dplayer-bar-wrap {
-                bottom: 51px !important;
-                width: calc(100% - 68px - (30px * 2));
-                @include tablet-vertical {
-                    width: calc(100% - (18px * 2));
-                }
-                @include smartphone-horizontal {
-                    width: calc(100% - (18px * 2));
-                }
-                @include smartphone-vertical {
-                    width: calc(100% - (18px * 2));
-                }
             }
         }
         &.dplayer-hide-controller .dplayer-controller {
@@ -444,6 +504,12 @@ _::-webkit-full-page-media, _:future, :root .dplayer-icon:hover .dplayer-icon-co
     opacity: 0.8 !important;
 }
 
+// Safari では上の hover 補正が DPlayer の字幕オフ表示より強く効き、オフ状態でも字幕アイコンが明るく見えてしまう
+// DPlayer は字幕オフ時にボタンの aria-label も切り替えるため、style 属性の文字列表現には依存しない
+_::-webkit-full-page-media, _:future, :root .dplayer-subtitle-icon[aria-label='字幕を表示する']:hover .dplayer-icon-content {
+    opacity: 0.4 !important;
+}
+
 </style>
 <style lang="scss" scoped>
 
@@ -454,6 +520,9 @@ _::-webkit-full-page-media, _:future, :root .dplayer-icon:hover .dplayer-icon-co
     height: 100%;
     background-size: contain;
     background-position: center;
+    &.watch-player--pure-black {
+        background-color: #000000;
+    }
     @include tablet-vertical {
         aspect-ratio: 16 / 9;
     }
@@ -471,12 +540,36 @@ _::-webkit-full-page-media, _:future, :root .dplayer-icon:hover .dplayer-icon-co
         }
     }
 
+    .watch-player__dplayer-setting-cover {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background-color: rgba(0, 0, 0, 0.5);
+        opacity: 0;
+        visibility: hidden;
+        transition: opacity 0.3s, visibility 0.3s;
+        z-index: 50;
+
+        &--display {
+            // タッチデバイスかつスマホ縦画面のみ、設定パネルを開いた時にカバーを表示する
+            @media (hover: none) {
+                @include smartphone-vertical {
+                    opacity: 1;
+                    visibility: visible;
+                }
+            }
+        }
+    }
+
     .watch-player__background-wrapper {
         position: absolute;
         top: 0;
         left: 0;
         width: 100%;
         height: 100%;
+        pointer-events: none;
 
         .watch-player__background {
             position: relative;
@@ -497,6 +590,10 @@ _::-webkit-full-page-media, _:future, :root .dplayer-icon:hover .dplayer-icon-co
             &--display {
                 opacity: 1;
                 visibility: visible;
+            }
+            &--background-hide {
+                background-image: none !important;
+                background-color: #101010;
             }
 
             .watch-player__background-logo {
@@ -548,6 +645,26 @@ _::-webkit-full-page-media, _:future, :root .dplayer-icon:hover .dplayer-icon-co
 
     .watch-player__dplayer {
         width: 100%;
+    }
+
+    // データ放送中は、BML / video / 字幕の内部レイヤー構成を崩さず、
+    // DPlayer 全体を外側の切局・パネルボタンより手前に置く。
+    // 右パネルのリモコンは z-index: 20 のため、引き続き最前面に残る。
+    &.watch-player--data-broadcasting .watch-player__dplayer {
+        position: relative;
+        z-index: 1;
+    }
+
+    // データ放送 iframe はリモコンキー入力専用で pointer-events: none のため、切局・パネル操作を含む
+    // プレイヤー側の操作ボタンは application canvas より前に置く。
+    &.watch-player--data-broadcasting .watch-player__button {
+        z-index: 2;
+    }
+
+    // TLV の調谐中は application canvas が先に生成されるため、通常の GR / BS / CS と同じ
+    // ローディング背景を一時的にその手前へ表示する。再生準備完了後は従来の背面へ戻る。
+    &.watch-player--loading.watch-player--data-broadcasting .watch-player__background-wrapper {
+        z-index: 2;
     }
 
     .watch-player__button {

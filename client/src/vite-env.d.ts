@@ -127,6 +127,12 @@ declare global {
         reload(forceReload?: boolean): void;
     }
 
+    // ManagedMediaSource API
+    // ref: https://github.com/w3c/media-source/issues/320
+    interface Window {
+        ManagedMediaSource?: typeof MediaSource;
+    }
+
     // View Transitions API
     // ref: https://developer.mozilla.org/ja/docs/Web/API/View_Transitions_API
     interface Document {
@@ -136,6 +142,34 @@ declare global {
             ready: Promise<void>;
             skipTransition: () => void;
         }
+    }
+
+    // User-Agent Client Hints API
+    // ref: https://wicg.github.io/ua-client-hints/
+    interface Navigator {
+        readonly userAgentData?: NavigatorUAData;
+    }
+    interface NavigatorUAData {
+        readonly brands: NavigatorUABrandVersion[];
+        readonly mobile: boolean;
+        readonly platform: string;
+        getHighEntropyValues(hints: string[]): Promise<NavigatorUAHighEntropyValues>;
+    }
+    interface NavigatorUABrandVersion {
+        brand: string;
+        version: string;
+    }
+    interface NavigatorUAHighEntropyValues {
+        architecture?: string;
+        bitness?: string;
+        brands?: NavigatorUABrandVersion[];
+        fullVersionList?: NavigatorUABrandVersion[];
+        mobile?: boolean;
+        model?: string;
+        platform?: string;
+        platformVersion?: string;
+        uaFullVersion?: string;
+        wow64?: boolean;
     }
 
     // Virtual Keyboard API
@@ -243,5 +277,46 @@ declare global {
     }
     interface DocumentPictureInPictureEventInit {
         window: Window;
+    }
+}
+
+declare global {
+    interface BackgroundFetchOptions {
+        title: string;
+        icons?: ImageResource[];
+        downloadTotal?: number;
+    }
+
+    interface BackgroundFetchRegistration {
+        readonly id: string;
+        readonly downloaded: number;
+        readonly downloadTotal: number;
+        readonly result: '' | 'success' | 'failure';
+        readonly failureReason: '' | 'aborted' | 'bad-status' | 'fetch-error' | 'quota-exceeded' | 'download-total-exceeded';
+        abort(): Promise<boolean>;
+        matchAll(): Promise<BackgroundFetchRecord[]>;
+    }
+
+    interface BackgroundFetchRecord {
+        readonly request: Request;
+        readonly responseReady: Promise<Response>;
+    }
+
+    interface BackgroundFetchManager {
+        fetch(id: string, requests: RequestInfo[], options: BackgroundFetchOptions): Promise<BackgroundFetchRegistration>;
+        get(id: string): Promise<BackgroundFetchRegistration | undefined>;
+    }
+
+    interface ServiceWorkerRegistration {
+        readonly backgroundFetch?: BackgroundFetchManager;
+    }
+
+    interface BackgroundFetchEvent extends ExtendableEvent {
+        readonly registration: BackgroundFetchRegistration;
+    }
+    interface ServiceWorkerGlobalScopeEventMap {
+        backgroundfetchsuccess: BackgroundFetchEvent;
+        backgroundfetchfail: BackgroundFetchEvent;
+        backgroundfetchabort: BackgroundFetchEvent;
     }
 }

@@ -1,30 +1,41 @@
 
 import asyncio
+import hashlib
 import pathlib
+import secrets
 import uuid
-from datetime import datetime
-from datetime import timedelta
-from fastapi import APIRouter
-from fastapi import Body
-from fastapi import Depends
-from fastapi import File
-from fastapi import HTTPException
-from fastapi import Path
-from fastapi import Response
-from fastapi import status
-from fastapi import UploadFile
-from fastapi.responses import FileResponse
-from fastapi.security import OAuth2PasswordBearer
-from fastapi.security import OAuth2PasswordRequestForm
-from jose import jwt
-from jose import JWTError
-from PIL import Image
+from datetime import datetime, timedelta
 from typing import Annotated, BinaryIO
-from zoneinfo import ZoneInfo
 
-from app import logging
-from app import schemas
-from app.constants import ACCOUNT_ICON_DIR, ACCOUNT_ICON_DEFAULT_DIR, PASSWORD_CONTEXT, JWT_SECRET_KEY
+import anyio
+from fastapi import (
+    APIRouter,
+    Body,
+    Depends,
+    File,
+    HTTPException,
+    Path,
+    Response,
+    UploadFile,
+    status,
+)
+from fastapi.responses import FileResponse
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from jose import JWTError, jwt
+from PIL import Image
+from tortoise.exceptions import IntegrityError
+
+from app import logging, schemas
+from app.constants import (
+    ACCOUNT_ICON_DEFAULT_DIR,
+    ACCOUNT_ICON_DIR,
+    JST,
+    JWT_SECRET_KEY,
+    PASSWORD_CONTEXT,
+)
+from app.models.AccountLink import AccountLink
+from app.models.BlueskyAccount import BlueskyAccount
+from app.models.DeviceAuth import DeviceAuth
 from app.models.TwitterAccount import TwitterAccount
 from app.models.User import User
 
@@ -56,9 +67,9 @@ def GenerateAccessToken(user_id: int) -> str:
         # ユーザーの識別子 (ユーザー ID を文字列化したもの)
         'sub': f'{user_id}',
         # JWT の発行時間
-        'iat': datetime.now(ZoneInfo('Asia/Tokyo')),
+        'iat': datetime.now(JST),
         # JWT の有効期限 (JWT の発行から 180 日間)
-        'exp': datetime.now(ZoneInfo('Asia/Tokyo')) + timedelta(days=180),
+        'exp': datetime.now(JST) + timedelta(days=180),
         # JWT ごとの一意な ID (UUID v4)
         'jti': str(uuid.uuid4()),
     }
@@ -69,6 +80,19 @@ def GenerateAccessToken(user_id: int) -> str:
         key = JWT_SECRET_KEY,
         algorithm = 'HS256',
     )
+
+
+def HashDeviceCode(device_code: str) -> str:
+    """
+    端末だけが保持するデバイスコードを、DB 保存用の SHA-256 ハッシュへ変換する。
+
+    Args:
+        device_code (str): Komorebi に発行した十分に長いデバイスコード。
+
+    Returns:
+        str: デバイスコードの SHA-256 ハッシュ。
+    """
+    return hashlib.sha256(device_code.encode()).hexdigest()
 
 
 async def GetCurrentUser(token: Annotated[str, Depends(OAuth2PasswordBearer(tokenUrl='users/token'))]) -> User:
@@ -85,7 +109,7 @@ async def GetCurrentUser(token: Annotated[str, Depends(OAuth2PasswordBearer(toke
 
         # typ が AccessToken でない (JWT トークンが不正)
         if jwt_payload.get('typ') != 'AccessToken':
-            logging.error('[GetCurrentUser] Access token type is invalid')
+            logging.warning('[GetCurrentUser] Access token type is invalid.')
             raise HTTPException(
                 status_code = status.HTTP_401_UNAUTHORIZED,
                 detail = 'Access token type is invalid',
@@ -94,7 +118,7 @@ async def GetCurrentUser(token: Annotated[str, Depends(OAuth2PasswordBearer(toke
 
         # Subject が JWT ペイロードに含まれていない (JWT トークンが不正)
         if jwt_payload.get('sub') is None:
-            logging.error('[GetCurrentUser] Access token data is invalid')
+            logging.warning('[GetCurrentUser] Access token data is invalid.')
             raise HTTPException(
                 status_code = status.HTTP_401_UNAUTHORIZED,
                 detail = 'Access token data is invalid',
@@ -103,8 +127,7 @@ async def GetCurrentUser(token: Annotated[str, Depends(OAuth2PasswordBearer(toke
 
     # JWT トークンが不正
     except JWTError as ex:
-        logging.error('[GetCurrentUser] Access token is invalid')
-        logging.error(ex)
+        logging.warning('[GetCurrentUser] Access token is invalid:', exc_info=ex)
         raise HTTPException(
             status_code = status.HTTP_401_UNAUTHORIZED,
             detail = 'Access token is invalid',
@@ -115,11 +138,13 @@ async def GetCurrentUser(token: Annotated[str, Depends(OAuth2PasswordBearer(toke
     user_id: int = int(jwt_payload['sub'])
 
     # JWT トークンに刻まれたユーザー ID に紐づくユーザー情報を取得
-    current_user = await User.filter(id=user_id).prefetch_related('twitter_accounts').get_or_none()
+    ## 認証時の Depends として認証が必要な全 API から呼ばれるメソッドなので、ここでは関連アカウントの取得を行わない
+    ## 関連アカウントの取得は、その情報を返す必要があるエンドポイントの実装 (UsersAPI, UserAPI など) 側で明示的に行うべき
+    current_user = await User.filter(id=user_id).get_or_none()
 
     # そのユーザー ID のユーザーが存在しない
     if not current_user:
-        logging.error(f'[GetCurrentUser] User associated with access token does not exist [user_id: {user_id}]')
+        logging.warning(f'[GetCurrentUser] User associated with access token does not exist. [user_id: {user_id}]')
         raise HTTPException(
             status_code = status.HTTP_401_UNAUTHORIZED,
             detail = 'User associated with access token does not exist',
@@ -134,7 +159,7 @@ async def GetCurrentAdminUser(current_user: Annotated[User, Depends(GetCurrentUs
 
     # 取得したユーザーが管理者ではない
     if current_user.is_admin is False:
-        logging.error(f'[GetCurrentAdminUser] Don\'t have permission to access this resource [user_id: {current_user.id}]')
+        logging.warning(f'[GetCurrentAdminUser] Don\'t have permission to access this resource. [user_id: {current_user.id}]')
         raise HTTPException(
             status_code = status.HTTP_403_FORBIDDEN,
             detail = 'Don\'t have permission to access this resource',
@@ -151,11 +176,16 @@ async def GetSpecifiedUser(
     """ 指定されたユーザー名のユーザーを取得する """
 
     # 指定されたユーザー名のユーザーを取得
-    user = await User.filter(name=username).prefetch_related('twitter_accounts').get_or_none()
+    user = await User.filter(name=username).prefetch_related(
+        'twitter_accounts',
+        'bluesky_accounts',
+        'account_links__twitter_account',
+        'account_links__bluesky_account',
+    ).get_or_none()
 
     # 指定されたユーザー名のユーザーが存在しない
     if not user:
-        logging.error(f'[GetSpecifiedUser] Specified user was not found [username: {username}]')
+        logging.error(f'[GetSpecifiedUser] Specified user was not found. [username: {username}]')
         raise HTTPException(
             status_code = status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail = 'Specified user was not found',
@@ -216,7 +246,7 @@ async def UserCreateAPI(
     # 同じユーザー名のアカウントがあったら 422 を返す
     ## ユーザー名がそのままログイン ID になるので、同じユーザー名のアカウントがあると重複する
     if await User.filter(name=user_create_request.username).get_or_none() is not None:
-        logging.error(f'[UsersRouter][UserCreateAPI] Specified username is duplicated [username: {user_create_request.username}]')
+        logging.warning(f'[UsersRouter][UserCreateAPI] Specified username is duplicated. [username: {user_create_request.username}]')
         raise HTTPException(
             status_code = status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail = 'Specified username is duplicated',
@@ -227,7 +257,7 @@ async def UserCreateAPI(
     ## そんな名前で登録する人はいないとは思うけど、念のため…
     PERMITTED_USERNAMES = ['me', 'token']
     if user_create_request.username.lower() in PERMITTED_USERNAMES:
-        logging.error(f'[UsersRouter][UserCreateAPI] Specified username is not permitted [username: {user_create_request.username}]')
+        logging.warning(f'[UsersRouter][UserCreateAPI] Specified username is not permitted. [username: {user_create_request.username}]')
         raise HTTPException(
             status_code = status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail = 'Specified username is not permitted',
@@ -242,7 +272,12 @@ async def UserCreateAPI(
     )
 
     # 外部テーブルのデータを取得してから返す
-    await current_user.fetch_related('twitter_accounts')
+    await current_user.fetch_related(
+        'twitter_accounts',
+        'bluesky_accounts',
+        'account_links__twitter_account',
+        'account_links__bluesky_account',
+    )
     return current_user
 
 
@@ -268,7 +303,7 @@ async def UserAccessTokenAPI(
 
     # 指定されたユーザーが存在しない
     if not current_user:
-        logging.error(f'[UsersRouter][UserAccessTokenAPI] Incorrect username [username: {form_data.username}]')
+        logging.warning(f'[UsersRouter][UserAccessTokenAPI] Incorrect username. [username: {form_data.username}]')
         raise HTTPException(
             status_code = status.HTTP_401_UNAUTHORIZED,
             detail = 'Incorrect username',
@@ -277,7 +312,7 @@ async def UserAccessTokenAPI(
 
     # 指定されたパスワードのハッシュが DB にあるものと一致しない
     if not PASSWORD_CONTEXT.verify(form_data.password, current_user.password):
-        logging.error(f'[UsersRouter][UserAccessTokenAPI] Incorrect password [username: {form_data.username}]')
+        logging.warning(f'[UsersRouter][UserAccessTokenAPI] Incorrect password. [username: {form_data.username}]')
         raise HTTPException(
             status_code = status.HTTP_401_UNAUTHORIZED,
             detail = 'Incorrect password',
@@ -289,6 +324,91 @@ async def UserAccessTokenAPI(
         access_token = GenerateAccessToken(current_user.id),
         token_type = 'bearer',
     )
+
+
+@router.post('/device-auth', response_model=schemas.DeviceAuthRequest, status_code=status.HTTP_201_CREATED)
+async def DeviceAuthCreateAPI(request: schemas.DeviceAuthCreateRequest):
+    """
+    Komorebi 向けの一時的な端末ペアリング要求を作成する。
+
+    Args:
+        request (schemas.DeviceAuthCreateRequest): 連携元端末の表示名。
+
+    Returns:
+        schemas.DeviceAuthRequest: 端末コード、ユーザーコード、確認 URL と有効期間。
+    """
+    now = datetime.now(JST)
+    await DeviceAuth.filter(expires_at__lte=now).delete()
+
+    # ユーザーコードの衝突は DB の一意制約を最終保証として、衝突時だけ新しいコードを再生成する
+    while True:
+        device_code = secrets.token_urlsafe(32)
+        user_code = ''.join(secrets.choice('ABCDEFGHJKLMNPQRSTUVWXYZ23456789') for _ in range(8))
+        try:
+            await DeviceAuth.create(
+                device_code_hash=HashDeviceCode(device_code),
+                user_code=user_code,
+                device_name=request.device_name,
+                expires_at=now + timedelta(minutes=10),
+            )
+            break
+        except IntegrityError:
+            continue
+    return schemas.DeviceAuthRequest(
+        device_code=device_code,
+        user_code=user_code,
+        verification_url=f'/pair/?code={user_code}',
+        expires_in=600,
+        interval=3,
+    )
+
+
+@router.post('/device-auth/approve', status_code=status.HTTP_204_NO_CONTENT)
+async def DeviceAuthApproveAPI(
+    request: schemas.DeviceAuthApprovalRequest,
+    current_user: Annotated[User, Depends(GetCurrentUser)],
+):
+    """
+    ログイン中のユーザーが、テレビに表示されたユーザーコードを承認する。
+
+    Args:
+        request (schemas.DeviceAuthApprovalRequest): テレビに表示されたユーザーコード。
+        current_user (User): JWT から解決したログイン中のユーザー。
+
+    Returns:
+        None: 承認に成功した場合はレスポンス本文を返さない。
+    """
+    pairing = await DeviceAuth.filter(user_code=request.user_code.upper(), expires_at__gt=datetime.now(JST)).get_or_none()
+    if pairing is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Device authorization request was not found')
+    # 同時承認時も最初のユーザーだけを受け付け、後続ユーザーによる上書きを防ぐ
+    updated_count = await DeviceAuth.filter(id=pairing.id, user_id=None).update(user_id=current_user.id)
+    if updated_count == 0:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail='Device authorization request was already approved')
+
+
+@router.post('/device-auth/token', response_model=schemas.UserAccessToken)
+async def DeviceAuthTokenAPI(request: schemas.DeviceAuthTokenRequest):
+    """
+    承認済みペアリング要求を、Komorebi が利用するアクセストークンへ交換する。
+
+    Args:
+        request (schemas.DeviceAuthTokenRequest): Komorebi だけが保持するデバイスコード。
+
+    Returns:
+        schemas.UserAccessToken | Response: 承認後はアクセストークン、承認待ちの間は HTTP 202 。
+    """
+    pairing = await DeviceAuth.filter(
+        device_code_hash=HashDeviceCode(request.device_code),
+        expires_at__gt=datetime.now(JST),
+    ).get_or_none()
+    if pairing is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Device authorization request was not found')
+    if pairing.user_id is None:
+        return Response(status_code=status.HTTP_202_ACCEPTED)
+    token = GenerateAccessToken(pairing.user_id)
+    await pairing.delete()
+    return schemas.UserAccessToken(access_token=token, token_type='bearer')
 
 
 @router.get(
@@ -305,7 +425,13 @@ async def UsersAPI(
     JWT エンコードされたアクセストークンがリクエストの Authorization: Bearer に設定されていて、かつ管理者アカウントでないとアクセスできない。
     """
 
-    return await User.all().prefetch_related('twitter_accounts')
+    # 常に関連するアカウント系テーブルの対応するレコードを全取得して返す
+    return await User.all().prefetch_related(
+        'twitter_accounts',
+        'bluesky_accounts',
+        'account_links__twitter_account',
+        'account_links__bluesky_account',
+    )
 
 
 # ***** ログイン中ユーザーアカウント情報 API *****
@@ -329,9 +455,109 @@ async def UserAPI(
     ## Twitter 連携では途中で連携をキャンセルした場合に仮のアカウントデータが残置されてしまうので、それを取り除く
     if await TwitterAccount.filter(icon_url='Temporary').count() > 0:
         await TwitterAccount.filter(icon_url='Temporary').delete()
-        current_user = await User.filter(id=current_user.id).prefetch_related('twitter_accounts').get()  # current_user のデータを更新
 
-    return current_user
+    # 常に関連するアカウント系テーブルの対応するレコードを全取得して返す
+    return await User.filter(id=current_user.id).prefetch_related(
+        'twitter_accounts',
+        'bluesky_accounts',
+        'account_links__twitter_account',
+        'account_links__bluesky_account',
+    ).get()
+
+
+@router.post(
+    '/me/account-links',
+    summary = 'Twitter / Bluesky アカウント紐付け作成 API',
+    response_description = '作成したアカウント紐付け。',
+    response_model = schemas.AccountLink,
+    status_code = status.HTTP_201_CREATED,
+)
+async def AccountLinkCreateAPI(
+    account_link_create_request: Annotated[schemas.AccountLinkCreateRequest, Body(description='紐付ける Twitter / Bluesky アカウント ID 。')],
+    current_user: Annotated[User, Depends(GetCurrentUser)],
+):
+    """
+    ログイン中ユーザーの Twitter アカウントと Bluesky アカウントを紐付ける。<br>
+    紐付けは視聴画面の Twitter タブで両方のタイムラインをまとめて表示し、ツイートを同時投稿する際に利用される。
+    """
+
+    # リクエストされた Twitter アカウントがログイン中ユーザーの所有物であることを確認する
+    twitter_account = await TwitterAccount.filter(
+        id = account_link_create_request.twitter_account_id,
+        user_id = current_user.id,
+    ).get_or_none()
+    if twitter_account is None:
+        raise HTTPException(
+            status_code = status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail = 'Specified Twitter account does not exist',
+        )
+
+    # Bluesky 側も同じユーザーに属するレコードだけを許可し、他ユーザーのアカウントとの紐付けを防ぐ
+    bluesky_account = await BlueskyAccount.filter(
+        id = account_link_create_request.bluesky_account_id,
+        user_id = current_user.id,
+    ).get_or_none()
+    if bluesky_account is None:
+        raise HTTPException(
+            status_code = status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail = 'Specified Bluesky account does not exist',
+        )
+
+    # 返却直後にクライアントが表示名やアイコンを表示できるように、両方の子レコードを取得しておく
+    try:
+        account_link = await AccountLink.create(
+            user = current_user,
+            twitter_account = twitter_account,
+            bluesky_account = bluesky_account,
+        )
+    except IntegrityError as ex:
+        # 紐付けは DB の一意制約で一対一を最終保証する
+        ## 事前確認だけでは複数タブの同時作成を防げないため、競合後に実際の重複側を調べて既存のエラー文へ戻す
+        if await AccountLink.filter(twitter_account_id=twitter_account.id).exists() is True:
+            raise HTTPException(
+                status_code = status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail = 'Specified Twitter account is already linked',
+            ) from ex
+        if await AccountLink.filter(bluesky_account_id=bluesky_account.id).exists() is True:
+            raise HTTPException(
+                status_code = status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail = 'Specified Bluesky account is already linked',
+            ) from ex
+        logging.error(
+            f'[UsersRouter][AccountLinkCreateAPI] Failed to create account link due to an unexpected integrity error. [user_id: {current_user.id}]',
+            exc_info=ex,
+        )
+        raise HTTPException(
+            status_code = status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail = 'Failed to create account link',
+        ) from ex
+    await account_link.fetch_related('twitter_account', 'bluesky_account')
+    return account_link
+
+
+@router.delete(
+    '/me/account-links/{link_id}',
+    summary = 'Twitter / Bluesky アカウント紐付け解除 API',
+    status_code = status.HTTP_204_NO_CONTENT,
+)
+async def AccountLinkDeleteAPI(
+    link_id: Annotated[int, Path(description='解除するアカウント紐付け ID 。')],
+    current_user: Annotated[User, Depends(GetCurrentUser)],
+):
+    """
+    ログイン中ユーザーの Twitter / Bluesky アカウント紐付けを解除する。<br>
+    連携済みアカウント自体は削除しない。
+    """
+
+    # 紐付け解除はログイン中ユーザーのリンクレコードだけに限定する
+    ## 個別の Twitter / Bluesky 連携は残されるので、紐付け解除後は別々のアカウントとして選択候補に表示される形となる
+    account_link = await AccountLink.filter(id=link_id, user_id=current_user.id).get_or_none()
+    if account_link is None:
+        raise HTTPException(
+            status_code = status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail = 'Specified account link does not exist',
+        )
+    await account_link.delete()
 
 
 @router.put(
@@ -354,7 +580,7 @@ async def UserUpdateAPI(
         # 重複しないように、同じユーザー名のアカウントがあったら 422 を返す
         ## 新しいユーザー名が現在のユーザー名と同じなら問題ないので除外
         if user_update_request.username != current_user.name and await User.filter(name=user_update_request.username).get_or_none():
-            logging.error(f'[UsersRouter][UserUpdateAPI] Specified username is duplicated [username: {user_update_request.username}]')
+            logging.warning(f'[UsersRouter][UserUpdateAPI] Specified username is duplicated. [username: {user_update_request.username}]')
             raise HTTPException(
                 status_code = status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail = 'Specified username is duplicated',
@@ -365,7 +591,7 @@ async def UserUpdateAPI(
         ## そんな名前で登録する人はいないとは思うけど、念のため…
         PERMITTED_USERNAMES = ['me', 'token']
         if user_update_request.username.lower() in PERMITTED_USERNAMES:
-            logging.error(f'[UsersRouter][UserUpdateAPI] Specified username is not permitted [username: {user_update_request.username}]')
+            logging.warning(f'[UsersRouter][UserUpdateAPI] Specified username is not permitted. [username: {user_update_request.username}]')
             raise HTTPException(
                 status_code = status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail = 'Specified username is not permitted',
@@ -408,8 +634,8 @@ async def UserIconAPI(
     }
 
     # アイコン画像が保存されていればそれを返す
-    icon_save_path = ACCOUNT_ICON_DIR / f'{current_user.id:02}.png'
-    if icon_save_path.exists():
+    icon_save_path = anyio.Path(str(ACCOUNT_ICON_DIR)) / f'{current_user.id:02}.png'
+    if await icon_save_path.exists():
         return FileResponse(icon_save_path, headers=header)
 
     # デフォルトのアイコン画像を返す
@@ -432,7 +658,7 @@ async def UserUpdateIconAPI(
 
     # MIME タイプが image/jpeg or image/png 以外
     if image.content_type != 'image/jpeg' and image.content_type != 'image/png':
-        logging.error(f'[UsersRouter][UserUpdateIconAPI] Please upload JPEG or PNG image [content_type: {image.content_type}]')
+        logging.warning(f'[UsersRouter][UserUpdateIconAPI] Please upload JPEG or PNG image. [content_type: {image.content_type}]')
         raise HTTPException(
             status_code = status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail = 'Please upload JPEG or PNG image',
@@ -457,9 +683,9 @@ async def UserDeleteAPI(
     """
 
     # アイコン画像が保存されていれば削除する
-    icon_save_path = ACCOUNT_ICON_DIR / f'{current_user.id:02}.png'
-    if icon_save_path.exists():
-        icon_save_path.unlink()
+    icon_save_path = anyio.Path(str(ACCOUNT_ICON_DIR)) / f'{current_user.id:02}.png'
+    if await icon_save_path.exists():
+        await icon_save_path.unlink()
 
     # 現在ログイン中のユーザーアカウント（自分自身）を削除
     # アカウントを削除すると、それ以降は（当然ながら）ログインを要求する API へアクセスできなくなる
@@ -516,7 +742,7 @@ async def SpecifiedUserUpdateAPI(
     if user_update_request.is_admin is False:
         remaining_admins = await User.filter(is_admin=True).exclude(id=user.id).count()
         if remaining_admins == 0:
-            logging.error('[UsersRouter][SpecifiedUserUpdateAPI] Cannot revoke admin permission because there are no more admins')
+            logging.warning('[UsersRouter][SpecifiedUserUpdateAPI] Cannot revoke admin permission because there are no more admins.')
             raise HTTPException(
                 status_code = status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail = 'Cannot revoke admin permission because there are no more admins',
@@ -552,8 +778,8 @@ async def SpecifiedUserIconAPI(
     }
 
     # アイコン画像が保存されていればそれを返す
-    icon_save_path = ACCOUNT_ICON_DIR / f'{user.id:02}.png'
-    if icon_save_path.exists():
+    icon_save_path = anyio.Path(str(ACCOUNT_ICON_DIR)) / f'{user.id:02}.png'
+    if await icon_save_path.exists():
         return FileResponse(icon_save_path, headers=header)
 
     # デフォルトのアイコン画像を返す
@@ -574,9 +800,9 @@ async def SpecifiedUserDeleteAPI(
     """
 
     # アイコン画像が保存されていれば削除する
-    icon_save_path = ACCOUNT_ICON_DIR / f'{user.id:02}.png'
-    if icon_save_path.exists():
-        icon_save_path.unlink()
+    icon_save_path = anyio.Path(str(ACCOUNT_ICON_DIR)) / f'{user.id:02}.png'
+    if await icon_save_path.exists():
+        await icon_save_path.unlink()
 
     # 指定されたユーザーを削除
     await user.delete()

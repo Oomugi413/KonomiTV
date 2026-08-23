@@ -3,6 +3,7 @@
         <HeaderBar />
         <main>
             <Navigation />
+            <SPHeaderBar :hide-on-smartphone-vertical="true" />
             <div class="d-flex justify-center align-center w-100">
                 <div class="d-flex justify-center align-center flex-column">
                     <h1>Not Found, or Under Development...</h1>
@@ -12,20 +13,11 @@
         </main>
     </div>
 </template>
-<script lang="ts">
-
-import { defineComponent } from 'vue';
+<script lang="ts" setup>
 
 import HeaderBar from '@/components/HeaderBar.vue';
 import Navigation from '@/components/Navigation.vue';
-
-export default defineComponent({
-    name: 'NotFound',
-    components: {
-        HeaderBar,
-        Navigation,
-    },
-});
+import SPHeaderBar from '@/components/SPHeaderBar.vue';
 
 </script>
 <style lang="scss" scoped>

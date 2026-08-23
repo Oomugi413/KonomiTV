@@ -1,16 +1,30 @@
 
-import httpx
+import base64
+import hashlib
 import pkgutil
 import secrets
 import sys
-from passlib.context import CryptContext
 from pathlib import Path
-from pydantic import BaseModel, PositiveInt
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
+
+import httpx
+from cryptography.fernet import Fernet
+from passlib.context import CryptContext
+from pydantic import BaseModel, PositiveInt
 
 
 # バージョン
-VERSION = '0.11.0'
+VERSION = '0.14.1'
+
+# 日本標準時 (JST, UTC+9) の ZoneInfo
+## KonomiTV は日本向けのアプリケーションのため、日時は JST で統一して扱う
+JST = ZoneInfo('Asia/Tokyo')
+
+# 「一部のみ録画」フラグを立てる際の許容誤差 (秒)
+## チューナー確保や録画プロセス起動、放送波の時刻情報の粒度による数秒程度のずれは、
+## 番組本編が欠けていなくても録画開始・終了時刻の比較に現れるため、部分録画とは扱わない
+PARTIALLY_RECORDED_TOLERANCE_SECONDS = 5.0
 
 # ベースディレクトリ
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -23,7 +37,12 @@ DATA_DIR = BASE_DIR / 'data'
 ## アカウントのアイコン画像があるディレクトリ
 ACCOUNT_ICON_DIR = DATA_DIR / 'account-icons'
 ## サムネイル画像があるディレクトリ
-THUMBNAIL_DIR = DATA_DIR / 'thumbnails'
+THUMBNAILS_DIR = DATA_DIR / 'thumbnails'
+## Twitter 関連のデバッグ用スクリーンショットの保存先ディレクトリ
+TWITTER_DEBUG_SCREENSHOTS_DIR = DATA_DIR / 'twitter-debug-screenshots'
+## デバッグ用スクリーンショットの保持期限 (日数)
+## 7 日を超えたスクリーンショットを自動削除する
+TWITTER_DEBUG_SCREENSHOTS_RETENTION_DAYS = 7
 ## サーバー終了時に再起動が必要なことを伝えるロックファイルのパス
 RESTART_REQUIRED_LOCK_PATH = DATA_DIR / 'restart_required.lock'
 
@@ -38,6 +57,12 @@ JIKKYO_CHANNELS_PATH = STATIC_DIR / 'jikkyo_channels.json'
 
 # ログディレクトリ
 LOGS_DIR = BASE_DIR / 'logs'
+## サーバーログのアーカイブ（日付別ログ）を格納するサブディレクトリ
+## ログディレクトリ直下にアーカイブが大量に並ぶとノイズになるため、サブディレクトリに分離する
+LOGS_ARCHIVES_DIR = LOGS_DIR / 'archives'
+## サーバーログのアーカイブの保持期限 (日数)
+## 30 日を超えたアーカイブログを自動削除する
+SERVER_LOG_ARCHIVE_RETENTION_DAYS: int | None = 30
 ## KonomiTV のサーバーログのパス
 KONOMITV_SERVER_LOG_PATH = LOGS_DIR / 'KonomiTV-Server.log'
 ## KonomiTV のアクセスログのパス
@@ -60,6 +85,7 @@ LIBRARY_PATH = {
     'rkmppenc': str(LIBRARY_DIR / 'rkmppenc/rkmppenc') + LIBRARY_EXTENSION,
     'tsreadex': str(LIBRARY_DIR / 'tsreadex/tsreadex') + LIBRARY_EXTENSION,
     'psisiarc': str(LIBRARY_DIR / 'psisiarc/psisiarc') + LIBRARY_EXTENSION,
+    'psisimux': str(LIBRARY_DIR / 'psisimux/psisimux') + LIBRARY_EXTENSION,
 }
 
 # データベース (Tortoise ORM) の設定
@@ -67,7 +93,7 @@ __model_list = [name for _, name, _ in pkgutil.iter_modules(path=['app/models'])
 DATABASE_CONFIG = {
     'timezone': 'Asia/Tokyo',
     'connections': {
-        'default': f'sqlite://{str(DATA_DIR / "database.sqlite")}',
+        'default': f'sqlite://{DATA_DIR / "database.sqlite"!s}',
     },
     'apps': {
         'models': {
@@ -89,43 +115,43 @@ LOGGING_CONFIG: dict[str, Any] = {
         'default': {
             '()': 'uvicorn.logging.DefaultFormatter',
             'datefmt': '%Y/%m/%d %H:%M:%S',
-            'format': '[%(asctime)s] %(levelprefix)s %(message)s',
+            'format': '[%(asctime)s.%(msecs)03d] %(levelprefix)s %(message)s',
         },
         'default_file': {
             '()': 'uvicorn.logging.DefaultFormatter',
             'datefmt': '%Y/%m/%d %H:%M:%S',
-            'format': '[%(asctime)s] %(levelprefix)s %(message)s',
+            'format': '[%(asctime)s.%(msecs)03d] %(levelprefix)s %(message)s',
             'use_colors': False,  # ANSI エスケープシーケンスを出力しない
         },
         # サーバーログ (デバッグ) 用のログフォーマッター
         'debug': {
             '()': 'uvicorn.logging.DefaultFormatter',
             'datefmt': '%Y/%m/%d %H:%M:%S',
-            'format': '[%(asctime)s] %(levelprefix)s %(pathname)s:%(lineno)s:\n'
-                '                                %(message)s',
+            'format': '[%(asctime)s.%(msecs)03d] %(levelprefix)s %(pathname)s:%(lineno)s:\n'
+            '                                %(message)s',
         },
         'debug_file': {
             '()': 'uvicorn.logging.DefaultFormatter',
             'datefmt': '%Y/%m/%d %H:%M:%S',
-            'format': '[%(asctime)s] %(levelprefix)s %(pathname)s:%(lineno)s:\n'
-                '                                %(message)s',
+            'format': '[%(asctime)s.%(msecs)03d] %(levelprefix)s %(pathname)s:%(lineno)s:\n'
+            '                                %(message)s',
             'use_colors': False,  # ANSI エスケープシーケンスを出力しない
         },
         # アクセスログ用のログフォーマッター
         'access': {
             '()': 'uvicorn.logging.AccessFormatter',
             'datefmt': '%Y/%m/%d %H:%M:%S',
-            'format': '[%(asctime)s] %(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s',
+            'format': '[%(asctime)s.%(msecs)03d] %(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s',
         },
         'access_file': {
             '()': 'uvicorn.logging.AccessFormatter',
             'datefmt': '%Y/%m/%d %H:%M:%S',
-            'format': '[%(asctime)s] %(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s',
+            'format': '[%(asctime)s.%(msecs)03d] %(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s',
             'use_colors': False,  # ANSI エスケープシーケンスを出力しない
         },
     },
     'handlers': {
-        ## サーバーログは標準エラー出力と server/logs/KonomiTV-Server.log の両方に出力する
+        # サーバーログは標準エラー出力と server/logs/KonomiTV-Server.log の両方に出力する
         'default': {
             'formatter': 'default',
             'class': 'logging.StreamHandler',
@@ -133,12 +159,12 @@ LOGGING_CONFIG: dict[str, Any] = {
         },
         'default_file': {
             'formatter': 'default_file',
-            'class': 'logging.FileHandler',
+            'class': 'app.utils.LogRotation.DailyRotatingFileHandler',
             'filename': KONOMITV_SERVER_LOG_PATH,
-            'mode': 'a',
             'encoding': 'utf-8',
+            'retention_days': SERVER_LOG_ARCHIVE_RETENTION_DAYS,
         },
-        ## サーバーログ (デバッグ) は標準エラー出力と server/logs/KonomiTV-Server.log の両方に出力する
+        # サーバーログ (デバッグ) は標準エラー出力と server/logs/KonomiTV-Server.log の両方に出力する
         'debug': {
             'formatter': 'debug',
             'class': 'logging.StreamHandler',
@@ -146,12 +172,12 @@ LOGGING_CONFIG: dict[str, Any] = {
         },
         'debug_file': {
             'formatter': 'debug_file',
-            'class': 'logging.FileHandler',
+            'class': 'app.utils.LogRotation.DailyRotatingFileHandler',
             'filename': KONOMITV_SERVER_LOG_PATH,
-            'mode': 'a',
             'encoding': 'utf-8',
+            'retention_days': SERVER_LOG_ARCHIVE_RETENTION_DAYS,
         },
-        ## アクセスログは標準出力と server/logs/KonomiTV-Access.log の両方に出力する
+        # アクセスログは標準出力と server/logs/KonomiTV-Access.log の両方に出力する
         'access': {
             'formatter': 'access',
             'class': 'logging.StreamHandler',
@@ -201,6 +227,33 @@ QUALITY_TYPES = Literal[
     '360p-hevc',
     '240p',
     '240p-hevc',
+]
+
+# 録画ストリーミング専用の品質の種類 (型定義)
+## copy は既に H.264 / H.265 へ変換済みの MPEG-TS を、FFmpeg で再エンコードせず HLS へ再多重化する特殊な品質。
+VIDEO_QUALITY_TYPES = QUALITY_TYPES | Literal['copy']
+
+# ライブストリーミング専用の品質の種類 (型定義)
+## raw-mmts は BS4K の MMTS を Mirakurun から decode=0 で受け取り、そのままブラウザへ配信する特殊な品質。
+## エンコードを行わないため QUALITY には含めず、ライブストリーム側だけで扱う。
+LIVE_QUALITY_TYPES = Literal[
+    '1080p-60fps',
+    '1080p-60fps-hevc',
+    '1080p',
+    '1080p-hevc',
+    '810p',
+    '810p-hevc',
+    '720p',
+    '720p-hevc',
+    '540p',
+    '540p-hevc',
+    '480p',
+    '480p-hevc',
+    '360p',
+    '360p-hevc',
+    '240p',
+    '240p-hevc',
+    'raw-mmts',
 ]
 
 # 映像と音声の品質
@@ -361,8 +414,35 @@ if Path.exists(JWT_SECRET_KEY_PATH) is False:
     with open(JWT_SECRET_KEY_PATH, mode='w', encoding='utf-8') as file:
         file.write(secrets.token_hex(32))  # 32ビット (256文字) の乱数を書き込む
 ## jwt_secret.dat からシークレットキーをロードする
-with open(JWT_SECRET_KEY_PATH, mode='r', encoding='utf-8') as file:
+with open(JWT_SECRET_KEY_PATH, encoding='utf-8') as file:
     JWT_SECRET_KEY = file.read().strip()
+
+# 暗号化された Cookie の接頭辞
+TWITTER_ACCOUNT_COOKIE_ENCRYPTION_PREFIX = 'enc:'
+# Cookie の暗号化に使う Fernet の暗号化キー
+TWITTER_ACCOUNT_COOKIE_FERNET_KEY = base64.urlsafe_b64encode(
+    hashlib.sha256(JWT_SECRET_KEY.encode('utf-8')).digest(),
+)
+# Cookie の暗号化に使う Fernet のインスタンス
+TWITTER_ACCOUNT_COOKIE_FERNET = Fernet(TWITTER_ACCOUNT_COOKIE_FERNET_KEY)
+
+# 暗号化された Bluesky セッション文字列の接頭辞
+BLUESKY_ACCOUNT_SESSION_ENCRYPTION_PREFIX = 'enc:'
+# Bluesky セッション文字列の暗号化に使う Fernet の暗号化キー
+BLUESKY_ACCOUNT_SESSION_FERNET_KEY = base64.urlsafe_b64encode(
+    hashlib.sha256(f'bluesky:{JWT_SECRET_KEY}'.encode()).digest(),
+)
+# Bluesky セッション文字列の暗号化に使う Fernet のインスタンス
+BLUESKY_ACCOUNT_SESSION_FERNET = Fernet(BLUESKY_ACCOUNT_SESSION_FERNET_KEY)
+
+# 暗号化された Bangumi 個人アクセストークンの接頭辞
+BANGUMI_ACCESS_TOKEN_ENCRYPTION_PREFIX = 'enc:'
+# Bangumi 個人アクセストークンの暗号化に使う Fernet の暗号化キー
+BANGUMI_ACCESS_TOKEN_FERNET_KEY = base64.urlsafe_b64encode(
+    hashlib.sha256(f'bangumi:{JWT_SECRET_KEY}'.encode()).digest(),
+)
+# Bangumi 個人アクセストークンの暗号化に使う Fernet のインスタンス
+BANGUMI_ACCESS_TOKEN_FERNET = Fernet(BANGUMI_ACCESS_TOKEN_FERNET_KEY)
 
 # パスワードハッシュ化のための設定
 PASSWORD_CONTEXT = CryptContext(

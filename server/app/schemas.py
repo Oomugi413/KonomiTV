@@ -3,16 +3,20 @@
 # ref: https://stackoverflow.com/a/33533514/17124142
 from __future__ import annotations
 
-from datetime import date
-from datetime import datetime
-from pydantic import BaseModel
-from pydantic import computed_field
-from pydantic import Field
-from pydantic import RootModel
+from datetime import date, datetime
+from typing import Annotated, Literal
+
+from pydantic import BaseModel, Field, RootModel, computed_field
 from tortoise.contrib.pydantic import PydanticModel
-from typing import Annotated, Any, Literal, Union
 from typing_extensions import TypedDict
 
+from app.utils.TSInformation import TerrestrialRegion
+
+
+# 以下に定義する型定義は、必ず以下の例のように、「親モデル」->「子モデル」の順に記述すること！
+# from __future__ import annotations をインポートしているので前方参照について気にする必要はない
+## 悪い例: ThumbnailImageInfo -> ThumbnailTileInfo -> ThumbnailInfo -> KeyFrame -> CMSection -> RecordedVideo
+## 良い例: RecordedVideo -> KeyFrame -> CMSection -> ThumbnailInfo -> ThumbnailImageInfo -> ThumbnailTileInfo
 
 # モデルとモデルに関連する API レスポンスの構造を表す Pydantic モデル
 ## この Pydantic モデルに含まれていないカラムは、API レスポンス返却時に自動で除外される (パスワードなど)
@@ -22,6 +26,7 @@ from typing_extensions import TypedDict
 # ***** チャンネル *****
 
 class Channel(PydanticModel):
+    # デフォルト値は録画番組からメタデータを取得する処理向け
     id: str
     display_channel_id: str
     network_id: int
@@ -29,12 +34,16 @@ class Channel(PydanticModel):
     transport_stream_id: int | None
     remocon_id: int
     channel_number: str
-    type: str
+    type: Literal['GR', 'BS', 'CS', 'CATV', 'SKY', 'BS4K']
     name: str
-    jikkyo_force: int | None
-    is_subchannel: bool
-    is_radiochannel: bool
-    is_watchable: bool
+    # terrestrial_regions: network_id から算出した地デジチャンネルの地域名のリスト (デバッグ用)
+    # 広域放送局の場合は複数の地域名が含まれる
+    # 地デジ以外のチャンネルまたは地域が特定できない場合は None
+    terrestrial_regions: list[TerrestrialRegion] | None = None
+    jikkyo_force: int | None = None
+    is_subchannel: bool = False
+    is_radiochannel: bool = False
+    is_watchable: bool = False
 
 class LiveChannel(Channel):
     # 以下はすべて動的に生成される TV ライブストリーミング用の追加カラム
@@ -49,7 +58,7 @@ class LiveChannels(BaseModel):
     CS: list[LiveChannel]
     CATV: list[LiveChannel]
     SKY: list[LiveChannel]
-    STARDIGIO: list[LiveChannel]
+    BS4K: list[LiveChannel]
 
 # ***** 放送中/放送予定の番組 *****
 
@@ -85,77 +94,270 @@ class Genre(TypedDict):
     major: str
     middle: str
 
+# ***** 番組表 *****
+
+class TimeTable(BaseModel):
+    # チャンネルごとの番組リスト
+    channels: list[TimeTableChannel]
+    # 番組データの有効範囲 (日付セレクター用)
+    date_range: TimeTableDateRange
+
+class TimeTableDateRange(BaseModel):
+    # 番組データの最も早い日時
+    earliest: datetime
+    # 番組データの最も遅い日時
+    latest: datetime
+
+class TimeTableChannel(BaseModel):
+    # チャンネル情報
+    channel: Channel
+    # 番組リスト
+    programs: list[TimeTableProgram]
+    # サブチャンネルのリスト (8時間ルールに該当しないサブチャンネルのみ)
+    ## 同一 TS 内のサブチャンネルが1日あたり8時間以上放送されている場合、
+    ## そのサブチャンネルは独立したチャンネル列として表示され、このフィールドには含まれない
+    subchannels: list[TimeTableSubchannel] | None = None
+
+class TimeTableSubchannel(BaseModel):
+    # サブチャンネルのチャンネル情報
+    channel: Channel
+    # サブチャンネルの番組リスト
+    programs: list[TimeTableProgram]
+
+class TimeTableProgram(Program):
+    # 予約情報 (EDCB バックエンド時かつ予約がある場合のみ設定)
+    reservation: TimeTableProgramReservation | None = None
+
+class TimeTableProgramReservation(BaseModel):
+    # 録画予約 ID
+    id: int
+    # 予約状態: 予約済み / 録画中 / 無効
+    status: Literal['Reserved', 'Recording', 'Disabled']
+    # 実際に録画可能かどうか: 全編録画可能 / チューナー不足のため部分的にのみ録画可能 (一部録画できない) / チューナー不足のため全編録画不可能
+    # ref: https://github.com/xtne6f/EDCB/blob/work-plus-s-240212/Common/CommonDef.h#L32-L34
+    # ref: https://github.com/xtne6f/EDCB/blob/work-plus-s-240212/Common/StructDef.h#L62
+    recording_availability: Literal['Full', 'Partial', 'Unavailable']
+
 # ***** 録画ファイル *****
 
 class RecordedVideo(PydanticModel):
-    id: int
+    # デフォルト値は録画番組からメタデータを取得する処理向け
+    id: int = -1  # メタデータ取得時は ID が定まらないため -1 を設定
+    status: Literal['Recording', 'Recorded', 'AnalysisFailed']
     file_path: str
     file_hash: str
     file_size: int
+    file_created_at: datetime
+    file_modified_at: datetime
     recording_start_time: datetime | None
     recording_end_time: datetime | None
     duration: float
-    container_format: Literal['MPEG-TS']
+    # Bangumi 連携を含む各クライアントが同じ時刻で視聴完了を判定できるよう、サーバー側で算出した値を返す。
+    @computed_field
+    @property
+    def playback_completion_threshold(self) -> float:
+        return GetPlaybackCompletionThreshold(self.duration, self.cm_sections)
+    container_format: Literal['MPEG-TS', 'MPEG-4', 'MMT/TLV']
     video_codec: Literal['MPEG-2', 'H.264', 'H.265']
-    video_codec_profile: Literal['High', 'High 10', 'Main', 'Main 10', 'Baseline']
+    video_codec_profile: Literal['High', 'High 10', 'Main', 'Main 10', 'Baseline', 'Constrained Baseline']
     video_scan_type: Literal['Interlaced', 'Progressive']
     video_frame_rate: float
     video_resolution_width: int
     video_resolution_height: int
-    primary_audio_codec: Literal['AAC-LC', 'HE-AAC', 'MP2']
-    primary_audio_channel: Literal['Monaural', 'Stereo', '5.1ch']
+    has_video_stream_changes: bool = False
+    # Backward-compatible API field for clients that still use this as the
+    # "metadata analysis completed" signal. Key frame data itself is no longer
+    # returned or preserved after segment_map migration.
+    @computed_field
+    @property
+    def has_key_frames(self) -> bool:
+        return self.status == 'Recorded'
+    primary_audio_codec: Literal['AAC-LC']
+    primary_audio_channel: Literal['Monaural', 'Stereo', '3ch', '4ch', '5ch', '5.1ch', '6.1ch', '7.1ch', '10.2ch', '22.2ch']
     primary_audio_sampling_rate: int
-    secondary_audio_codec: Literal['AAC-LC', 'HE-AAC', 'MP2'] | None
-    secondary_audio_channel: Literal['Monaural', 'Stereo', '5.1ch'] | None
-    secondary_audio_sampling_rate: int | None
-    cm_sections: list[CMSection]
+    secondary_audio_codec: Literal['AAC-LC'] | None = None
+    secondary_audio_channel: Literal['Monaural', 'Stereo', '3ch', '4ch', '5ch', '5.1ch', '6.1ch', '7.1ch', '10.2ch', '22.2ch'] | None = None
+    secondary_audio_sampling_rate: int | None = None
+    cm_sections: list[CMSection] | None = None
+    thumbnail_info: ThumbnailInfo | None = None
+    created_at: datetime
+    updated_at: datetime
+
+class KeyFrame(TypedDict):
+    offset: int
+    dts: int
+
+class SegmentMapEntry(TypedDict):
+    sequence_index: int
+    source_file_position: int
+    source_start_dts: int
 
 class CMSection(TypedDict):
     start_time: float
     end_time: float
 
+
+def GetPlaybackCompletionThreshold(duration: float, cm_sections: list[CMSection] | None) -> float:
+    """
+    録画番組を視聴完了とみなす再生位置を算出する。
+
+    Args:
+        duration (float): 録画ファイル全体の再生時間 (秒)。
+        cm_sections (list[CMSection] | None): 検出済みの CM 区間。
+
+    Returns:
+        float: 録画先頭基準の視聴完了位置 (秒)。
+    """
+
+    normalized_sections: list[CMSection] = []
+    for section in cm_sections or []:
+        # 不正な区間を除外し、録画時間外へはみ出した値をプレイヤーと同じ時間軸へ収める。
+        start_time = max(0.0, min(float(section['start_time']), duration))
+        end_time = max(0.0, min(float(section['end_time']), duration))
+        if start_time >= end_time:
+            continue
+        normalized_sections.append(CMSection(start_time=start_time, end_time=end_time))
+    normalized_sections.sort(key=lambda section: (section['start_time'], section['end_time']))
+
+    merged_sections: list[CMSection] = []
+    for section in normalized_sections:
+        previous_section = merged_sections[-1] if len(merged_sections) > 0 else None
+        # CM 間の 1 分未満の提供・スポンサー表示は番組本編ではないため、完了判定時だけ同じ CM 群として扱う。
+        if previous_section is not None and section['start_time'] - previous_section['end_time'] < 60.0:
+            previous_section['end_time'] = max(previous_section['end_time'], section['end_time'])
+            continue
+        merged_sections.append(section)
+
+    # CM が検出済みなら最後の CM 群を番組終了側の境界とし、その 3 分前から視聴完了とみなす。
+    if len(merged_sections) > 0:
+        return max(merged_sections[-1]['start_time'] - 3 * 60, 0.0)
+
+    # CM 未解析・未検出の録画は従来どおりファイル全体の 90% を完了位置とする。
+    return max(duration, 0.0) * 0.9
+
+class ThumbnailInfo(TypedDict):
+    version: int
+    representative: ThumbnailImageInfo
+    tile: ThumbnailTileInfo
+
+class ThumbnailImageInfo(TypedDict):
+    format: Literal['WebP']
+    width: int
+    height: int
+
+class ThumbnailTileInfo(TypedDict):
+    format: Literal['WebP']
+    image_width: int
+    image_height: int
+    tile_width: int
+    tile_height: int
+    total_tiles: int
+    column_count: int
+    row_count: int
+    interval_sec: float
+
 # ***** 録画番組 *****
 
 class RecordedProgram(PydanticModel):
-    id: int
+    # デフォルト値は録画番組からメタデータを取得する処理向け
+    id: int = -1  # メタデータ取得時は ID が定まらないため -1 を設定
     recorded_video: RecordedVideo
-    recording_start_margin: float
-    recording_end_margin: float
-    is_partially_recorded: bool
-    channel: Channel | None
-    network_id: int | None
-    service_id: int | None
-    event_id: int | None
-    series_id: int | None
-    series_broadcast_period_id: int | None
+    recording_start_margin: float = 0.0  # 取得できなかった場合のデフォルト値
+    recording_end_margin: float = 0.0  # 取得できなかった場合のデフォルト値
+    is_partially_recorded: bool = False
+    channel: Channel | None = None  # MPEG-TS 形式かつ SDT の解析に成功した場合のみセット
+    network_id: int | None = None  # MPEG-TS 形式かつ SDT の解析に成功した場合のみセット
+    service_id: int | None = None  # MPEG-TS 形式かつ SDT の解析に成功した場合のみセット
+    event_id: int | None = None  # MPEG-TS 形式かつ EIT の解析に成功した場合のみセット
+    series_id: int | None = None  # 番組タイトル解析に成功し、かつシリーズが存在する場合のみセット
+    series_broadcast_period_id: int | None = None  # 番組タイトル解析に成功し、かつシリーズが存在する場合のみセット
     title: str
-    series_title: str | None
-    episode_number: str | None
-    subtitle: str | None
-    description: str
-    detail: dict[str, str]
+    series_title: str | None = None  # 番組タイトル解析に成功した場合のみセット
+    episode_number: str | None = None  # 番組タイトル解析に成功した場合のみセット
+    subtitle: str | None = None  # 番組タイトル解析に成功した場合のみセット
+    bangumi_subject_id: int | None = None  # Bangumi 条目との照合に成功した場合のみセット
+    bangumi_episode_id: int | None = None  # Bangumi エピソードとの照合に成功した場合のみセット
+    description: str = '番組概要を取得できませんでした。'
+    detail: dict[str, str] = {}
     start_time: datetime
     end_time: datetime
     duration: float
-    is_free: bool
-    genres: list[Genre]
-    primary_audio_type: str
-    primary_audio_language: str
-    secondary_audio_type: str | None
-    secondary_audio_language: str | None
+    is_free: bool = True
+    genres: list[Genre] = []
+    primary_audio_type: str = '2/0モード(ステレオ)'
+    primary_audio_language: str = '日本語'
+    secondary_audio_type: str | None = None
+    secondary_audio_language: str | None = None
+    created_at: datetime
+    updated_at: datetime
 
 class RecordedPrograms(BaseModel):
     total: int
     recorded_programs: list[RecordedProgram]
 
+class OfflineVideoStreamMetadata(BaseModel):
+    # 保存対象の録画番組 ID
+    video_id: int
+    # DB 再構築後に同じ ID の別録画と取り違えないための録画ファイルハッシュ
+    file_hash: str
+    # -10bit や -24fps を含む実際の API 画質名 (ex: 720p-hevc-10bit-24fps)
+    quality: str
+    # 保存容量の見積もりとプレイリスト生成に使う録画時間
+    duration_seconds: float
+
 # ***** シリーズ *****
+
+class SeriesSummary(PydanticModel):
+    id: int
+    title: str
+    description: str
+    genres: list[Genre]
+    thumbnail_recorded_program_ids: list[int]
+    channel_ids: list[str]
+    official_website_url: str | None
+    bangumi_subject_id: int | None
+    bangumi_subject_name: str | None
+    bangumi_subject_name_cn: str | None
+    bangumi_subject_summary: str | None
+    bangumi_subject_image_url: str | None
+    recorded_programs_count: int
+    created_at: datetime
+    updated_at: datetime
+
+class SeriesSummaryList(BaseModel):
+    total: int
+    series_list: list[SeriesSummary]
+
+class SeriesListPosition(BaseModel):
+    page: int
+
+class OnAirSeries(BaseModel):
+    id: int
+    title: str
+    thumbnail_recorded_program_ids: list[int]
+    channel_ids: list[str]
+    recorded_episodes_count: int
+    missing_episodes_count: int
+    partially_recorded_episodes_count: int
+    weekday: Annotated[int, Field(ge=0, le=6)]
+    broadcast_time: str
+    latest_broadcast_at: datetime
+
+class OnAirSeriesList(BaseModel):
+    series_list: list[OnAirSeries]
 
 class Series(PydanticModel):
     id: int
     title: str
     description: str
     genres: list[Genre]
+    bangumi_subject_id: int | None
+    bangumi_subject_name: str | None
+    bangumi_subject_name_cn: str | None
+    bangumi_subject_summary: str | None
+    bangumi_subject_image_url: str | None
     broadcast_periods: list[SeriesBroadcastPeriod]
+    created_at: datetime
     updated_at: datetime
 
 class SeriesList(BaseModel):
@@ -177,19 +379,110 @@ class User(PydanticModel):
     niconico_user_id: int | None
     niconico_user_name: str | None
     niconico_user_premium: bool | None
+    bangumi_user_id: int | None
+    bangumi_user_name: str | None
+    bangumi_user_nickname: str | None
+    bangumi_user_avatar_url: str | None
     twitter_accounts: list[TwitterAccount]  # 追加カラム
+    bluesky_accounts: list[BlueskyAccount]  # 追加カラム
+    account_links: list[AccountLink]  # 追加カラム
+    created_at: datetime
+    updated_at: datetime
+
+class AccountLink(PydanticModel):
+    id: int
+    twitter_account: TwitterAccount
+    bluesky_account: BlueskyAccount
     created_at: datetime
     updated_at: datetime
 
 class Users(RootModel[list[User]]):
     pass
 
-# ***** Twitter 連携 *****
+
+class WatchedHistoryItem(BaseModel):
+    video_id: int
+    last_playback_position: Annotated[float, Field(ge=0)]
+    created_at: Annotated[float, Field(gt=0)]
+    updated_at: Annotated[float, Field(gt=0)]
+
+
+class WatchedHistory(BaseModel):
+    items: list[WatchedHistoryItem]
+
+
+class DeviceAuthCreateRequest(BaseModel):
+    device_name: Annotated[str, Field(min_length=1, max_length=100)]
+
+
+class DeviceAuthRequest(BaseModel):
+    device_code: str
+    user_code: str
+    verification_url: str
+    expires_in: int
+    interval: int
+
+
+class DeviceAuthApprovalRequest(BaseModel):
+    user_code: Annotated[str, Field(min_length=8, max_length=8)]
+
+
+class DeviceAuthTokenRequest(BaseModel):
+    device_code: Annotated[str, Field(min_length=32, max_length=100)]
+
+# ***** Komorebi リモートコントロール *****
+
+class RemoteDevice(BaseModel):
+    device_id: str
+    device_name: str
+    last_seen_at: datetime
+    state: dict[str, object] | None
+
+class RemoteDeviceList(BaseModel):
+    devices: list[RemoteDevice]
+
+class RemoteCommandOpenLive(BaseModel):
+    type: Literal['OpenLive']
+    display_channel_id: Annotated[str, Field(min_length=1)]
+
+class RemoteCommandOpenRecording(BaseModel):
+    type: Literal['OpenRecording']
+    recorded_program_id: int
+    position_seconds: Annotated[float, Field(ge=0)] = 0
+
+class RemoteCommandPlayback(BaseModel):
+    type: Literal['Play', 'Pause', 'Stop']
+
+class RemoteCommandSeekRelative(BaseModel):
+    type: Literal['SeekRelative']
+    delta_seconds: float
+
+class RemoteCommandVolume(BaseModel):
+    type: Literal['VolumeUp', 'VolumeDown', 'VolumeMute']
+
+RemoteCommand = Annotated[
+    RemoteCommandOpenLive | RemoteCommandOpenRecording | RemoteCommandPlayback | RemoteCommandSeekRelative | RemoteCommandVolume,
+    Field(discriminator='type'),
+]
+
+class RemoteCommandAccepted(BaseModel):
+    command_id: str
+
+# ***** Twitter / Bluesky 連携 *****
 
 class TwitterAccount(PydanticModel):
     id: int
     name: str
     screen_name: str
+    icon_url: str
+    created_at: datetime
+    updated_at: datetime
+
+class BlueskyAccount(PydanticModel):
+    id: int
+    did: str
+    handle: str
+    name: str
     icon_url: str
     created_at: datetime
     updated_at: datetime
@@ -205,6 +498,29 @@ class ReservationAddRequest(BaseModel):
     program_id: str
     # 録画設定
     record_settings: RecordSettings
+    # DB に番組が存在しない場合に使う補助番組情報
+    program: ReservationAddProgram | None = None
+
+# 録画予約追加時に補助入力として渡す番組情報
+## DB に未反映で EIT[p/f] にのみ番組情報が存在する番組を予約できるようにするため、
+## EDCB への予約投入に必要な最小項目だけを定義している
+class ReservationAddProgram(BaseModel):
+    # 録画予約を追加する番組の ID (NID32736-SID1024-EID65535 の形式)
+    id: str
+    # 録画予約を追加する番組のチャンネル ID
+    channel_id: str
+    # ネットワーク ID (ONID)
+    network_id: int
+    # サービス ID (SID)
+    service_id: int
+    # イベント ID (EID)
+    event_id: int
+    # 番組名
+    title: str
+    # 番組開始時刻
+    start_time: datetime
+    # 番組の長さ (秒)
+    duration: float
 
 # 録画予約を変更する
 class ReservationUpdateRequest(BaseModel):
@@ -226,6 +542,11 @@ class ReservationConditionUpdateRequest(BaseModel):
     # 録画設定
     record_settings: RecordSettings
 
+# ***** メンテナンス *****
+
+class ManualScanRequest(BaseModel):
+    path: str
+
 # ***** ユーザー *****
 
 class UserCreateRequest(BaseModel):
@@ -239,14 +560,49 @@ class UserUpdateRequest(BaseModel):
 class UserUpdateRequestForAdmin(BaseModel):
     is_admin: bool | None = None
 
+class AccountLinkCreateRequest(BaseModel):
+    twitter_account_id: int
+    bluesky_account_id: int
+
 # ***** Twitter 連携 *****
 
 class TwitterCookieAuthRequest(BaseModel):
     cookies_txt: str
+    browser_info: BrowserEnvironmentInfoRequest | None = None
 
-class TwitterPasswordAuthRequest(BaseModel):
-    screen_name: str
-    password: str
+class BrowserEnvironmentInfoRequest(BaseModel):
+    user_agent_data: BrowserEnvironmentUserAgentData
+    navigator_platform: str
+    locale: str
+    timezone: str
+
+class BrowserEnvironmentInfo(TypedDict):
+    http_headers: BrowserEnvironmentHTTPHeaders  # /api/twitter/auth の HTTP リクエストヘッダーから抽出した情報
+    user_agent_data: BrowserEnvironmentUserAgentData
+    navigator_platform: str
+    locale: str
+    timezone: str
+
+class BrowserEnvironmentHTTPHeaders(TypedDict):
+    user_agent: str | None
+    accept_language: str | None
+    accept_languages: list[str]
+    sec_ch_ua: str | None
+    sec_ch_ua_mobile: str | None
+    sec_ch_ua_platform: str | None
+
+class BrowserEnvironmentUserAgentData(TypedDict):
+    platform: str
+    platform_version: str
+    architecture: str
+    bitness: str
+    mobile: bool
+    model: str
+    wow64: bool
+
+class BlueskyAuthRequest(BaseModel):
+    handle: str
+    app_password: str
 
 # モデルに関連しない API レスポンスの構造を表す Pydantic モデル
 ## レスポンスボディの JSON 構造と一致する
@@ -292,6 +648,9 @@ class Reservation(BaseModel):
     # 録画予定のファイル名
     ## EDCB からのレスポンスでは配列になっているが、大半の場合は 1 つしか入っていないため単一の値としている
     scheduled_recording_file_name: str
+    # 想定録画ファイルサイズ (バイト)
+    ## EDCB の Bitrate.ini から取得したビットレート情報を基に算出した推定値
+    estimated_recording_file_size: int
     # 録画設定
     record_settings: RecordSettings
 
@@ -355,12 +714,14 @@ class ProgramSearchCondition(BaseModel):
     duration_range_max: Annotated[int, Field(ge=0)] | None = None
     # 番組の放送種別で絞り込む: すべて / 無料のみ / 有料のみ
     broadcast_type: Literal['All', 'FreeOnly', 'PaidOnly'] = 'All'
-    # 同じ番組名の既存録画との重複チェック: 何もしない / 同じチャンネルのみ対象にする / 全てのチャンネルを対象にする
+    # キーワード自動予約で、同じ番組名の既存録画がある予約を無効化するかどうか
+    ## EDCB の番組検索ではこの値は参照されず、自動予約登録時のみ使われる
+    ## None: 何もしない / SameChannelOnly: 同じチャンネルのみ対象 / AllChannels: 全てのチャンネルを対象
     ## 同じチャンネルのみ対象にする: 同じチャンネルで同名の番組が既に録画されていれば、新しい予約を無効状態で登録する
     ## 全てのチャンネルを対象にする: 任意のチャンネルで同名の番組が既に録画されていれば、新しい予約を無効状態で登録する
     ## 仕様上予約自体を削除してしまうとすぐ再登録されてしまうので、無効状態で登録することで有効になるのを防いでいるらしい
     duplicate_title_check_scope: Literal['None', 'SameChannelOnly', 'AllChannels'] = 'None'
-    # 同じ番組名の既存録画との重複チェックの対象期間 (日単位)
+    # キーワード自動予約で既存録画を探す対象期間 (日単位)
     duplicate_title_check_period_days: Annotated[int, Field(ge=0)] = 6
 
 # 番組検索条件のチャンネル
@@ -449,6 +810,36 @@ class RecordingFolder(BaseModel):
     # ワンセグ放送を別ファイルに同時録画する場合の録画フォルダかどうか
     is_oneseg_separate_recording_folder: bool = False
 
+# 録画設定プリセット一覧
+class RecordSettingsPresets(BaseModel):
+    # グローバルデフォルト値
+    global_defaults: RecordSettingsGlobalDefaults
+    # プリセット一覧 (ID=0 のデフォルトプリセットを含む)
+    presets: list[RecordSettingsPreset]
+
+# 録画設定プリセット
+class RecordSettingsPreset(BaseModel):
+    # プリセット ID (0 がデフォルトプリセット)
+    id: int
+    # プリセット名
+    name: str
+    # このプリセットの録画設定
+    record_settings: RecordSettings
+
+# 録画設定のグローバルデフォルト値
+## EpgTimerSrv.ini の [SET] セクションから取得した、各設定の「デフォルト設定を使う」選択時に適用される実際の値
+class RecordSettingsGlobalDefaults(BaseModel):
+    # グローバルデフォルトの録画開始マージン (秒)
+    recording_start_margin: int
+    # グローバルデフォルトの録画終了マージン (秒)
+    recording_end_margin: int
+    # 字幕データ録画のグローバルデフォルト
+    caption_recording_mode: Literal['Enable', 'Disable']
+    # データ放送録画のグローバルデフォルト
+    data_broadcasting_recording_mode: Literal['Enable', 'Disable']
+    # 録画後動作のグローバルデフォルト
+    post_recording_mode: Literal['Nothing', 'Standby', 'StandbyAndReboot', 'Suspend', 'SuspendAndReboot', 'Shutdown']
+
 # ***** データ放送 *****
 
 class DataBroadcastingInternetStatus(BaseModel):
@@ -486,9 +877,22 @@ class JikkyoComments(BaseModel):
 class ThirdpartyAuthURL(BaseModel):
     authorization_url: str
 
+# ***** Bangumi 連携 *****
+
+class BangumiAuthRequest(BaseModel):
+    access_token: Annotated[str, Field(min_length=1, max_length=512)]
+
+class BangumiPlaybackProgressRequest(BaseModel):
+    playback_position: Annotated[float, Field(ge=0)]
+    duration: Annotated[float, Field(gt=0)]
+
+class BangumiPlaybackProgressResponse(BaseModel):
+    status: Literal['Completed', 'AlreadyCompleted', 'Pending', 'NotEligible']
+
 # ***** Twitter 連携 *****
 
 class Tweet(BaseModel):
+    source: Literal['Twitter', 'Bluesky']
     id: str
     created_at: datetime
     user: TweetUser
@@ -501,10 +905,11 @@ class Tweet(BaseModel):
     retweeted: bool
     favorite_count: int
     favorited: bool
-    retweeted_tweet: Union['Tweet', None]
-    quoted_tweet: Union['Tweet', None]
+    retweeted_tweet: Tweet | None
+    quoted_tweet: Tweet | None
 
 class TweetUser(BaseModel):
+    source: Literal['Twitter', 'Bluesky']
     id: str
     name: str
     screen_name: str
@@ -516,23 +921,28 @@ class TwitterAPIResult(BaseModel):
 
 class PostTweetResult(TwitterAPIResult):
     tweet_url: str
+    tweet_id: str | None = None
+    post_uri: str | None = None
+    post_cid: str | None = None
+
+class TimelineLoadMoreCursor(BaseModel):
+    cursor_type: Literal['Older', 'Gap', 'ShowMore']
+    cursor_id: str
+    entry_id: str | None
+    upper_created_at: datetime | None
+    lower_created_at: datetime | None
 
 class TimelineTweetsResult(TwitterAPIResult):
-    next_cursor_id: str
-    previous_cursor_id: str
     tweets: list[Tweet]
-
-class TwitterChallengeData(TwitterAPIResult):
-    endpoint_infos: dict[str, TwitterGraphQLAPIEndpointInfo]
-    verification_code: str
-    challenge_js_code: str
-    challenge_animation_svg_codes: list[str]
+    newer_cursor_id: str | None
+    load_more_cursors: list[TimelineLoadMoreCursor]
+    is_cursor_consumed: bool
 
 class TwitterGraphQLAPIEndpointInfo(BaseModel):
     method: Literal['GET', 'POST']
     query_id: str
     endpoint: str
-    features: dict[str, Any] | None
+    features: dict[str, bool] | None
 
     @computed_field
     @property
@@ -551,5 +961,5 @@ class VersionInformation(BaseModel):
     version: str
     latest_version: str | None
     environment: Literal['Windows', 'Linux', 'Linux-Docker', 'Linux-ARM']
-    backend: Literal['EDCB', 'Mirakurun']
+    backend: Literal['EDCB', 'Mirakurun', 'EPGStation']
     encoder: Literal['FFmpeg', 'QSVEncC', 'NVEncC', 'VCEEncC', 'rkmppenc']

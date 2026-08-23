@@ -3,33 +3,30 @@
 # ref: https://stackoverflow.com/a/33533514/17124142
 from __future__ import annotations
 
-import ariblib.constants
 import asyncio
 import concurrent.futures
 import gc
-import httpx
 import json
 import time
-import traceback
-from datetime import datetime
-from datetime import timedelta
-from tortoise import connections
-from tortoise import exceptions
-from tortoise import fields
-from tortoise import Tortoise
-from tortoise import transactions
+from datetime import datetime, timedelta
+from typing import Any, cast
+
+import ariblib.constants
+import httpx
+from tortoise import Tortoise, connections, exceptions, fields, transactions
 from tortoise.fields import Field as TortoiseField
 from tortoise.models import Model as TortoiseModel
-from typing import Any, cast
-from zoneinfo import ZoneInfo
 
 from app import logging
-from app.config import Config
-from app.config import LoadConfig
-from app.constants import DATABASE_CONFIG, HTTPX_CLIENT
+from app.config import Config, LoadConfig
+from app.constants import DATABASE_CONFIG, HTTPX_CLIENT, JST
 from app.models.Channel import Channel
 from app.schemas import Genre
-from app.utils import GetMirakurunAPIEndpointURL
+from app.utils import (
+    GetBackendForChannelAndProgram,
+    GetMirakurunAPIEndpointURL,
+    ShutdownProcessPoolExecutor,
+)
 from app.utils.edcb.CtrlCmdUtil import CtrlCmdUtil
 from app.utils.edcb.EDCBUtil import EDCBUtil
 from app.utils.TSInformation import TSInformation
@@ -41,7 +38,6 @@ class Program(TortoiseModel):
     class Meta(TortoiseModel.Meta):
         table: str = 'programs'
 
-    # テーブル設計は Notion を参照のこと
     id = fields.CharField(255, pk=True)
     channel: fields.ForeignKeyRelation[Channel] = \
         fields.ForeignKeyField('models.Channel', related_name='programs', index=True, on_delete=fields.CASCADE)
@@ -87,38 +83,53 @@ class Program(TortoiseModel):
             loop = asyncio.get_running_loop()
 
             # マルチプロセス実行用の Executor を初期化
-            ## with 文で括ることで、with 文を抜けたときに Executor がクリーンアップされるようにする
-            ## さもなければプロセスが残り続けてゾンビプロセス化し、メモリリークを引き起こしてしまう
+            ## ProcessPoolExecutor のコンテキストマネージャーは、キャンセル時にも __exit__() で子プロセスの終了を同期的に待つ
+            ## 番組情報更新中に API リクエストやバックグラウンドタスクがキャンセルされても、イベントループ全体を止めないように明示的に閉じる
+            executor = concurrent.futures.ProcessPoolExecutor(max_workers=1)
+            should_wait_executor = True
             try:
-                with concurrent.futures.ProcessPoolExecutor(max_workers=1) as executor:
+                # Mirakurun / EPGStation バックエンド
+                if GetBackendForChannelAndProgram() == 'Mirakurun':
+                    await loop.run_in_executor(executor, cls.updateFromMirakurunForMultiProcess)
 
-                    # Mirakurun バックエンド
-                    if Config().general.backend == 'Mirakurun':
-                        await loop.run_in_executor(executor, cls.updateFromMirakurunForMultiProcess)
+                # EDCB バックエンド
+                elif GetBackendForChannelAndProgram() == 'EDCB':
+                    await loop.run_in_executor(executor, cls.updateFromEDCBForMultiProcess)
 
-                    # EDCB バックエンド
-                    elif Config().general.backend == 'EDCB':
-                        await loop.run_in_executor(executor, cls.updateFromEDCBForMultiProcess)
+            # タスクキャンセル時は子プロセスの終了を待たず、イベントループを即座に呼び出し元へ返す
+            ## Python 3.11 の ProcessPoolExecutor は実行中の処理を即時終了できないため、子プロセス自体は完了まで残る可能性がある
+            except asyncio.CancelledError:
+                should_wait_executor = False
+                await ShutdownProcessPoolExecutor(executor, is_cancelled=True)
+                raise
 
             # データベースが他のプロセスにロックされていた場合
             # 5秒待ってからリトライ
             except exceptions.OperationalError:
+                # 子プロセス側の処理は例外として戻ってきているため、リトライ前にこの試行の Executor を閉じる
+                ## 閉じる前に再帰呼び出しへ進むと、リトライ中も前回試行のプロセス管理リソースが残る
+                should_wait_executor = False
+                await ShutdownProcessPoolExecutor(executor, is_cancelled=False)
                 await asyncio.sleep(5)
                 await cls.update(multiprocess=multiprocess)
                 return
 
+            finally:
+                if should_wait_executor is True:
+                    await ShutdownProcessPoolExecutor(executor, is_cancelled=False)
+
         # 番組情報をシングルプロセスで更新する
         else:
             try:
-                # Mirakurun バックエンド
-                if Config().general.backend == 'Mirakurun':
+                # Mirakurun / EPGStation バックエンド
+                if GetBackendForChannelAndProgram() == 'Mirakurun':
                     await cls.updateFromMirakurun()
 
                 # EDCB バックエンド
-                elif Config().general.backend == 'EDCB':
+                elif GetBackendForChannelAndProgram() == 'EDCB':
                     await cls.updateFromEDCB()
-            except Exception:
-                traceback.print_exc()
+            except Exception as ex:
+                logging.error('Failed to update programs:', exc_info=ex)
 
         logging.info(f'Programs update complete. ({round(time.time() - timestamp, 3)} sec)')
 
@@ -183,7 +194,7 @@ class Program(TortoiseModel):
             """
 
             # タイムゾーンを UTC+9（日本時間）に指定する
-            return datetime.fromtimestamp(millisecond / 1000, tz=ZoneInfo('Asia/Tokyo'))
+            return datetime.fromtimestamp(millisecond / 1000, tz=JST)
 
         # マルチプロセス時は既存のコネクションが使えないため、Tortoise ORM を初期化し直す
         # ref: https://tortoise-orm.readthedocs.io/en/latest/setup.html
@@ -213,10 +224,10 @@ class Program(TortoiseModel):
                         raise Exception(f'Failed to get programs from Mirakurun / mirakc. (HTTP Error {mirakurun_programs_api_response.status_code})')
                     programs: list[dict[str, Any]] = mirakurun_programs_api_response.json()
                 except httpx.NetworkError as ex:
-                    logging.error(f'Failed to get programs from Mirakurun / mirakc. (Network Error)')
+                    logging.error('Failed to get programs from Mirakurun / mirakc. (Network Error)')
                     raise ex
                 except httpx.TimeoutException as ex:
-                    logging.error(f'Failed to get programs from Mirakurun / mirakc. (Connection Timeout)')
+                    logging.error('Failed to get programs from Mirakurun / mirakc. (Connection Timeout)')
                     raise ex
 
                 # この変数から更新or更新不要な番組情報を削除していき、残った古い番組情報を最後にまとめて削除する
@@ -277,8 +288,8 @@ class Program(TortoiseModel):
                     start_time = MillisecondToDatetime(program_info['startAt'])
                     end_time = MillisecondToDatetime(program_info['startAt'] + program_info['duration'])
 
-                    # 番組終了時刻が現在時刻より1時間以上前な番組を弾く
-                    if datetime.now(ZoneInfo('Asia/Tokyo')) - end_time > timedelta(hours=1):
+                    # 番組終了時刻が現在時刻より12時間以上前な番組を弾く
+                    if datetime.now(JST) - end_time > timedelta(hours=12):
                         continue
 
                     # ***** ここからは 追加・更新・更新不要 のいずれか *****
@@ -375,8 +386,11 @@ class Program(TortoiseModel):
                     program.video_codec = None
                     program.video_resolution = None
                     if 'video' in program_info:
-                        program.video_type = ariblib.constants.COMPONENT_TYPE \
-                            [program_info['video']['streamContent']][program_info['video']['componentType']]
+                        if program_info['video']['streamContent'] is not None:
+                            program.video_type = ariblib.constants.COMPONENT_TYPE \
+                                [program_info['video']['streamContent']].get(program_info['video']['componentType'], 'Unknown')
+                        else:
+                            program.video_type = 'Unknown'
                         program.video_codec = program_info['video']['type']
                         program.video_resolution = program_info['video']['resolution']
 
@@ -392,7 +406,7 @@ class Program(TortoiseModel):
                     if 'audios' in program_info:
 
                         ## 主音声
-                        program.primary_audio_type = ariblib.constants.COMPONENT_TYPE[0x02][program_info['audios'][0]['componentType']]
+                        program.primary_audio_type = ariblib.constants.COMPONENT_TYPE[0x02].get(program_info['audios'][0]['componentType'], 'Unknown')
                         program.primary_audio_language = TSInformation.getISO639LanguageCodeName(program_info['audios'][0]['langs'][0])
                         program.primary_audio_sampling_rate = str(int(program_info['audios'][0]['samplingRate'] / 1000)) + 'kHz'  # kHz に変換
                         ## デュアルモノのみ
@@ -404,7 +418,7 @@ class Program(TortoiseModel):
 
                         ## 副音声（存在する場合）
                         if len(program_info['audios']) == 2:
-                            program.secondary_audio_type = ariblib.constants.COMPONENT_TYPE[0x02][program_info['audios'][1]['componentType']]
+                            program.secondary_audio_type = ariblib.constants.COMPONENT_TYPE[0x02].get(program_info['audios'][1]['componentType'], 'Unknown')
                             program.secondary_audio_language = TSInformation.getISO639LanguageCodeName(program_info['audios'][1]['langs'][0])
                             program.secondary_audio_sampling_rate = str(int(program_info['audios'][1]['samplingRate'] / 1000)) + 'kHz'  # kHz に変換
                             ## デュアルモノのみ
@@ -419,7 +433,7 @@ class Program(TortoiseModel):
 
                         ## 主音声
                         ## 副音声の情報は常に存在しないため省略
-                        program.primary_audio_type = ariblib.constants.COMPONENT_TYPE[0x02][program_info['audio']['componentType']]
+                        program.primary_audio_type = ariblib.constants.COMPONENT_TYPE[0x02].get(program_info['audio']['componentType'], 'Unknown')
                         program.primary_audio_sampling_rate = str(int(program_info['audio']['samplingRate'] / 1000)) + 'kHz'  # kHz に変換
                         ## Mirakurun 3.8 以下では言語コードが取得できないため、日本語で固定する
                         program.primary_audio_language = '日本語'
@@ -429,9 +443,9 @@ class Program(TortoiseModel):
 
                     # 番組情報をデータベースに保存する
                     if duplicate_program is None:
-                        logging.debug_simple(f'Add Program: {program.id}')
+                        logging.debug(f'Add Program: {program.id}')
                     else:
-                        logging.debug_simple(f'Update Program: {program.id}')
+                        logging.debug(f'Update Program: {program.id}')
 
                     ## マルチプロセス実行時は、まれに保存する際にメインプロセスにデータベースがロックされている事がある
                     ## 3秒待ってから再試行し、それでも失敗した場合はスキップ
@@ -447,7 +461,7 @@ class Program(TortoiseModel):
                 # この時点で残存している番組情報は放送が終わって EPG から削除された番組なので、まとめて削除する
                 # ここで削除しないと終了した番組の情報が幽霊のように残り続ける事になり、結果 DB が肥大化して遅くなってしまう
                 for duplicate_program in duplicate_programs.values():
-                    logging.debug_simple(f'Delete Program: {duplicate_program.id}')
+                    logging.debug(f'Delete Program: {duplicate_program.id}')
                     try:
                         await duplicate_program.delete()
                     except exceptions.OperationalError:
@@ -459,8 +473,8 @@ class Program(TortoiseModel):
 
 
         # マルチプロセス実行時は、明示的に例外を拾わないとなぜかメインプロセスも含め全体がフリーズしてしまう
-        except Exception:
-            logging.error(traceback.format_exc())
+        except Exception as ex:
+            logging.error('Failed to update programs from Mirakurun:', exc_info=ex)
 
         # マルチプロセス実行時は、開いた Tortoise ORM のコネクションを明示的に閉じる
         # コネクションを閉じないと Ctrl+C を押下しても終了できない
@@ -572,14 +586,14 @@ class Program(TortoiseModel):
 
                         # 番組開始時刻
                         ## 万が一取得できなかった場合は 1970/1/1 9:00 とする
-                        start_time = event_info.get('start_time', datetime(1970, 1, 1, 9, tzinfo=ZoneInfo('Asia/Tokyo')))
+                        start_time = event_info.get('start_time', datetime(1970, 1, 1, 9, tzinfo=JST))
 
                         # 番組終了時刻
                         ## 終了時間未定の場合、とりあえず5分とする
                         end_time = start_time + timedelta(seconds=event_info.get('duration_sec', 300))
 
-                        # 番組終了時刻が現在時刻より1時間以上前な番組を弾く
-                        if datetime.now(CtrlCmdUtil.TZ) - end_time > timedelta(hours=1):
+                        # 番組終了時刻が現在時刻より12時間以上前な番組を弾く
+                        if datetime.now(CtrlCmdUtil.TZ) - end_time > timedelta(hours=12):
                             continue
 
                         # ***** ここからは 追加・更新・更新不要 のいずれか *****
@@ -686,8 +700,8 @@ class Program(TortoiseModel):
 
                             ## 主音声
                             audio_component_info = audio_info['component_list'][0]
-                            program.primary_audio_type = ariblib.constants.COMPONENT_TYPE[0x02].get(audio_component_info['component_type'], '')
-                            program.primary_audio_sampling_rate = ariblib.constants.SAMPLING_RATE.get(audio_component_info['sampling_rate'], '')
+                            program.primary_audio_type = ariblib.constants.COMPONENT_TYPE[0x02].get(audio_component_info['component_type'], 'Unknown')
+                            program.primary_audio_sampling_rate = ariblib.constants.SAMPLING_RATE.get(audio_component_info['sampling_rate'], 'Unknown')
                             ## 2021/09 現在の EDCB では言語コードが取得できないため、日本語か英語で固定する
                             ## EpgDataCap3 のパーサー止まりで EDCB 側では取得していないらしい
                             program.primary_audio_language = '日本語'
@@ -701,8 +715,8 @@ class Program(TortoiseModel):
                             # 副音声（存在する場合）
                             if len(audio_info['component_list']) > 1:
                                 audio_component_info = audio_info['component_list'][1]
-                                program.secondary_audio_type = ariblib.constants.COMPONENT_TYPE[0x02].get(audio_component_info['component_type'], '')
-                                program.secondary_audio_sampling_rate = ariblib.constants.SAMPLING_RATE.get(audio_component_info['sampling_rate'], '')
+                                program.secondary_audio_type = ariblib.constants.COMPONENT_TYPE[0x02].get(audio_component_info['component_type'], 'Unknown')
+                                program.secondary_audio_sampling_rate = ariblib.constants.SAMPLING_RATE.get(audio_component_info['sampling_rate'], 'Unknown')
                                 ## 2021/09 現在の EDCB では言語コードが取得できないため、副音声で固定する
                                 ## 英語かもしれないし解説かもしれない
                                 program.secondary_audio_language = '副音声'
@@ -715,9 +729,9 @@ class Program(TortoiseModel):
 
                         # 番組情報をデータベースに保存する
                         if duplicate_program is None:
-                            logging.debug_simple(f'Add Program: {program.id}')
+                            logging.debug(f'Add Program: {program.id}')
                         else:
-                            logging.debug_simple(f'Update Program: {program.id}')
+                            logging.debug(f'Update Program: {program.id}')
 
                         ## マルチプロセス実行時は、まれに保存する際にメインプロセスにデータベースがロックされている事がある
                         ## 3秒待ってから再試行し、それでも失敗した場合はスキップ
@@ -733,7 +747,7 @@ class Program(TortoiseModel):
                 # この時点で残存している番組情報は放送が終わって EPG から削除された番組なので、まとめて削除する
                 # ここで削除しないと終了した番組の情報が幽霊のように残り続ける事になり、結果 DB が肥大化して遅くなってしまう
                 for duplicate_program in duplicate_programs.values():
-                    logging.debug_simple(f'Delete Program: {duplicate_program.id}')
+                    logging.debug(f'Delete Program: {duplicate_program.id}')
                     try:
                         await duplicate_program.delete()
                     except exceptions.OperationalError:
@@ -744,8 +758,8 @@ class Program(TortoiseModel):
                             pass
 
         # マルチプロセス実行時は、明示的に例外を拾わないとなぜかメインプロセスも含め全体がフリーズしてしまう
-        except Exception:
-            logging.error(traceback.format_exc())
+        except Exception as ex:
+            logging.error('Failed to update programs from EDCB:', exc_info=ex)
 
         # マルチプロセス実行時は、開いた Tortoise ORM のコネクションを明示的に閉じる
         # コネクションを閉じないと Ctrl+C を押下しても終了できない

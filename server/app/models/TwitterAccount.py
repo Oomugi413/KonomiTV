@@ -3,19 +3,25 @@
 # ref: https://stackoverflow.com/a/33533514/17124142
 from __future__ import annotations
 
-import asyncio
 import json
-import time
-import tweepy
-from requests.cookies import RequestsCookieJar
+from typing import TYPE_CHECKING, cast
+
+from cryptography.fernet import InvalidToken
+from fastapi import HTTPException, status
 from tortoise import fields
+from tortoise.fields import Field as TortoiseField
 from tortoise.models import Model as TortoiseModel
-from tweepy_authlib import CookieSessionUserHandler
-from typing import TYPE_CHECKING
 
 from app import logging
+from app.constants import (
+    TWITTER_ACCOUNT_COOKIE_ENCRYPTION_PREFIX,
+    TWITTER_ACCOUNT_COOKIE_FERNET,
+)
+from app.schemas import BrowserEnvironmentInfo
+
 
 if TYPE_CHECKING:
+    from app.models.AccountLink import AccountLink
     from app.models.User import User
 
 
@@ -25,8 +31,9 @@ class TwitterAccount(TortoiseModel):
     class Meta(TortoiseModel.Meta):
         table: str = 'twitter_accounts'
 
-    # テーブル設計は Notion を参照のこと
     id = fields.IntField(pk=True)
+    # KonomiTV のユーザーアカウントと Twitter アカウントを紐づける
+    # ユーザー削除時は認証情報を同時に削除すべきなので cascade を指定
     user: fields.ForeignKeyRelation[User] = \
         fields.ForeignKeyField('models.User', related_name='twitter_accounts', on_delete=fields.CASCADE)
     user_id: int
@@ -35,89 +42,59 @@ class TwitterAccount(TortoiseModel):
     icon_url = fields.TextField()
     access_token = fields.TextField()
     access_token_secret = fields.TextField()
+    # Cookie インポート元ブラウザの HTTP ヘッダー / UA-CH / ロケール情報
+    # Cookie と異なり認証情報ではないため、検索性と保守性を優先して JSON のまま保存する
+    cookie_browser_info = cast(TortoiseField[BrowserEnvironmentInfo | None],
+        fields.JSONField(default=None, encoder=lambda x: json.dumps(x, ensure_ascii=False), null=True))  # type: ignore
+    # Bluesky アカウントとの紐付け情報
+    # 未紐付けの場合は空の ReverseRelation として扱われる
+    account_link: fields.ReverseRelation[AccountLink]
     created_at = fields.DatetimeField(auto_now_add=True)
     updated_at = fields.DatetimeField(auto_now=True)
 
 
-    @classmethod
-    async def updateAccountsInformation(cls):
-        """ 登録されているすべての Twitter アカウントの情報を更新する """
-
-        timestamp = time.time()
-        logging.info('Twitter accounts updating...')
-
-        for twitter_account in await TwitterAccount.all():
-
-            # アイコン URL が Temporary になってる仮のアカウント情報が何らかの理由で残っていたら、ここで削除する
-            if twitter_account.icon_url == 'Temporary':
-                await twitter_account.delete()
-                continue
-
-            # tweepy の API インスタンスを取得
-            api = twitter_account.getTweepyAPI()
-
-            # アカウント情報を更新
-            try:
-                verify_credentials = await asyncio.to_thread(api.verify_credentials)
-            except tweepy.TweepyException:
-                continue
-            # アカウント名
-            twitter_account.name = verify_credentials.name
-            # スクリーンネーム
-            twitter_account.screen_name = verify_credentials.screen_name
-            # アイコン URL
-            ## (ランダムな文字列)_normal.jpg だと画像サイズが小さいので、(ランダムな文字列).jpg に置換
-            twitter_account.icon_url = verify_credentials.profile_image_url_https.replace('_normal', '')
-
-            # 更新したアカウント情報を保存
-            await twitter_account.save()
-
-        logging.info(f'Twitter accounts update complete. ({round(time.time() - timestamp, 3)} sec)')
-
-        # せっかくなので Twitter GraphQL API のエンドポイント情報もここで更新する
-        from app.utils.TwitterGraphQLAPI import TwitterGraphQLAPI
-        await TwitterGraphQLAPI.updateEndpointInfos()
-
-
-    def getTweepyAuthHandler(self) -> CookieSessionUserHandler:
+    def encryptAccessTokenSecret(self, plain_text: str) -> str:
         """
-        tweepy の認証ハンドラーを取得する
+        Netscape 形式の Cookie データを暗号化する
 
         Returns:
-            CookieSessionUserHandler: tweepy の認証ハンドラー (Cookie セッション)
+            str: 暗号化済みのテキスト
         """
 
-        # Cookie ログイン or パスワードログイン の場合
-        ## Cookie ログインの場合は access_token フィールドが "DIRECT_COOKIE_SESSION" の固定値になっている
-        ## パスワードログインの場合は access_token フィールドが "COOKIE_SESSION" の固定値になっている
-        if self.access_token in ['DIRECT_COOKIE_SESSION', 'COOKIE_SESSION']:
+        # 空文字は暗号化不要なのでそのまま返し、無駄な処理を避ける
+        if plain_text == '':
+            return ''
 
-            # access_token_secret から Cookie を取得
-            cookies_dict: dict[str, str] = json.loads(self.access_token_secret)
-
-            # RequestCookieJar オブジェクトに変換
-            cookies = RequestsCookieJar()
-            for key, value in cookies_dict.items():
-                cookies.set(key, value)
-
-            # 読み込んだ RequestCookieJar オブジェクトを CookieSessionUserHandler に渡す
-            ## Cookie を指定する際はコンストラクタ内部で API リクエストは行われないため、ログイン時のように await する必要性はない
-            auth_handler = CookieSessionUserHandler(cookies=cookies)
-
-        # OAuth 認証 (廃止) の場合
-        else:
-            assert False, 'OAuth session is no longer available.'
-
-        return auth_handler
+        # Fernet で暗号化し、接頭辞を付けて暗号化済みであることを明示する
+        encrypted_text = TWITTER_ACCOUNT_COOKIE_FERNET.encrypt(plain_text.encode('utf-8')).decode('utf-8')
+        return f'{TWITTER_ACCOUNT_COOKIE_ENCRYPTION_PREFIX}{encrypted_text}'
 
 
-    def getTweepyAPI(self) -> tweepy.API:
+    def decryptAccessTokenSecret(self) -> str:
         """
-        tweepy の API インスタンスを取得する
+        データベースに保存されている Cookie データを復号する
 
         Returns:
-            tweepy.API: tweepy の API インスタンス
+            str: 復号済みのテキスト
         """
 
-        # auth_handler で初期化した tweepy.API インスタンスを返す
-        return tweepy.API(auth=self.getTweepyAuthHandler())
+        # 暗号化された Cookie の接頭辞がない場合はそのまま返す
+        encrypted_text = self.access_token_secret or ''
+        if encrypted_text == '':
+            return ''
+        # 接頭辞が無い (= 従来形式) 場合は平文として扱う
+        if encrypted_text.startswith(TWITTER_ACCOUNT_COOKIE_ENCRYPTION_PREFIX) is False:
+            return encrypted_text
+
+        # 暗号化された Cookie の接頭辞を除去して復号する
+        token = encrypted_text[len(TWITTER_ACCOUNT_COOKIE_ENCRYPTION_PREFIX):].encode('utf-8')
+        try:
+            decrypted_text = TWITTER_ACCOUNT_COOKIE_FERNET.decrypt(token).decode('utf-8')
+        except InvalidToken as ex:
+            logging.error('[TwitterAccount][decryptAccessTokenSecret] Failed to decrypt cookie:', exc_info=ex)
+            raise HTTPException(
+                status_code = status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail = 'Failed to decrypt Twitter cookies. Please re-link your Twitter account.',
+            ) from ex
+
+        return decrypted_text

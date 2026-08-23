@@ -7,11 +7,11 @@
                 <SPHeaderBar />
                 <div class="channels-tab">
                     <div class="channels-tab__buttons" :style="{
-                        '--tab-length': Array.from(channelsStore.channels_list_with_pinned).length,
+                        '--tab-length': Array.from(home_channels_list_with_pinned).length,
                         '--active-tab-index': active_tab_index,
                     }">
                         <v-btn variant="flat" class="channels-tab__button"
-                            v-for="([channels_type,], index) in Array.from(channelsStore.channels_list_with_pinned)" :key="channels_type"
+                            v-for="([channels_type,], index) in Array.from(home_channels_list_with_pinned)" :key="channels_type"
                             @click="active_tab_index = index">
                             {{channels_type}}
                         </v-btn>
@@ -22,24 +22,30 @@
                     :observer="true" :observe-parents="true"
                     @swiper="swiper_instance = $event"
                     @slide-change="active_tab_index = $event.activeIndex"
-                    v-show="Array.from(channelsStore.channels_list_with_pinned).length > 0">
-                    <SwiperSlide v-for="[channels_type, channels] in Array.from(channelsStore.channels_list_with_pinned)" :key="channels_type">
+                    @slide-change-transition-end="onSlideChangeTransitionEnd"
+                    v-show="Array.from(home_channels_list_with_pinned).length > 0">
+                    <SwiperSlide v-for="[channels_type, channels] in Array.from(home_channels_list_with_pinned)" :key="channels_type">
                         <div class="channels" :class="`channels--tab-${channels_type} channels--length-${channels.length}`">
                             <router-link v-ripple class="channel" draggable="false"
-                                v-for="channel in channels" :key="channel.id" :to="`/tv/watch/${channel.display_channel_id}`">
+                                v-for="home_channel in channels" :key="home_channel.key"
+                                :to="`/tv/watch/${home_channel.representative.display_channel_id}`">
                                 <!-- 以下では Icon コンポーネントを使うとチャンネルが多いときに高負荷になるため、意図的に SVG を直書きしている -->
                                 <div class="channel__broadcaster">
-                                    <img class="channel__broadcaster-icon" :src="`${Utils.api_base_url}/channels/${channel.id}/logo`">
+                                     <div class="channel__broadcaster-icon">
+                                        <div class="ch-sprite" :chid="home_channel.representative.id">
+                                            <img loading="lazy" :src="`${Utils.api_base_url}/channels/${home_channel.representative.id}/logo`">
+                                        </div>
+                                    </div>
                                     <div class="channel__broadcaster-content">
-                                        <span class="channel__broadcaster-name">Ch: {{channel.channel_number}} {{channel.name}}</span>
+                                        <span class="channel__broadcaster-name">{{getHomeChannelDisplayName(home_channel)}}</span>
                                         <div class="channel__broadcaster-status">
                                             <div class="channel__broadcaster-status-force"
-                                                :class="`channel__broadcaster-status-force--${ChannelUtils.getChannelForceType(channel.jikkyo_force)}`">
+                                                :class="`channel__broadcaster-status-force--${ChannelUtils.getChannelForceType(home_channel.jikkyo_force)}`">
                                                 <svg class="iconify iconify--fa-solid" width="10.5px" height="12px" viewBox="0 0 448 512">
                                                     <path fill="currentColor" d="M323.56 51.2c-20.8 19.3-39.58 39.59-56.22 59.97C240.08 73.62 206.28 35.53 168 0C69.74 91.17 0 209.96 0 281.6C0 408.85 100.29 512 224 512s224-103.15 224-230.4c0-53.27-51.98-163.14-124.44-230.4zm-19.47 340.65C282.43 407.01 255.72 416 226.86 416C154.71 416 96 368.26 96 290.75c0-38.61 24.31-72.63 72.79-130.75c6.93 7.98 98.83 125.34 98.83 125.34l58.63-66.88c4.14 6.85 7.91 13.55 11.27 19.97c27.35 52.19 15.81 118.97-33.43 153.42z"></path>
                                                 </svg>
                                                 <span class="ml-1">勢い:</span>
-                                                <span class="ml-1">{{channel.jikkyo_force ?? '--'}}</span>
+                                                <span class="ml-1">{{home_channel.jikkyo_force ?? '--'}}</span>
                                                 <span style="margin-left: 3px;"> コメ/分</span>
                                             </div>
                                             <div class="channel__broadcaster-status-viewers ml-4">
@@ -47,28 +53,43 @@
                                                     <path fill="currentColor" d="M572.52 241.4C518.29 135.59 410.93 64 288 64S57.68 135.64 3.48 241.41a32.35 32.35 0 0 0 0 29.19C57.71 376.41 165.07 448 288 448s230.32-71.64 284.52-177.41a32.35 32.35 0 0 0 0-29.19zM288 400a144 144 0 1 1 144-144a143.93 143.93 0 0 1-144 144zm0-240a95.31 95.31 0 0 0-25.31 3.79a47.85 47.85 0 0 1-66.9 66.9A95.78 95.78 0 1 0 288 160z"></path>
                                                 </svg>
                                                 <span class="ml-1">視聴数:</span>
-                                                <span class="ml-1">{{channel.viewer_count}}</span>
+                                                <span class="ml-1">{{home_channel.viewer_count}}</span>
                                             </div>
                                         </div>
                                     </div>
-                                    <div v-ripple class="channel__broadcaster-pin"
-                                        v-ftooltip="isPinnedChannel(channel) ? 'ピン留めを外す' : 'ピン留めする'"
-                                        :class="{'channel__broadcaster-pin--pinned': isPinnedChannel(channel)}"
-                                        @click.prevent.stop="isPinnedChannel(channel) ? removePinnedChannel(channel) : addPinnedChannel(channel)"
-                                        @mousedown.prevent.stop=""> <!-- ← 親要素の波紋が広がらないように -->
-                                        <svg class="iconify iconify--fluent" width="24px" height="24px" viewBox="0 0 20 20">
-                                            <path fill="currentColor" d="M13.325 2.617a2 2 0 0 0-3.203.52l-1.73 3.459a1.5 1.5 0 0 1-.784.721l-3.59 1.436a1 1 0 0 0-.335 1.636L6.293 13L3 16.292V17h.707L7 13.706l2.61 2.61a1 1 0 0 0 1.636-.335l1.436-3.59a1.5 1.5 0 0 1 .722-.784l3.458-1.73a2 2 0 0 0 .52-3.203l-4.057-4.057Z"></path>
-                                        </svg>
+                                    <div class="channel__broadcaster-actions">
+                                        <div class="channel__merged-channel-links"
+                                            v-if="getHomeChannelAlternateChannels(home_channel).length > 0">
+                                            <div v-ripple class="channel__merged-channel-link"
+                                                v-for="merged_channel in getHomeChannelAlternateChannels(home_channel)"
+                                                :key="merged_channel.id"
+                                                v-ftooltip.bottom="`Ch: ${merged_channel.channel_number} ${merged_channel.name} を開く`"
+                                                @click.prevent.stop="$router.push(`/tv/watch/${merged_channel.display_channel_id}`)"
+                                                @mousedown.prevent.stop=""> <!-- ← 親要素の波紋が広がらないように -->
+                                                <div class="ch-sprite" :chid="merged_channel.id">
+                                                    <img loading="lazy" :src="`${Utils.api_base_url}/channels/${merged_channel.id}/logo`">
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div v-ripple class="channel__broadcaster-pin"
+                                            v-ftooltip="isPinnedHomeChannel(home_channel) ? 'ピン留めを外す' : 'ピン留めする'"
+                                            :class="{'channel__broadcaster-pin--pinned': isPinnedHomeChannel(home_channel)}"
+                                            @click.prevent.stop="isPinnedHomeChannel(home_channel) ? removePinnedHomeChannel(home_channel) : addPinnedHomeChannel(home_channel)"
+                                            @mousedown.prevent.stop=""> <!-- ← 親要素の波紋が広がらないように -->
+                                            <svg class="iconify iconify--fluent" width="24px" height="24px" viewBox="0 0 20 20">
+                                                <path fill="currentColor" d="M13.325 2.617a2 2 0 0 0-3.203.52l-1.73 3.459a1.5 1.5 0 0 1-.784.721l-3.59 1.436a1 1 0 0 0-.335 1.636L6.293 13L3 16.292V17h.707L7 13.706l2.61 2.61a1 1 0 0 0 1.636-.335l1.436-3.59a1.5 1.5 0 0 1 .722-.784l3.458-1.73a2 2 0 0 0 .52-3.203l-4.057-4.057Z"></path>
+                                            </svg>
+                                        </div>
                                     </div>
                                 </div>
                                 <div class="channel__program-present">
                                     <div class="channel__program-present-title-wrapper">
                                         <span class="channel__program-present-title"
-                                            v-html="ProgramUtils.decorateProgramInfo(channel.program_present, 'title')"></span>
-                                        <span class="channel__program-present-time">{{ProgramUtils.getProgramTime(channel.program_present)}}</span>
+                                            v-html="ProgramUtils.decorateProgramInfo(home_channel.representative.program_present, 'title')"></span>
+                                        <span class="channel__program-present-time">{{ProgramUtils.getProgramTime(home_channel.representative.program_present)}}</span>
                                     </div>
                                     <span class="channel__program-present-description"
-                                          v-html="ProgramUtils.decorateProgramInfo(channel.program_present, 'description')"></span>
+                                          v-html="ProgramUtils.decorateProgramInfo(home_channel.representative.program_present, 'description')"></span>
                                 </div>
                                 <v-spacer></v-spacer>
                                 <div class="channel__program-following">
@@ -78,13 +99,13 @@
                                             <path fill="currentColor" d="M10.018 5.486a1 1 0 0 1 1.592-.806l5.88 4.311a1.25 1.25 0 0 1 0 2.017l-5.88 4.311a1 1 0 0 1-1.592-.806v-3.16L4.61 15.319a1 1 0 0 1-1.592-.806V5.486A1 1 0 0 1 4.61 4.68l5.408 3.966v-3.16Z"></path>
                                         </svg>
                                         <span class="channel__program-following-title-text"
-                                              v-html="ProgramUtils.decorateProgramInfo(channel.program_following, 'title')"></span>
+                                              v-html="ProgramUtils.decorateProgramInfo(home_channel.representative.program_following, 'title')"></span>
                                     </div>
-                                    <span class="channel__program-following-time">{{ProgramUtils.getProgramTime(channel.program_following)}}</span>
+                                    <span class="channel__program-following-time">{{ProgramUtils.getProgramTime(home_channel.representative.program_following)}}</span>
                                 </div>
                                 <div class="channel__progressbar">
                                     <div class="channel__progressbar-progress"
-                                         :style="`width:${ProgramUtils.getProgramProgress(channel.program_present)}%;`"></div>
+                                         :style="`width:${ProgramUtils.getProgramProgress(home_channel.representative.program_present)}%;`"></div>
                                 </div>
                             </router-link>
                             <div class="pinned-container d-flex justify-center align-center w-100"
@@ -99,7 +120,7 @@
                     </SwiperSlide>
                 </Swiper>
                 <div class="channels-list pinned-container d-flex justify-center align-center w-100" style="flex-grow: 1;"
-                    v-if="Array.from(channelsStore.channels_list_with_pinned).length === 0">
+                    v-if="Array.from(home_channels_list_with_pinned).length === 0">
                     <div class="d-flex justify-center align-center flex-column">
                         <h2>視聴可能なチャンネルが<br class="d-sm-none">ありません。</h2>
                         <div class="mt-4 text-text-darken-1">前回チャンネルスキャンしたときに<br class="d-sm-none">受信可能なチャンネルを見つけられませんでした。</div>
@@ -108,7 +129,7 @@
                 </div>
             </div>
         </main>
-        <div v-ripple class="floating-button" @click="Message.warning('番組表は現在開発中です。')">
+        <div v-ripple class="floating-button" @click="$router.push('/timetable/')">
             <div class="floating-button__content">
                 <Icon class="floating-button__icon" icon="fluent:calendar-20-regular" width="26px" />
                 <div class="floating-button__text">番組表</div>
@@ -124,14 +145,24 @@ import { Swiper, SwiperSlide } from 'swiper/vue';
 import 'swiper/css';
 import { defineComponent } from 'vue';
 
+import type { ChannelTypePretty, ILiveChannel } from '@/services/Channels';
+
 import HeaderBar from '@/components/HeaderBar.vue';
 import Navigation from '@/components/Navigation.vue';
 import SPHeaderBar from '@/components/SPHeaderBar.vue';
 import Message from '@/message';
-import { ILiveChannel } from '@/services/Channels';
 import useChannelsStore from '@/stores/ChannelsStore';
+import useServerSettingsStore from '@/stores/ServerSettingsStore';
 import useSettingsStore from '@/stores/SettingsStore';
-import Utils, { ChannelUtils, ProgramUtils } from '@/utils';
+import Utils, { ChannelUtils, ProgramUtils, dayjs } from '@/utils';
+
+interface HomeChannel {
+    key: string;
+    representative: ILiveChannel;
+    channels: ILiveChannel[];
+    jikkyo_force: number | null;
+    viewer_count: number;
+}
 
 export default defineComponent({
     name: 'TV-Home',
@@ -160,6 +191,12 @@ export default defineComponent({
             // スクロールイベントを解除するための AbortController
             scroll_abort_controller: new AbortController(),
 
+            // 各タブのスクロール位置を保存するオブジェクト
+            tab_scroll_positions: {} as Record<number, number>,
+
+            // Swiper のアニメーション中かどうか
+            is_swiper_transitioning: false,
+
             // ローディング中かどうか
             is_loading: true,
 
@@ -170,10 +207,30 @@ export default defineComponent({
         };
     },
     computed: {
-        ...mapStores(useChannelsStore, useSettingsStore),
+        ...mapStores(useChannelsStore, useServerSettingsStore, useSettingsStore),
+
+        // ホーム画面専用に、同じ現在番組を放送している地デジチャンネルを1枚のカードにまとめる
+        // ChannelsStore 側を変更すると視聴画面のサイドバーなどにも影響してしまうため、この画面だけで合成する
+        home_channels_list_with_pinned(): Map<ChannelTypePretty, HomeChannel[]> {
+            const home_channels_list_with_pinned = new Map<ChannelTypePretty, HomeChannel[]>();
+
+            for (const [channels_type, channels] of this.channelsStore.channels_list_with_pinned) {
+                home_channels_list_with_pinned.set(channels_type, this.buildHomeChannels(channels));
+            }
+
+            return home_channels_list_with_pinned;
+        },
     },
     watch: {
-        active_tab_index() {
+        active_tab_index(newIndex: number, oldIndex: number) {
+            // Swiper アニメーション開始
+            this.is_swiper_transitioning = true;
+
+            // 前のタブのスクロール位置を保存
+            if (oldIndex !== undefined) {
+                this.tab_scroll_positions[oldIndex] = window.scrollY;
+            }
+
             // content-visibility: auto の指定の関係でうまく計算されないことがある Swiper の autoHeight を強制的に再計算する
             this.swiper_instance?.updateAutoHeight();
             // 現在なアクティブなタブを Swiper 側に随時反映する
@@ -192,7 +249,7 @@ export default defineComponent({
 
         // 00秒までの残り秒数を取得
         // 現在 16:01:34 なら 26 (秒) になる
-        const residue_second = 60 - new Date().getSeconds();
+        const residue_second = 60 - dayjs().second();
 
         // 00秒になるまで待ってから実行するタイマー
         // 番組は基本1分単位で組まれているため、20秒や45秒など中途半端な秒数で更新してしまうと番組情報の反映が遅れてしまう
@@ -206,12 +263,16 @@ export default defineComponent({
 
         }, residue_second * 1000));
 
-        // チャンネル情報を更新 (初回)
-        await this.channelsStore.update();
+        // サーバー設定とチャンネル情報を更新 (初回)
+        // サーバー設定の優先地域は、同一番組としてまとめた地デジ局の代表チャンネル選択に使う
+        await Promise.all([
+            this.serverSettingsStore.fetchServerSettingsOnce(),
+            this.channelsStore.update(),
+        ]);
 
         // この時点でピン留めされているチャンネルがないなら、タブを地デジタブに切り替える
         // ピン留めされているチャンネル自体はあるが、現在放送されていないため表示できない場合に備える
-        if (this.channelsStore.channels_list_with_pinned.get('ピン留め')?.length === 0) {
+        if (this.home_channels_list_with_pinned.get('ピン留め')?.length === 0) {
             this.active_tab_index = 1;
         }
 
@@ -221,6 +282,11 @@ export default defineComponent({
         // 画面がスクロールされたときに Swiper の autoHeight を再計算する
         window.addEventListener('scroll', () => {
             this.swiper_instance?.updateAutoHeight();
+            // 現在のタブのスクロール位置を常に保存しておく
+            // ただし、Swiper のアニメーション中は更新しない（意図しない位置更新を防ぐため）
+            if (!this.is_swiper_transitioning) {
+                this.tab_scroll_positions[this.active_tab_index] = window.scrollY;
+            }
         }, { passive: true, signal: this.scroll_abort_controller.signal });
 
         // チャンネル情報の更新が終わったタイミングでローディング状態を解除する
@@ -242,8 +308,235 @@ export default defineComponent({
     },
     methods: {
 
-        // チャンネルをピン留めする
-        addPinnedChannel(channel: ILiveChannel) {
+        // Swiper のスライド切り替えアニメーション完了後に新しいタブのスクロール位置を復元
+        onSlideChangeTransitionEnd() {
+            window.scrollTo(0, this.tab_scroll_positions[this.active_tab_index] || 0);
+            this.is_swiper_transitioning = false;
+        },
+
+        // ホーム画面に表示するチャンネルカードのリストを生成する
+        // 同じ現在番組を放送している地デジチャンネルは1つのカードにまとめ、その他は単独カードのまま表示する
+        buildHomeChannels(channels: ILiveChannel[]): HomeChannel[] {
+            const home_channels: HomeChannel[] = [];
+            const merged_home_channels = new Map<string, HomeChannel[]>();
+
+            for (const channel of channels) {
+                const merge_base_key = this.getHomeChannelMergeBaseKey(channel);
+
+                // 結合対象でないチャンネルは、元のチャンネル単位でそのまま1枚のカードにする
+                if (merge_base_key === null) {
+                    home_channels.push(this.createHomeChannel(`channel:${channel.id}`, channel));
+                    continue;
+                }
+
+                const same_time_home_channels = merged_home_channels.get(merge_base_key) ?? [];
+                const merged_home_channel = same_time_home_channels.find((home_channel) => {
+                    return this.canMergeHomeChannel(home_channel, channel);
+                });
+
+                // 既に同じ現在番組のカードが存在する場合は、そのカードへチャンネルを追加する
+                if (merged_home_channel !== undefined) {
+                    this.appendHomeChannel(merged_home_channel, channel);
+                    continue;
+                }
+
+                // 最初に見つかったチャンネルを代表チャンネルとして使う
+                // 既存の並び順を維持することで、実況勢い順ソートやチャンネル番号順ソートの結果を崩さない
+                const home_channel = this.createHomeChannel(`${merge_base_key}\u0000${channel.id}`, channel);
+                same_time_home_channels.push(home_channel);
+                merged_home_channels.set(merge_base_key, same_time_home_channels);
+                home_channels.push(home_channel);
+            }
+
+            return home_channels;
+        },
+
+        // ホーム画面用のチャンネルカードを作成する
+        createHomeChannel(key: string, channel: ILiveChannel): HomeChannel {
+            return {
+                key,
+                representative: channel,
+                channels: [channel],
+                jikkyo_force: channel.jikkyo_force,
+                viewer_count: channel.viewer_count,
+            };
+        },
+
+        // 既存のホーム画面用チャンネルカードに、同一扱いするチャンネルを追加する
+        appendHomeChannel(home_channel: HomeChannel, channel: ILiveChannel) {
+            home_channel.channels.push(channel);
+            home_channel.representative = this.selectHomeChannelRepresentative(home_channel.channels);
+            home_channel.viewer_count += channel.viewer_count;
+
+            // 同一番組の重複チャンネルでは同じ実況勢いが返るケースが多い
+            // 合算すると二重計上に見えてしまうため、表示値は最大値に留める
+            if (channel.jikkyo_force !== null) {
+                home_channel.jikkyo_force = Math.max(home_channel.jikkyo_force ?? 0, channel.jikkyo_force);
+            }
+        },
+
+        // ホーム画面用の代表チャンネルを選択する
+        // 同一番組を放送している系列局をまとめる場合でも、視聴時にはなるべくローカルで受信できる局へ遷移させる
+        selectHomeChannelRepresentative(channels: ILiveChannel[]): ILiveChannel {
+            const preferred_terrestrial_region = this.serverSettingsStore.server_settings.tv.preferred_terrestrial_region;
+
+            // サーバー設定の優先地域が設定されている場合は、その地域を含むチャンネルを最優先にする
+            // Config().tv.preferred_terrestrial_region と同じ意図で、枝番や実況勢い順より受信地域を優先する
+            if (this.serverSettingsStore.is_loaded === true && preferred_terrestrial_region !== null) {
+                const preferred_channel = channels.find((channel) => {
+                    return channel.terrestrial_regions?.some((region) => region === preferred_terrestrial_region) === true;
+                });
+                if (preferred_channel !== undefined) {
+                    return preferred_channel;
+                }
+            }
+
+            // 優先地域が未設定または未取得の場合でも、この画面では関西・大阪の地上波をローカル側として扱う
+            // 東京局が先に並んだ合成カードから東京側へ飛んでしまうと、遠方局を選局することになりやすいため
+            const fallback_preferred_regions = ['大阪府', '滋賀県', '京都府', '兵庫県', '奈良県', '和歌山県'];
+            const fallback_preferred_channel = channels.find((channel) => {
+                return channel.terrestrial_regions?.some((region) => fallback_preferred_regions.includes(region)) === true;
+            });
+            if (fallback_preferred_channel !== undefined) {
+                return fallback_preferred_channel;
+            }
+
+            // どちらにも該当しなければ、従来通り最初に見つかったチャンネルを代表にする
+            return channels[0];
+        },
+
+        // ホーム画面でチャンネルをまとめるための基礎キーを生成する
+        getHomeChannelMergeBaseKey(channel: ILiveChannel): string | null {
+
+            // 地デジ以外は同名番組が並んでいても放送エリア違いの重複ではないため対象外にする
+            if (channel.type !== 'GR') {
+                return null;
+            }
+
+            // 番組情報がない場合は、同一番組か判断できないためまとめない
+            if (channel.program_present === null) {
+                return null;
+            }
+
+            // 独立局間で同時放送される購入番組も合成対象に含めるため、局名から推測した放送系列はキーに含めない
+            // 実際に同じ番組かどうかは、canMergeHomeChannel() で放送時間とタイトルの両方から判定する
+            return 'GR';
+        },
+
+        // 既存のホーム画面用チャンネルカードに、指定チャンネルを同一番組としてまとめられるか
+        canMergeHomeChannel(home_channel: HomeChannel, channel: ILiveChannel): boolean {
+            return home_channel.channels.some((home_channel_member) => {
+                return this.isSameHomeChannelProgramTime(home_channel_member, channel) &&
+                    this.isSameHomeChannelProgramTitle(home_channel_member, channel);
+            });
+        },
+
+        // ホーム画面の合成カード向けに、2つのチャンネルの現在番組が同じ放送時間帯か判定する
+        isSameHomeChannelProgramTime(first_channel: ILiveChannel, second_channel: ILiveChannel): boolean {
+            if (first_channel.program_present === null || second_channel.program_present === null) {
+                return false;
+            }
+
+            const first_start_time = dayjs(first_channel.program_present.start_time).valueOf();
+            const first_end_time = dayjs(first_channel.program_present.end_time).valueOf();
+            const second_start_time = dayjs(second_channel.program_present.start_time).valueOf();
+            const second_end_time = dayjs(second_channel.program_present.end_time).valueOf();
+
+            // 局ごとに直前のローカル枠の切り方が異なると、同じ番組でも開始時刻と番組長が数分ずれることがある
+            // そのため時刻の完全一致ではなく、長い方の番組枠に対して80% 以上の時間が重なっているかを判定する
+            const overlap_duration = Math.max(0, Math.min(first_end_time, second_end_time) - Math.max(first_start_time, second_start_time));
+            const longer_duration = Math.max(first_end_time - first_start_time, second_end_time - second_start_time);
+            return longer_duration > 0 && overlap_duration / longer_duration >= 0.8;
+        },
+
+        // ホーム画面の合成カード向けに、2つのチャンネルの現在番組タイトルが同一番組相当か判定する
+        isSameHomeChannelProgramTitle(first_channel: ILiveChannel, second_channel: ILiveChannel): boolean {
+            if (first_channel.program_present === null || second_channel.program_present === null) {
+                return false;
+            }
+
+            const first_title = this.normalizeProgramTitleForHomeChannelMerge(first_channel.program_present.title);
+            const second_title = this.normalizeProgramTitleForHomeChannelMerge(second_channel.program_present.title);
+            if (first_title.length === 0 || second_title.length === 0) {
+                return false;
+            }
+            if (first_title === second_title) {
+                return true;
+            }
+
+            // 局によって「ぽかぽか」と「ぽかぽかーリング最強決定戦...」のように、
+            // 片方だけがサブタイトルを本文側へ展開することがあるため、4文字以上の前方一致は同一番組として扱う
+            const shorter_title_length = Math.min(first_title.length, second_title.length);
+            if (shorter_title_length >= 4 &&
+                (first_title.startsWith(second_title) || second_title.startsWith(first_title))) {
+                return true;
+            }
+
+            // 表記揺れや局ごとの追加文字が少数に留まる場合は、編集距離に基づく一致率が80% 以上なら同一番組として扱う
+            return this.calculateHomeChannelProgramTitleSimilarity(first_title, second_title) >= 0.8;
+        },
+
+        // ホーム画面の同一番組判定向けに番組タイトルを正規化する
+        // 放送局ごとの EPG で番組フラグやサブタイトルだけが揺れるケースがあるため、同じ番組枠と見なせる主タイトルに寄せる
+        normalizeProgramTitleForHomeChannelMerge(title: string): string {
+            let normalized_title = title.normalize('NFKC');
+
+            // サブタイトルの角括弧まで消すと番組名の意味を失うため、ProgramUtils が定義する ARIB 番組付属情報だけを除去する
+            for (const pattern of ProgramUtils.getEnclosedCharactersRemovalPatterns()) {
+                normalized_title = normalized_title.replace(pattern, '');
+            }
+
+            return normalized_title
+                .replace(/\s+/g, '')
+                .trim();
+        },
+
+        // 2つの正規化済み番組タイトルがどの程度一致するかを算出する
+        calculateHomeChannelProgramTitleSimilarity(first_title: string, second_title: string): number {
+            const first_characters = Array.from(first_title);
+            const second_characters = Array.from(second_title);
+            const longer_title_length = Math.max(first_characters.length, second_characters.length);
+            if (longer_title_length === 0) {
+                return 1;
+            }
+
+            // タイトルは通常数十文字程度のため、直前の1行だけを保持する Levenshtein 距離で十分軽量に比較できる
+            let previous_distances = second_characters.map((_, index) => index + 1);
+            previous_distances.unshift(0);
+
+            for (let first_index = 0; first_index < first_characters.length; first_index++) {
+                const current_distances = [first_index + 1];
+                for (let second_index = 0; second_index < second_characters.length; second_index++) {
+                    const substitution_cost = first_characters[first_index] === second_characters[second_index] ? 0 : 1;
+                    current_distances.push(Math.min(
+                        current_distances[second_index] + 1,
+                        previous_distances[second_index + 1] + 1,
+                        previous_distances[second_index] + substitution_cost,
+                    ));
+                }
+                previous_distances = current_distances;
+            }
+
+            const edit_distance = previous_distances[second_characters.length];
+            return 1 - edit_distance / longer_title_length;
+        },
+
+        // ホーム画面のカードに表示するチャンネル名を取得する
+        getHomeChannelDisplayName(home_channel: HomeChannel): string {
+            const channel = home_channel.representative;
+            return `Ch: ${channel.channel_number} ${channel.name}`;
+        },
+
+        // ホーム画面の合成カード内に表示する、代表チャンネル以外のチャンネルを取得する
+        getHomeChannelAlternateChannels(home_channel: HomeChannel): ILiveChannel[] {
+            return home_channel.channels.filter((channel) => channel.id !== home_channel.representative.id);
+        },
+
+        // ホーム画面のチャンネルカードをピン留めする
+        addPinnedHomeChannel(home_channel: HomeChannel) {
+            const channel = this.isPinnedChannel(home_channel.representative) === false
+                ? home_channel.representative
+                : home_channel.channels.find((candidate) => !this.isPinnedChannel(candidate)) ?? home_channel.representative;
 
             // ピン留めするチャンネルの ID リストに追加 (保存は自動で行われる)
             // UI に変更を反映するため、意図的に指定チャンネルの ID が追加された配列を新しく作り再代入している
@@ -253,20 +546,28 @@ export default defineComponent({
             Message.show(`${channel.name}をピン留めしました。`);
         },
 
-        // チャンネルをピン留めから外す
-        removePinnedChannel(channel: ILiveChannel) {
+        // ホーム画面のチャンネルカードをピン留めから外す
+        removePinnedHomeChannel(home_channel: HomeChannel) {
+            const home_channel_ids = new Set(home_channel.channels.map((channel) => channel.id));
 
             // ピン留めするチャンネルの ID リストから削除 (保存は自動で行われる)
-            // UI に変更を反映するため、意図的に指定チャンネルの ID が削除された配列を新しく作り再代入している
-            this.settingsStore.settings.pinned_channel_ids = this.settingsStore.settings.pinned_channel_ids.filter((id) => id !== channel.id);
+            // UI に変更を反映するため、意図的に指定チャンネルカードに含まれる ID が削除された配列を新しく作り再代入している
+            this.settingsStore.settings.pinned_channel_ids = this.settingsStore.settings.pinned_channel_ids.filter((id) => {
+                return !home_channel_ids.has(id);
+            });
 
             // この時点でピン留めされているチャンネルがないなら、タブを地デジタブに切り替える
-            if (this.channelsStore.channels_list_with_pinned.get('ピン留め')?.length === 0) {
+            if (this.home_channels_list_with_pinned.get('ピン留め')?.length === 0) {
                 this.active_tab_index = 1;
             }
 
             // ピン留めを外したチャンネルを通知
-            Message.show(`${channel.name}のピン留めを外しました。`);
+            Message.show(`${this.getHomeChannelDisplayName(home_channel)}のピン留めを外しました。`);
+        },
+
+        // ホーム画面のチャンネルカードがピン留めされているか
+        isPinnedHomeChannel(home_channel: HomeChannel): boolean {
+            return home_channel.channels.some((channel) => this.isPinnedChannel(channel));
         },
 
         // チャンネルがピン留めされているか
@@ -575,6 +876,7 @@ export default defineComponent({
 
                 .channel__broadcaster {
                     display: flex;
+                    position: relative;
                     height: 44px;
                     @include tablet-vertical {
                         height: 40px;
@@ -589,26 +891,29 @@ export default defineComponent({
                     &-icon {
                         display: inline-block;
                         flex-shrink: 0;
-                        width: 80px;
-                        height: 44px;
-                        border-radius: 5px;
+                        --ch-sprite-width: 80;
+                        --ch-sprite-height: 44;
+                        --ch-sprite-border-radius: 5;
+                        width: calc(var(--ch-sprite-width) * 1px);
+                        height: calc(var(--ch-sprite-height) * 1px);
+                        border-radius: calc(var(--ch-sprite-border-radius) * 1px);
                         // 読み込まれるまでのアイコンの背景
                         background: linear-gradient(150deg, rgb(var(--v-theme-gray)), rgb(var(--v-theme-background-lighten-2)));
                         object-fit: cover;
                         @include tablet-vertical {
-                            width: 69px;
-                            height: 40px;
-                            border-radius: 4px;
+                            --ch-sprite-width: 69;
+                            --ch-sprite-height: 40;
+                            --ch-sprite-border-radius: 4;
                         }
                         @include smartphone-horizontal {
-                            width: 54px;
-                            height: 29px;
-                            border-radius: 4px;
+                            --ch-sprite-width: 54;
+                            --ch-sprite-height: 29;
+                            --ch-sprite-border-radius: 4;
                         }
                         @include smartphone-vertical {
-                            width: 69px;
-                            height: 40px;
-                            border-radius: 4px;
+                            --ch-sprite-width: 69;
+                            --ch-sprite-height: 40;
+                            --ch-sprite-border-radius: 4;
                         }
                     }
 
@@ -634,18 +939,22 @@ export default defineComponent({
 
                     &-name {
                         flex-shrink: 0;
+                        padding-right: 104px;
                         font-size: 18px;
                         overflow: hidden;
                         white-space: nowrap;
                         text-overflow: ellipsis;
                         @include tablet-vertical {
+                            padding-right: 92px;
                             font-size: 15.5px;
                         }
                         @include smartphone-horizontal {
+                            padding-right: 72px;
                             font-size: 15px;
                             margin-right: 8px;
                         }
                         @include smartphone-vertical {
+                            padding-right: 92px;
                             font-size: 15.5px;
                         }
                     }
@@ -700,6 +1009,62 @@ export default defineComponent({
                         }
                     }
 
+                    &-actions {
+                        display: flex;
+                        align-items: flex-start;
+                        column-gap: 6px;
+                        position: absolute;
+                        top: 0;
+                        right: -5px;
+                        @include smartphone-horizontal {
+                            column-gap: 4px;
+                            right: -3px;
+                        }
+                    }
+
+                    .channel__merged-channel-links {
+                        display: flex;
+                        flex-shrink: 0;
+                        align-items: center;
+                        column-gap: 4px;
+                    }
+
+                    .channel__merged-channel-link {
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        flex-shrink: 0;
+                        position: relative;
+                        --ch-sprite-width: 54;
+                        --ch-sprite-height: 30;
+                        --ch-sprite-border-radius: 5;
+                        overflow: hidden;
+                        background: linear-gradient(150deg, rgb(var(--v-theme-gray)), rgb(var(--v-theme-background-lighten-2)));
+                        transition: opacity 0.15s ease, transform 0.15s ease;
+                        @include tablet-vertical {
+                            --ch-sprite-width: 48;
+                            --ch-sprite-height: 28;
+                        }
+                        @include smartphone-horizontal {
+                            --ch-sprite-width: 42;
+                            --ch-sprite-height: 23;
+                            --ch-sprite-border-radius: 4;
+                        }
+                        @include smartphone-vertical {
+                            --ch-sprite-width: 48;
+                            --ch-sprite-height: 28;
+                        }
+
+                        width: calc(var(--ch-sprite-width) * 1px);
+                        height: calc(var(--ch-sprite-height) * 1px);
+                        border-radius: calc(var(--ch-sprite-border-radius) * 1px);
+
+                        &:hover {
+                            opacity: 0.86;
+                            transform: translateY(-1px);
+                        }
+                    }
+
                     &-pin {
                         display: flex;
                         align-items: center;
@@ -707,7 +1072,6 @@ export default defineComponent({
                         flex-shrink: 0;
                         position: relative;
                         top: -5px;
-                        right: -5px;
                         width: 34px;
                         height: 34px;
                         padding: 4px;
@@ -797,12 +1161,16 @@ export default defineComponent({
                             font-size: 14px;
                         }
                         @include smartphone-horizontal {
+                            display: block;
                             font-size: 14px;
-                            -webkit-line-clamp: 1;  // 1行までに制限
+                            white-space: nowrap;
+                            text-overflow: ellipsis;
                         }
                         @include smartphone-vertical {
+                            display: block;
                             font-size: 14px;
-                            -webkit-line-clamp: 1;  // 1行までに制限
+                            white-space: nowrap;
+                            text-overflow: ellipsis;
                         }
                     }
 
@@ -1008,7 +1376,8 @@ export default defineComponent({
     justify-content: center;
     align-items: center;
     position: fixed;
-    bottom: 72px;
+    // iPhone X 以降の Home Indicator の高さ分を考慮
+    bottom: calc(72px + env(safe-area-inset-bottom));
     right: 20px;
     padding: 12px 16px;
     background: rgb(var(--v-theme-background-lighten-2));

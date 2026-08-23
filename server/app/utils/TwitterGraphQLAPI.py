@@ -1,166 +1,45 @@
+from __future__ import annotations
 
 import asyncio
-import httpx
 import json
+import random
 import re
 import time
-import traceback
-from bs4 import BeautifulSoup
 from datetime import datetime
-from typing import Any, cast, ClassVar, Literal, TypedDict
-from zoneinfo import ZoneInfo
+from typing import Any, ClassVar, Literal
 
-from app import logging
-from app import schemas
-from app.constants import HTTPX_CLIENT
+from fastapi import UploadFile
+
+from app import logging, schemas
+from app.constants import JST
 from app.models.TwitterAccount import TwitterAccount
-
-
-class _TweetLockInfo(TypedDict):
-    lock: asyncio.Lock
-    last_tweet_time: float
+from app.utils.TwitterScrapeBrowser import (
+    BrowserBinaryNotFoundError,
+    BrowserConnectionFailedError,
+    BrowserSetupTimeoutError,
+    TwitterScrapeBrowser,
+)
 
 
 class TwitterGraphQLAPI:
     """
-    Twitter Web App で利用されている GraphQL API の薄いラッパー
-    外部ライブラリを使うよりすべて自前で書いたほうが柔軟に対応でき凍結リスクを回避できると考え実装した
-    以下に実装されているリクエストペイロードなどはすべて実装時点の Twitter Web App が実際に送信するリクエストを可能な限り模倣したもの
+    Twitter Web App で利用されている GraphQL API のラッパー
+    外部ライブラリを使うよりすべて自前で書いたほうが柔軟に対応でき、凍結リスクを回避できると考えて実装した
+    以下に実装されているリクエストペイロードなどは、すべて実装時点の Twitter Web App が実際に送信するリクエストを可能な限り模倣したもの
     メソッド名は概ね GraphQL API でのエンドポイント名に対応している
+    実際の API リクエストは TwitterScrapeBrowser 経由でヘッドレスブラウザから実行される
     """
-
-    # GraphQL API のエンドポイント定義
-    ## クエリ ID はおそらく API のバージョン (?) を示しているらしい謎の値で、数週間単位で変更されうる (定期的に追従が必要)
-    ## 一方 CreateRetweet など機能の変化が少なく機能フラグも少ない API のクエリ ID はほとんど変更されることがない
-    ## リクエストペイロードのうち "features" 内に入っている機能フラグ (？) も数週間単位で頻繁に変更されうるが、Twitter Web App と
-    ## 完全に一致していないからといって必ずしも動かなくなるわけではなく、クエリ ID 同様にある程度は古い値でも動くようになっているらしい
-    ## 以下のコードはエンドポイントごとに poetry run python -m misc.TwitterAPIQueryGenerator を実行して半自動生成できる
-    ENDPOINT_INFOS: dict[str, schemas.TwitterGraphQLAPIEndpointInfo] = {
-        'CreateTweet': schemas.TwitterGraphQLAPIEndpointInfo(
-            method = 'POST',
-            query_id = 'xT36w0XM3A8jDynpkram2A',
-            endpoint = 'CreateTweet',
-            features = {
-                'communities_web_enable_tweet_community_results_fetch': True,
-                'c9s_tweet_anatomy_moderator_badge_enabled': True,
-                'responsive_web_edit_tweet_api_enabled': True,
-                'graphql_is_translatable_rweb_tweet_is_translatable_enabled': True,
-                'view_counts_everywhere_api_enabled': True,
-                'longform_notetweets_consumption_enabled': True,
-                'responsive_web_twitter_article_tweet_consumption_enabled': True,
-                'tweet_awards_web_tipping_enabled': False,
-                'creator_subscriptions_quote_tweet_preview_enabled': False,
-                'longform_notetweets_rich_text_read_enabled': True,
-                'longform_notetweets_inline_media_enabled': True,
-                'articles_preview_enabled': True,
-                'rweb_video_timestamps_enabled': True,
-                'rweb_tipjar_consumption_enabled': True,
-                'responsive_web_graphql_exclude_directive_enabled': True,
-                'verified_phone_label_enabled': False,
-                'freedom_of_speech_not_reach_fetch_enabled': True,
-                'standardized_nudges_misinfo': True,
-                'tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled': True,
-                'responsive_web_graphql_skip_user_profile_image_extensions_enabled': False,
-                'responsive_web_graphql_timeline_navigation_enabled': True,
-                'responsive_web_enhance_cards_enabled': False,
-            },
-        ),
-        'CreateRetweet': schemas.TwitterGraphQLAPIEndpointInfo(
-            method = 'POST',
-            query_id = 'ojPdsZsimiJrUGLR1sjUtA',
-            endpoint = 'CreateRetweet',
-            features = None,
-        ),
-        'DeleteRetweet': schemas.TwitterGraphQLAPIEndpointInfo(
-            method = 'POST',
-            query_id = 'iQtK4dl5hBmXewYZuEOKVw',
-            endpoint = 'DeleteRetweet',
-            features = None,
-        ),
-        'FavoriteTweet': schemas.TwitterGraphQLAPIEndpointInfo(
-            method = 'POST',
-            query_id = 'lI07N6Otwv1PhnEgXILM7A',
-            endpoint = 'FavoriteTweet',
-            features = None,
-        ),
-        'UnfavoriteTweet': schemas.TwitterGraphQLAPIEndpointInfo(
-            method = 'POST',
-            query_id = 'ZYKSe-w7KEslx3JhSIk5LA',
-            endpoint = 'UnfavoriteTweet',
-            features = None,
-        ),
-        'HomeLatestTimeline': schemas.TwitterGraphQLAPIEndpointInfo(
-            method = 'POST',
-            query_id = 'DiTkXJgLqBBxCs7zaYsbtA',
-            endpoint = 'HomeLatestTimeline',
-            features = {
-                'rweb_tipjar_consumption_enabled': True,
-                'responsive_web_graphql_exclude_directive_enabled': True,
-                'verified_phone_label_enabled': False,
-                'creator_subscriptions_tweet_preview_api_enabled': True,
-                'responsive_web_graphql_timeline_navigation_enabled': True,
-                'responsive_web_graphql_skip_user_profile_image_extensions_enabled': False,
-                'communities_web_enable_tweet_community_results_fetch': True,
-                'c9s_tweet_anatomy_moderator_badge_enabled': True,
-                'articles_preview_enabled': True,
-                'responsive_web_edit_tweet_api_enabled': True,
-                'graphql_is_translatable_rweb_tweet_is_translatable_enabled': True,
-                'view_counts_everywhere_api_enabled': True,
-                'longform_notetweets_consumption_enabled': True,
-                'responsive_web_twitter_article_tweet_consumption_enabled': True,
-                'tweet_awards_web_tipping_enabled': False,
-                'creator_subscriptions_quote_tweet_preview_enabled': False,
-                'freedom_of_speech_not_reach_fetch_enabled': True,
-                'standardized_nudges_misinfo': True,
-                'tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled': True,
-                'rweb_video_timestamps_enabled': True,
-                'longform_notetweets_rich_text_read_enabled': True,
-                'longform_notetweets_inline_media_enabled': True,
-                'responsive_web_enhance_cards_enabled': False,
-            },
-        ),
-        'SearchTimeline': schemas.TwitterGraphQLAPIEndpointInfo(
-            method = 'GET',
-            query_id = 'UN1i3zUiCWa-6r-Uaho4fw',
-            endpoint = 'SearchTimeline',
-            features = {
-                'rweb_tipjar_consumption_enabled': True,
-                'responsive_web_graphql_exclude_directive_enabled': True,
-                'verified_phone_label_enabled': False,
-                'creator_subscriptions_tweet_preview_api_enabled': True,
-                'responsive_web_graphql_timeline_navigation_enabled': True,
-                'responsive_web_graphql_skip_user_profile_image_extensions_enabled': False,
-                'communities_web_enable_tweet_community_results_fetch': True,
-                'c9s_tweet_anatomy_moderator_badge_enabled': True,
-                'articles_preview_enabled': True,
-                'responsive_web_edit_tweet_api_enabled': True,
-                'graphql_is_translatable_rweb_tweet_is_translatable_enabled': True,
-                'view_counts_everywhere_api_enabled': True,
-                'longform_notetweets_consumption_enabled': True,
-                'responsive_web_twitter_article_tweet_consumption_enabled': True,
-                'tweet_awards_web_tipping_enabled': False,
-                'creator_subscriptions_quote_tweet_preview_enabled': False,
-                'freedom_of_speech_not_reach_fetch_enabled': True,
-                'standardized_nudges_misinfo': True,
-                'tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled': True,
-                'rweb_video_timestamps_enabled': True,
-                'longform_notetweets_rich_text_read_enabled': True,
-                'longform_notetweets_inline_media_enabled': True,
-                'responsive_web_enhance_cards_enabled': False,
-            },
-        ),
-    }
 
     # Twitter API のエラーコードとエラーメッセージの対応表
     ## 実際に返ってくる可能性があるものだけ
     ## ref: https://developer.twitter.com/ja/docs/basics/response-codes
-    ERROR_MESSAGES = {
-        32:  'Twitter アカウントの認証に失敗しました。もう一度連携し直してください。',
-        63:  'Twitter アカウントが凍結またはロックされています。',
-        64:  'Twitter アカウントが凍結またはロックされています。',
-        88:  'Twitter API エンドポイントのレート制限を超えました。',
-        89:  'Twitter アクセストークンの有効期限が切れています。',
-        99:  'Twitter OAuth クレデンシャルの認証に失敗しました。',
+    ERROR_MESSAGES: ClassVar[dict[int, str]] = {
+        32: 'Twitter アカウントの認証に失敗しました。もう一度連携し直してください。',
+        63: 'Twitter アカウントが凍結またはロックされています。',
+        64: 'Twitter アカウントが凍結またはロックされています。',
+        88: 'Twitter API エンドポイントのレート制限を超えました。',
+        89: 'Twitter アクセストークンの有効期限が切れています。',
+        99: 'Twitter OAuth クレデンシャルの認証に失敗しました。',
         131: 'Twitter でサーバーエラーが発生しています。',
         135: 'Twitter アカウントの認証に失敗しました。もう一度連携し直してください。',
         139: 'すでにいいねされています。',
@@ -177,370 +56,443 @@ class TwitterGraphQLAPI:
         416: 'Twitter API アプリケーションが無効化されています。',
     }
 
-    # Challenge 情報のキャッシュの有効期限 (秒)
-    CHALLENGE_INFO_CACHE_EXPIRATION_TIME = 60 * 60  # 1 時間
-
-    # アカウントごとに Challenge 情報を 60 分間キャッシュするための辞書
-    ## Twitter Web App は PWA のため、2回目以降のロードでは Service Worker から HTML や JS が返されている
-    ## そのため、毎回取得するのではなく一定期間同一の Challenge 情報を返した方がより公式のロジックに近くなると考えられる
-    __challenge_info_cache: ClassVar[dict[str, tuple[float, schemas.TwitterChallengeData]]] = {}
-
     # ツイートの最小送信間隔 (秒)
     MINIMUM_TWEET_INTERVAL = 20  # 必ずアカウントごとに 20 秒以上間隔を空けてツイートする
+    # ツイート送信時、最小送信間隔ちょうどで毎回送られて不自然にならないように加える追加待機時間 (秒)
+    MINIMUM_TWEET_INTERVAL_JITTER_MIN = 0.1
+    MINIMUM_TWEET_INTERVAL_JITTER_MAX = 4.0
 
-    # アカウントごとにロックと最後のツイート時刻を管理する辞書 (ツイート送信時の排他制御用)
-    __tweet_locks: ClassVar[dict[str, _TweetLockInfo]] = {}
+    # タイムライン / 検索のカーソル付き取得の最小間隔 (秒)
+    ## Twitter Web App の最小 TL 取得間隔が 30 秒だったので、凍結対策の安全策として決め打ち
+    MIN_FETCH_INTERVAL_SECONDS: ClassVar[float] = 30.0
 
+    # ヘッドレスブラウザの自動シャットダウンまでの無操作時間 (秒)
+    BROWSER_IDLE_TIMEOUT = 60
+
+    # Twitter アカウント ID ごとのシングルトンインスタンスを管理する辞書
+    __instances: ClassVar[dict[int | None, TwitterGraphQLAPI]] = {}
+
+    # 必ず Twitter アカウント ID ごとに1つのインスタンスになるように (Singleton)
+    def __new__(cls, twitter_account: TwitterAccount) -> TwitterGraphQLAPI:
+        """
+        シングルトンパターンの実装
+        同じ Twitter アカウント ID のインスタンスが既に存在する場合は、そのインスタンスを返す
+        既存インスタンスが見つかった場合、コンストラクタに渡された twitter_account の情報で既存インスタンスを更新する
+
+        Args:
+            twitter_account (TwitterAccount): Twitter アカウントのモデル
+
+        Returns:
+            TwitterGraphQLAPI: Twitter GraphQL API クライアントのインスタンス
+        """
+
+        # まだ同じ Twitter アカウント ID のインスタンスがないときだけ、インスタンスを生成する
+        ## __new__ は同期メソッドで await がないため、実行中は他のコルーチンに切り替わらない
+        ## そのため、__instances へのアクセスはアトミックであり、ロックは不要
+        if twitter_account.id not in cls.__instances:
+
+            # 新しいインスタンスを作成する
+            instance = super().__new__(cls)
+
+            # Twitter アカウントのモデル
+            instance.twitter_account = twitter_account
+
+            # Zendriver で自動操作されるヘッドレスブラウザのインスタンス
+            instance._browser = TwitterScrapeBrowser(twitter_account)
+
+            # 一定期間後にヘッドレスブラウザをシャットダウンするタスク
+            instance._shutdown_task = None
+            # self._shutdown_task へのアクセスを保護するためのロック
+            instance._shutdown_task_lock = asyncio.Lock()
+            # GraphQL API の前回呼び出し時刻 (UNIX 時間)
+            instance._last_graphql_api_call_time = 0.0
+            # ホームタイムラインを実際に取得しに行った時刻 (UNIX 時間)
+            ## カーソルなしの初回取得は許可し、カーソル付きの更新だけ 30 秒制限に掛ける
+            instance._last_home_fetched_at = 0.0
+            # 検索タイムラインを実際に取得しに行った時刻 (UNIX 時間)
+            ## ホームタイムラインとは別画面の別リクエストなので、互いに待たせないよう独立して管理する
+            instance._last_search_fetched_at = 0.0
+
+            # ツイート送信時の排他制御用のロック (最小送信間隔の制御に使用)
+            instance._tweet_lock = asyncio.Lock()
+            # 最小送信間隔の基準となる時刻
+            # ツイート送信モーダルで送信ボタンが押せた直前など、投稿が行われた可能性が高いタイミング (UNIX 時間)
+            instance._last_tweet_time = 0.0
+
+            # ツイート送信モーダル操作の連続失敗回数
+            # 一定回数連続で失敗したらブラウザを再起動し、フレッシュな状態で再挑戦する
+            instance._consecutive_compose_failures = 0
+
+            # 生成したインスタンスを登録する
+            cls.__instances[twitter_account.id] = instance
+        else:
+            # 既存インスタンスが見つかった場合、twitter_account の情報を更新する
+            ## DB から取得した新鮮な twitter_account の情報で既存インスタンスを更新することで、認証情報の変更などが反映される
+            existing_instance = cls.__instances[twitter_account.id]
+            existing_instance.twitter_account = twitter_account
+
+            # browser インスタンスが持っている twitter_account も更新する
+            ## 次回 setup() が呼ばれた際に新しい Cookie が使われるようになる
+            existing_instance._browser.twitter_account = twitter_account
+
+        # 登録されているインスタンスを返す
+        return cls.__instances[twitter_account.id]
 
     def __init__(self, twitter_account: TwitterAccount) -> None:
         """
-        Twitter GraphQL API クライアントを初期化する
+        Twitter GraphQL API クライアントのインスタンスを取得する
 
         Args:
-            twitter_account: Twitter アカウントのモデル
+            twitter_account (TwitterAccount): Twitter アカウントのモデル
         """
 
-        self.twitter_account = twitter_account
+        # インスタンス変数の型ヒントを定義
+        # Singleton のためインスタンスの生成は __new__() で行うが、__init__() も定義しておかないと補完がうまく効かない
+        self.twitter_account: TwitterAccount
+        self._browser: TwitterScrapeBrowser
+        self._shutdown_task: asyncio.Task[None] | None
+        self._shutdown_task_lock: asyncio.Lock
+        self._last_graphql_api_call_time: float
+        self._last_home_fetched_at: float
+        self._last_search_fetched_at: float
+        self._tweet_lock: asyncio.Lock
+        self._last_tweet_time: float
+        self._consecutive_compose_failures: int
 
-        # Chrome への偽装用 HTTP リクエストヘッダーを取得
-        ## User-Agent ヘッダーも Chrome に偽装されている
-        self.cookie_session_user_handler = self.twitter_account.getTweepyAuthHandler()
-        self.graphql_headers_dict = self.cookie_session_user_handler.get_graphql_api_headers()  # GraphQL API 用ヘッダー
-        self.html_headers_dict = self.cookie_session_user_handler.get_html_headers()  # HTML 用ヘッダー
-        self.js_headers_dict = self.cookie_session_user_handler.get_js_headers(cross_origin=True)  # JavaScript 用ヘッダー
-
-        # 指定されたアカウントへの認証情報が含まれる Cookie を取得し、httpx.Cookies に変換
-        ## ここで生成した httpx.Cookies を HTTP クライアントに渡す
-        cookies_dict = self.cookie_session_user_handler.get_cookies_as_dict()
-        cookies = httpx.Cookies()
-        for name, value in cookies_dict.items():
-            # ドメインを ".x.com" 、パスを "/" に設定しておくことが重要 (でないと Cookie 更新時にちゃんと上書きできない)
-            ## ただし "lang" キーだけは ".x.com" でなく "x.com" にする必要がある
-            if name == 'lang':
-                cookies.set(name, value, domain='x.com', path='/')
-            else:
-                cookies.set(name, value, domain='.x.com', path='/')
-
-        # httpx の非同期 HTTP クライアントのインスタンスを作成
-        ## 可能な限り Chrome からのリクエストに偽装するため、app.constants.HTTPX_CLIENT は使わずに独自のインスタンスを作成する
-        self.httpx_client = httpx.AsyncClient(
-            ## Cookie を設定
-            ## Cookie はこの HTTP クライアントで行う全リクエストで共有されてほしいので、ここで設定している
-            ## 一方リクエストヘッダーはリクエスト先のリソース種類によって異なるためここでは設定せず、リクエスト毎に個別に設定する
-            ## (HTTP クライアントレベルで設定されたヘッダーは上書きや削除が難しそうなため)
-            cookies = cookies,
-            ## リダイレクトを追跡する
-            follow_redirects = True,
-            ## 可能な限り Chrome からのリクエストに偽装するため、HTTP/1.1 ではなく明示的に HTTP/2 で接続する
-            http2 = True,
-        )
-
+    @property
+    def log_prefix(self) -> str:
+        """
+        ログのプレフィックス
+        """
+        return f'[TwitterGraphQLAPI][@{self.twitter_account.screen_name}]'
 
     @classmethod
-    async def updateEndpointInfos(cls) -> None:
+    async def removeInstance(cls, twitter_account_id: int) -> None:
         """
-        頻繁に更新される Twitter GraphQL API のエンドポイント定義を最新のものに更新する
-        更新できなくても直ちに問題が出るわけではないため、取得失敗時は何もしない (エラーはログに出力するだけ)
-        ref: https://github.com/fa0311/TwitterInternalAPIDocument
-        """
+        指定された Twitter アカウント ID のシングルトンインスタンスを削除する
 
-        start_time = time.time()
-        logging.info('Twitter GraphQL API endpoint infos updating...')
-
-        try:
-            # GraphQL API のエンドポイント情報を取得
-            async with HTTPX_CLIENT() as client:
-                response = await client.get('https://raw.githubusercontent.com/fa0311/TwitterInternalAPIDocument/develop/docs/json/GraphQL.json')
-                response.raise_for_status()
-                endpoint_infos = response.json()
-
-            for endpoint in endpoint_infos:
-                exports = endpoint['exports']
-                operation_name = exports['operationName']
-
-                # 前から ENDPOINT_INFOS に定義されているエンドポイント情報のみ更新
-                if operation_name in cls.ENDPOINT_INFOS:
-
-                    # method は HomeLatestTimeline を除き、operationType が mutation かで判定する
-                    ## HomeLatestTimeline は operationType は query だが、実際の挙動を観察するに POST で送信されることの方が多いため
-                    if operation_name != 'HomeLatestTimeline':
-                        if exports['operationType'] == 'mutation':
-                            method = 'POST'
-                        else:
-                            method = 'GET'
-                    else:
-                        method = cls.ENDPOINT_INFOS[operation_name].method
-
-                    # features に設定する用の最新の Feature Switches 情報を取得
-                    ## longform_notetweets_consumption_enabled: true みたいなやつ
-                    metadata = exports['metadata']
-                    feature_switches = metadata['featureSwitches']
-                    feature_switch = metadata['featureSwitch']
-                    features = {}
-                    for switch in feature_switches:
-                        if switch in feature_switch:
-                            features[switch] = feature_switch[switch]['value'] == 'true'
-                    if not features:
-                        features = None
-
-                    # TwitterGraphQLAPIEndpointInfo 型に合わせて更新
-                    old_endpoint_info = cls.ENDPOINT_INFOS[operation_name]
-                    cls.ENDPOINT_INFOS[operation_name] = schemas.TwitterGraphQLAPIEndpointInfo(
-                        method = method,
-                        query_id = exports['queryId'],
-                        endpoint = operation_name,
-                        features = features,  # features が存在しないエンドポイントでは None が入る
-                    )
-
-                    # 変更差分があるときのみ出力
-                    if old_endpoint_info.query_id != cls.ENDPOINT_INFOS[operation_name].query_id or \
-                       old_endpoint_info.method != cls.ENDPOINT_INFOS[operation_name].method or \
-                       old_endpoint_info.features != cls.ENDPOINT_INFOS[operation_name].features:
-                        logging.debug_simple(f'[TwitterGraphQLAPI] {cls.ENDPOINT_INFOS[operation_name].endpoint}: '
-                                             f'[{cls.ENDPOINT_INFOS[operation_name].method}] {cls.ENDPOINT_INFOS[operation_name].path}')
-
-            logging.info(f'Twitter GraphQL API endpoint infos update complete. ({round(time.time() - start_time, 3)} sec)')
-        except Exception:
-            logging.error('Failed to update Twitter GraphQL API endpoint infos:')
-            logging.error(traceback.format_exc())
-
-
-    async def persistCookies(self) -> None:
-        """
-        HTTP クライアントの Cookie をデータベースに永続化する
+        Args:
+            twitter_account_id (int): 削除する Twitter アカウントの ID
         """
 
-        # 既存の access_token_secret から Cookie を取得
-        existing_cookies: dict[str, str] = json.loads(self.twitter_account.access_token_secret)
+        # __instances へのアクセスは await がないためアトミックであり、ロックは不要
+        ## __new__ は同期メソッドで await がないため、実行中は他のコルーチンに切り替わらない
+        ## removeInstance の __instances へのアクセス部分（チェック・取得・削除）も await がないため、その部分はアトミック
+        if twitter_account_id in cls.__instances:
+            instance = cls.__instances[twitter_account_id]
+            # シャットダウンタスクをキャンセル
+            ## 複数の同時リクエスト完了時の競合状態を防ぐため、ロックで保護する
+            async with instance._shutdown_task_lock:
+                if instance._shutdown_task is not None:
+                    if not instance._shutdown_task.done():
+                        instance._shutdown_task.cancel()
+                    instance._shutdown_task = None
+            # ヘッドレスブラウザをシャットダウン
+            ## browser.shutdown() が例外を投げた場合でもレジストリエントリは確実に削除する必要があるため、try/except で囲む
+            if instance._browser is not None and instance._browser.is_setup_complete is True:
+                try:
+                    await instance._browser.shutdown()
+                except Exception as ex:
+                    logging.error(f'Failed to shutdown browser for Twitter account {twitter_account_id}:', exc_info=ex)
+            # レジストリエントリを削除
+            del cls.__instances[twitter_account_id]
 
-        # HTTP クライアントが現在持つ Cookie で既存の Cookie を更新
-        for name, value in self.httpx_client.cookies.items():
-            existing_cookies[name] = value
-
-        # 更新された Cookie を再び JSON にして保存
-        self.twitter_account.access_token_secret = json.dumps(existing_cookies, ensure_ascii = False)
-        await self.twitter_account.save()
-
-
-    async def fetchChallengeData(self) -> schemas.TwitterChallengeData | schemas.TwitterAPIResult:
+    @classmethod
+    async def rebindInstance(cls, previous_account_id: int | None, twitter_account: TwitterAccount) -> None:
         """
-        Twitter Web App の API リクエスト内の X-Client-Transaction-ID ヘッダーを算出するために必要な Challenge 情報を取得する
-        X-Client-Transaction-ID はスクレイピング回避のためのヘッダーで、難読化された JavaScript に含まれる算出関数に検証コード
-        (twitter-site-verification) とアニメーション SVG (svg[id^="loading-x"] の outerHTML) を投入することで算出される
+        Temporary アカウントで初期化したシングルトンを実際の Twitter アカウント ID に付け替える。
 
-        詳細な動作原理はよく理解できていないが、ともかくアニメーション SVG のレンダリングや JavaScript の実行にブラウザエンジンが必要になるため、
-        Python 製のサーバーだけでは X-Client-Transaction-ID を算出できない
-        そのため、サーバー側では X-Client-Transaction-ID の算出に必要な Challenge 情報を返し、そのデータを元にブラウザ上のフロントエンドで算出した
-        X-Client-Transaction-ID をサーバーへの API リクエストに含めてもらい、受け取った値を GraphQL API リクエスト時に送信する設計としている
-
-        ref: https://github.com/dimdenGD/OldTweetDeck/blob/main/src/challenge.js#L150-L169
-        ref: https://antibot.blog/twitter-header-part-3/
-
-        Returns:
-            schemas.TwitterChallengeData | schemas.TwitterAPIResult: Challenge 情報またはエラーメッセージ
+        Args:
+            previous_account_id (int | None): Temporary 状態の Twitter アカウント ID。
+            twitter_account (TwitterAccount): 永続化済みの Twitter アカウントモデル。
         """
 
-        # まだ有効であればキャッシュから Challenge 情報を取得
-        ## 頻繁にこの操作が行われると不審と判断される可能性があるため、一定期間フロントエンドに対し同一の Challenge 情報を使わせる
-        if self.twitter_account.screen_name in self.__challenge_info_cache:
-            cached_time, cached_challenge_data = self.__challenge_info_cache[self.twitter_account.screen_name]
-            if time.time() - cached_time < self.CHALLENGE_INFO_CACHE_EXPIRATION_TIME:
-                return cached_challenge_data
+        # 永続化済みの Twitter アカウント ID が取得できない場合は異常
+        if twitter_account.id is None:
+            logging.error('[TwitterGraphQLAPI][rebindInstance] twitter_account.id is None. Skip rebinding.')
+            return
 
-        # Twitter Web App (SPA) の HTML を取得
-        ## HTML リクエスト用のヘッダーに差し替えるのが重要
-        twitter_web_app_html = await self.httpx_client.get('https://x.com/home', headers=self.html_headers_dict)
-        if twitter_web_app_html.status_code != 200:
-            logging.error(f'[TwitterGraphQLAPI] Failed to fetch Twitter Web App HTML: {twitter_web_app_html.status_code}')
-            return schemas.TwitterAPIResult(
-                is_success = False,
-                detail = f'Challenge 情報の取得に失敗しました。Twitter Web App の HTML を取得できませんでした。(HTTP Error {twitter_web_app_html.status_code})',
+        # ID の変化が無い場合は情報だけ更新する
+        if previous_account_id == twitter_account.id:
+            instance = cls.__instances.get(twitter_account.id)
+            if instance is not None:
+                instance.twitter_account = twitter_account
+                instance._browser.twitter_account = twitter_account
+            return
+
+        # Temporary なインスタンスが存在しない場合は何もしない
+        if previous_account_id not in cls.__instances:
+            return
+
+        instance = cls.__instances.pop(previous_account_id)
+
+        # 既に同じ ID に紐づくインスタンスが存在していた場合はリソースリークを防ぐため破棄する
+        await cls.removeInstance(twitter_account.id)
+
+        # インスタンスに最新の Twitter アカウント情報を適用し、新しい ID で登録する
+        instance.twitter_account = twitter_account
+        instance._browser.twitter_account = twitter_account
+        cls.__instances[twitter_account.id] = instance
+
+    async def __scheduleShutdownTask(self) -> None:
+        """
+        一定時間後にヘッドレスブラウザを自動停止させるタスクを再スケジュールする
+        """
+
+        # まだヘッドレスブラウザが立ち上がっていない場合は何もしない
+        if self._browser.is_setup_complete is not True:
+            return
+
+        async def OnShutdown() -> None:
+            # タイムアウト時間に到達するまで待つ
+            await asyncio.sleep(self.BROWSER_IDLE_TIMEOUT)
+            # GraphQL API の前回呼び出し時刻を確認し、タイムアウト時間が経過している場合のみ、
+            # しばらく API 呼び出しが行われていないため、リソース節約のためにヘッドレスブラウザをシャットダウンする
+            current_time = time.time()
+            if current_time - self._last_graphql_api_call_time >= self.BROWSER_IDLE_TIMEOUT:
+                logging.info(f'{self.log_prefix} Shutting down browser after {self.BROWSER_IDLE_TIMEOUT} seconds of inactivity.')
+                await self._browser.shutdown()
+
+        # 一定時間後にヘッドレスブラウザをシャットダウンするタスクを一旦キャンセルして再スケジュールする
+        ## この処理は API リクエストの成功・失敗に関わらず API リクエスト完了後に常に実行すべき
+        ## 複数の同時リクエスト完了時の競合状態を防ぐため、ロックで保護する
+        async with self._shutdown_task_lock:
+            if self._shutdown_task is not None:
+                if not self._shutdown_task.done():
+                    self._shutdown_task.cancel()
+                self._shutdown_task = None
+            self._shutdown_task = asyncio.create_task(OnShutdown())
+
+    def __logGraphQLResponseDiagnostics(
+        self,
+        reason: str,
+        status_code: int | None,
+        headers: dict[str, Any] | None,
+        response_text: str | None,
+    ) -> None:
+        """
+        GraphQL API レスポンスの診断情報をログに出力する
+
+        Args:
+            reason (str): 診断ログを出力する理由
+            status_code (int | None): HTTP ステータスコード
+            headers (dict[str, Any] | None): HTTP レスポンスヘッダー
+            response_text (str | None): HTTP レスポンス本文
+        """
+
+        # JSON パース失敗時は本文だけでは原因を追いづらいため、ステータスコードと HTTP レスポンスヘッダーも出力する
+        logging.error(f'{self.log_prefix} {reason}. status_code: {status_code}')
+        logging.error(f'{self.log_prefix} Response headers: {json.dumps(headers or {}, ensure_ascii=False)}')
+
+        # レスポンス本文は巨大化しやすいため、原因確認に必要な先頭部分だけを残す
+        if response_text is None:
+            logging.error(f'{self.log_prefix} Response text: <None>')
+            return
+        response_text_limit = 4000
+        if len(response_text) > response_text_limit:
+            logging.error(
+                f'{self.log_prefix} Response text: '
+                f'{response_text[:response_text_limit]}... (truncated, total_length: {len(response_text)})',
             )
-        twitter_web_app_html_text = twitter_web_app_html.text
+        else:
+            logging.error(f'{self.log_prefix} Response text: {response_text}')
 
-        # BeautifulSoup を使って HTML をパース
-        soup = BeautifulSoup(twitter_web_app_html_text, 'html.parser')
-
-        # HTML の meta タグに含まれる検証コードを取得
-        meta_tag = soup.select_one('meta[name="twitter-site-verification"]')
-        if meta_tag is None:
-            logging.error(f'[TwitterGraphQLAPI] Failed to fetch verification code from Twitter Web App HTML')
-            return schemas.TwitterAPIResult(
-                is_success = False,
-                detail = 'Challenge 情報の取得に失敗しました。Twitter Web App の HTML から検証コードを取得できませんでした。',
-            )
-        verification_code = cast(str, meta_tag['content'])
-
-        # HTML からチャレンジコードを取得
-        challenge_code_match = re.search(r'"ondemand.s":"(\w+)"', twitter_web_app_html_text)
-        if not challenge_code_match:
-            logging.error(f'[TwitterGraphQLAPI] Failed to fetch challenge code from Twitter Web App HTML')
-            return schemas.TwitterAPIResult(
-                is_success = False,
-                detail = 'Challenge 情報の取得に失敗しました。Twitter Web App の HTML からチャレンジコードを取得できませんでした。',
-            )
-        challenge_code = challenge_code_match.group(1)
-
-        # HTML からアニメーション SVG の outerHTML を取得
-        challenge_animation_svg_codes = [str(svg) for svg in soup.select('svg[id^="loading-x"]')]
-
-        # Challenge 情報を取得
-        ## JavaScript リクエスト用のヘッダーに差し替えるのが重要
-        challenge_js_code_response = await self.httpx_client.get(
-            url = f'https://abs.twimg.com/responsive-web/client-web/ondemand.s.{challenge_code}a.js',
-            headers = self.js_headers_dict,
-        )
-        if challenge_js_code_response.status_code != 200:
-            logging.error(f'[TwitterGraphQLAPI] Failed to fetch challenge code from Twitter Web App HTML')
-            return schemas.TwitterAPIResult(
-                is_success = False,
-                detail = (
-                    f'Challenge 情報の取得に失敗しました。Twitter Web App のチャレンジコードからチャレンジコードを取得できませんでした。'
-                    f'(HTTP Error {challenge_js_code_response.status_code})'
-                ),
-            )
-        challenge_js_code = challenge_js_code_response.text
-
-        # この時点でリクエスト自体は成功しているはずなので、httpx のセッションが持つ Cookie を DB に反映する
-        ## HTML リクエスト時に Cookie が更新される可能性があるため、ここで変更された可能性がある Cookie を永続化する
-        await self.persistCookies()
-
-        challenge_data = schemas.TwitterChallengeData(
-            is_success = True,
-            detail = 'Twitter Web App の Challenge 情報を取得しました。',
-            endpoint_infos = self.ENDPOINT_INFOS,
-            verification_code = verification_code,
-            challenge_js_code = challenge_js_code,
-            challenge_animation_svg_codes = challenge_animation_svg_codes,
-        )
-
-        # Challenge 情報をキャッシュに保存
-        ## 短期間に何回もアクセスされた場合でも、同一の Challenge 情報が返される (そうした方がより精度高く偽装できるはず)
-        self.__challenge_info_cache[self.twitter_account.screen_name] = (time.time(), challenge_data)
-
-        return challenge_data
-
-
-    async def invokeGraphQLAPI(self,
-        endpoint_info: schemas.TwitterGraphQLAPIEndpointInfo,
+    async def invokeGraphQLAPI(
+        self,
+        endpoint_name: str,
         variables: dict[str, Any],
-        x_client_transaction_id: str | None = None,
+        additional_flags: dict[str, Any] | None = None,
         error_message_prefix: str = 'Twitter API の操作に失敗しました。',
     ) -> dict[str, Any] | str:
         """
         Twitter Web App の GraphQL API に HTTP リクエストを送信する
         実際には GraphQL と言いつつペイロードで JSON を渡しているので謎… (本当に GraphQL なのか？)
+        実際の API リクエストは TwitterScrapeBrowser 経由でヘッドレスブラウザから実行される
 
         Args:
-            endpoint_info (schemas.TwitterGraphQLAPIEndpointInfo): GraphQL API の各エンドポイントごとに固有の静的な情報
+            endpoint_name (str): GraphQL API のエンドポイント名 (例: 'CreateTweet')
             variables (dict[str, Any]): GraphQL API へのリクエストパラメータ (ペイロードのうち "variables" の部分)
-            x_client_transaction_id (str | None, optional): ブラウザ側で算出して API リクエストヘッダーに添付された X-Client-Transaction-ID ヘッダーの値
-            error_message_prefix (str, optional): エラー発生時に付与する prefix (例: 'ツイートの送信に失敗しました。')
+            additional_flags (dict[str, Any] | None): 追加のフラグ（オプション）
+            error_message_prefix (str, optional): エラー発生時に付与する prefix (例: 'Twitter へのツイートに失敗しました。')
 
         Returns:
             dict[str, Any] | str: GraphQL API のレスポンス (失敗時は日本語のエラーメッセージを返す)
         """
 
-        # リクエストヘッダーを組み立てる
-        ## X-Client-Transaction-ID は指定されている場合のみ付与する
-        headers = self.graphql_headers_dict.copy()
-        if x_client_transaction_id is not None:
-            headers['x-client-transaction-id'] = x_client_transaction_id
-            logging.debug_simple(f'[TwitterGraphQLAPI][{endpoint_info.endpoint}] X-Client-Transaction-ID: {x_client_transaction_id}')
+        # ブラウザプロセスが外部から kill されていないかを事前確認する
+        ## is_setup_complete が True のままブラウザプロセスが死んでいる場合は、
+        ## API 呼び出しが必ず ConnectionClosedError で失敗するため、先にブラウザの再起動準備を行う
+        if self._browser.is_setup_complete is True and not self._browser.isBrowserProcessAlive():
+            await self.__markBrowserForRestart(
+                'Browser process is no longer alive (may have been killed externally). Marking browser for re-setup...',
+            )
 
-        # CreateTweet / CreateRetweet エンドポイントのみ、Bearer トークンを旧 TweetDeck / 現 X Pro 用のものに差し替える
-        ## 旧 TweetDeck 用 Bearer トークン自体は現在も X Pro 用として使われているからか (ただし URL は https://pro.x.com/i/graphql/ 配下) 、
-        ## 2024/08/08 現在では Twitter Web App 用 Bearer トークンでリクエストした際と異なり、スパム判定によるツイート失敗がほとんどないメリットがある
-        ## なぜこの Bearer トークンが使えるのかはよく分からないが、実際 OldTweetDeck でも同様の実装で数ヶ月運用されている
-        ## 今後対策される可能性もなくもないが実装時点ではうまく機能しているので、推定ユーザー数万人を有する OldTweetDeck の実装に合わせる
-        ## ref: https://github.com/dimdenGD/OldTweetDeck/blob/v4.0.3/src/interception.js#L1208-L1219
-        ## ref: https://github.com/dimdenGD/OldTweetDeck/blob/v4.0.3/src/interception.js#L1273-L1292
-        if endpoint_info.endpoint == 'CreateTweet' or endpoint_info.endpoint == 'CreateRetweet':
-            headers['authorization'] = self.cookie_session_user_handler.TWEETDECK_BEARER_TOKEN
+        # ヘッドレスブラウザがまだ起動していない場合、セットアップ処理を実行
+        if self._browser.is_setup_complete is not True:
+            try:
+                await self._browser.setup()
+            except (BrowserBinaryNotFoundError, BrowserConnectionFailedError, BrowserSetupTimeoutError) as ex:
+                # Chrome / Brave 未導入時やブラウザ起動失敗時、セットアップタイムアウト時は、
+                # 日本語のエラーメッセージをそのまま返す
+                return str(ex)
 
-        # Twitter GraphQL API に HTTP リクエストを送信する
+        # TwitterScrapeBrowser 経由で GraphQL API に HTTP リクエストを送信
         try:
-            if endpoint_info.method == 'POST':
-                # POST の場合はペイロードを組み立てて JSON にして渡す
-                ## features が存在しない API のときは features を省略する
-                if endpoint_info.features is not None:
-                    payload = {
-                        'variables': variables,
-                        'features': endpoint_info.features,
-                        'queryId': endpoint_info.query_id,  # クエリ ID も JSON に含める必要がある
-                    }
+            logging.info(f'{self.log_prefix} Requesting {endpoint_name} GraphQL API ...')
+            logging.debug(f'{self.log_prefix} Request variables: {variables}')
+            if additional_flags is not None:
+                logging.debug(f'{self.log_prefix} Additional flags: {additional_flags}')
+            raw_response = await self._browser.invokeGraphQLAPI(
+                endpoint_name=endpoint_name,
+                variables=variables,
+                additional_flags=additional_flags,
+            )
+        except Exception as ex:
+            logging.error(f'{self.log_prefix} Failed to connect to Twitter GraphQL API:', exc_info=ex)
+
+            # ブラウザとの接続断またはフック関数の消失を検出した場合、ブラウザを再起動して1回だけリトライする
+            is_connection_lost = self.__isConnectionLostError(ex)
+            is_hook_lost = '__invokeGraphQLAPI is not a function' in str(ex)
+            if is_hook_lost or is_connection_lost:
+                if is_hook_lost:
+                    # ページナビゲーション等で zendriver_setup.js のフック関数が消失した場合
+                    ## アカウントのロックやセッション失効により x.com が captcha 画面やログイン画面に
+                    ## リダイレクトされると、注入済みの window.__invokeGraphQLAPI 関数が消滅する
+                    await self.__markBrowserForRestart(
+                        'JS hook function lost (page may have navigated away from x.com). '
+                        'Restarting browser and retrying...',
+                    )
                 else:
-                    payload = {
-                        'variables': variables,
-                        'queryId': endpoint_info.query_id,  # クエリ ID も JSON に含める必要がある
-                    }
-                # GraphQL API リクエスト用のヘッダーに差し替えるのが重要
-                response = await self.httpx_client.post(
-                    url = 'https://x.com' + endpoint_info.path,
-                    json = payload,
-                    headers = headers,
-                )
-            elif endpoint_info.method == 'GET':
-                # GET の場合は queryId はパスに、variables と features はクエリパラメータに JSON エンコードした上で渡す
-                ## features が存在しない API のときは features を省略する
-                if endpoint_info.features is not None:
-                    params = {
-                        'variables': json.dumps(variables, ensure_ascii=False),
-                        'features': json.dumps(endpoint_info.features, ensure_ascii=False),
-                    }
-                else:
-                    params = {
-                        'variables': json.dumps(variables, ensure_ascii=False),
-                    }
-                # GraphQL API リクエスト用のヘッダーに差し替えるのが重要
-                response = await self.httpx_client.get(
-                    url = 'https://x.com' + endpoint_info.path,
-                    params = params,
-                    headers = headers,
-                )
+                    # ブラウザプロセスが外部から kill されたか、クラッシュして WebSocket 接続が切断された場合
+                    await self.__markBrowserForRestart(
+                        'Browser connection lost (browser process may have been killed or crashed). '
+                        'Restarting browser and retrying...',
+                    )
+                # 再セットアップ
+                try:
+                    await self._browser.setup()
+                except (BrowserBinaryNotFoundError, BrowserConnectionFailedError, BrowserSetupTimeoutError) as setup_ex:
+                    # 再セットアップも失敗した場合は、ロック等の可能性が高いのでそのエラーメッセージを返す
+                    return str(setup_ex)
+                except Exception as setup_ex:
+                    logging.error(f'{self.log_prefix} Browser re-setup failed:', exc_info=setup_ex)
+                    return error_message_prefix + f'ヘッドレスブラウザの再セットアップに失敗しました。({setup_ex})'
+                # 再セットアップ成功 → API 呼び出しをリトライ
+                try:
+                    logging.info(f'{self.log_prefix} Retrying {endpoint_name} GraphQL API after browser restart...')
+                    logging.debug(f'{self.log_prefix} Request variables: {variables}')
+                    raw_response = await self._browser.invokeGraphQLAPI(
+                        endpoint_name=endpoint_name,
+                        variables=variables,
+                        additional_flags=additional_flags,
+                    )
+                except Exception as retry_ex:
+                    logging.error(f'{self.log_prefix} Retry also failed:', exc_info=retry_ex)
+                    return error_message_prefix + 'ヘッドレスブラウザを再起動しましたが、Twitter API に接続できませんでした。'
             else:
-                raise ValueError(f'Invalid method: {endpoint_info.method}')
+                return error_message_prefix + 'Twitter API に接続できませんでした。'
+        finally:
+            # GraphQL API リクエスト完了後、更新された可能性があるヘッドレスブラウザの Cookie を DB 側に反映
+            ## こうすることでヘッドレスブラウザと DB 間で Cookie の変更が同期されるはず
+            ## この処理は API リクエストの成功・失敗に関わらず API リクエスト完了後に常に実行すべき
+            ## ただし、ブラウザが壊れた状態 (shutdown 後、re-setup 失敗後など) では Cookie 保存をスキップする
+            if self._browser.is_setup_complete is True:
+                try:
+                    cookies_txt_content = await self._browser.saveTwitterCookiesToNetscapeFormat()
+                    # Cookie を暗号化してから DB に反映する
+                    self.twitter_account.access_token_secret = self.twitter_account.encryptAccessTokenSecret(cookies_txt_content)
+                    await self.twitter_account.save()  # これで変更が DB に反映される
+                except Exception as ex:
+                    logging.warning(f'{self.log_prefix} Failed to save cookies after API call:', exc_info=ex)
 
-        # 接続エラー（サーバーメンテナンスやタイムアウトなど）
-        except (httpx.NetworkError, httpx.TimeoutException):
-            logging.error('[TwitterGraphQLAPI] Failed to connect to Twitter GraphQL API')
-            # return 'Failed to connect to Twitter GraphQL API'
+            # GraphQL API の前回呼び出し時刻を更新
+            self._last_graphql_api_call_time = time.time()
+
+            # 一定時間後にヘッドレスブラウザをシャットダウンするタスクを再スケジュールする
+            await self.__scheduleShutdownTask()
+
+        # 生のレスポンスデータを取得
+        parsed_response = raw_response.parsed_response
+        status_code = raw_response.status_code
+        response_text = raw_response.response_text
+        headers = raw_response.headers
+        request_error = raw_response.request_error
+
+        # リクエストエラーが発生した場合（接続エラー）
+        if request_error:
+            logging.error(f'{self.log_prefix} Request error: {request_error}')
             return error_message_prefix + 'Twitter API に接続できませんでした。'
-
-        # この時点でリクエスト自体は成功しているはずなので、httpx のセッションが持つ Cookie を DB に反映する
-        ## 基本 API リクエストでは Cookie は更新されないはずだが、不審がられないように念のためブラウザ同様リクエストごとに永続化する
-        await self.persistCookies()
-
-        # HTTP ステータスコードが 200 系以外の場合
-        if not (200 <= response.status_code < 300):
-            logging.error(f'[TwitterGraphQLAPI] Failed to invoke GraphQL API (HTTP {response.status_code})')
-            return error_message_prefix + f'Twitter API から HTTP {response.status_code} エラーが返されました。'
 
         # JSON でないレスポンスが返ってきた場合
         ## charset=utf-8 が付いている場合もあるので完全一致ではなく部分一致で判定
-        if 'application/json' not in response.headers['Content-Type']:
-            logging.error('[TwitterGraphQLAPI] Response is not JSON')
-            return error_message_prefix + 'Twitter API から不正なレスポンスが返されました。'
+        if headers is not None:
+            content_type = headers.get('content-type', '')
+            if content_type and 'application/json' not in content_type:
+                logging.error(f'{self.log_prefix} Response is not JSON. (Content-Type: {content_type})')
+                self.__logGraphQLResponseDiagnostics(
+                    reason='GraphQL API returned non-JSON response',
+                    status_code=status_code,
+                    headers=headers,
+                    response_text=response_text,
+                )
+                return (
+                    error_message_prefix
+                    + f'Twitter API から JSON 以外のレスポンスが返されました。(Content-Type: {content_type})'
+                )
 
         # レスポンスを JSON としてパース
-        try:
-            response_json = response.json()
-        except Exception:
-            logging.error('[TwitterGraphQLAPI] Failed to parse response as JSON')
+        response_json: dict[str, Any] | None = None
+        if parsed_response is not None:
+            # JavaScript 側で既にパース済み
+            response_json = parsed_response
+        elif response_text:
+            # JavaScript 側でパースに失敗した場合、Python 側で再試行
+            try:
+                response_json = json.loads(response_text)
+            except Exception as ex:
+                # 何もレスポンスが返ってきていないが、HTTP ステータスコードが 200 系以外で返ってきている場合
+                if status_code is not None and not (200 <= status_code < 300):
+                    logging.error(f'{self.log_prefix} Failed to invoke GraphQL API. (HTTP Error {status_code})')
+                    self.__logGraphQLResponseDiagnostics(
+                        reason='Failed to parse GraphQL API response as JSON after HTTP error',
+                        status_code=status_code,
+                        headers=headers,
+                        response_text=response_text,
+                    )
+                    return error_message_prefix + f'Twitter API から HTTP {status_code} エラーが返されました。'
+
+                # HTTP ステータスコードは 200 系だが、何もレスポンスが返ってきていない場合
+                logging.error(f'{self.log_prefix} Failed to parse response as JSON:', exc_info=ex)
+                self.__logGraphQLResponseDiagnostics(
+                    reason='Failed to parse GraphQL API response as JSON',
+                    status_code=status_code,
+                    headers=headers,
+                    response_text=response_text,
+                )
+                return error_message_prefix + 'Twitter API のレスポンスを JSON としてパースできませんでした。'
+
+        if response_json is None:
+            logging.error(f'{self.log_prefix} Failed to parse response as JSON.')
+            self.__logGraphQLResponseDiagnostics(
+                reason='GraphQL API response JSON is empty',
+                status_code=status_code,
+                headers=headers,
+                response_text=response_text,
+            )
             return error_message_prefix + 'Twitter API のレスポンスを JSON としてパースできませんでした。'
 
-        # API レスポンスにエラーが含まれている場合
+        # API レスポンスにエラーが含まれていて、かつ data キーが存在しない場合
         ## API レスポンスは Twitter の仕様変更で変わりうるので、ここで判定されなかったと言ってエラーでないとは限らない
-        if 'errors' in response_json:
-
+        ## なぜか正常にレスポンスが含まれているのにエラーも返ってくる場合があるので、その場合は（致命的な）エラーではないと判断する
+        if 'errors' in response_json and 'data' not in response_json:
             # Twitter API のエラーコードとエラーメッセージを取得
             ## このエラーコードは API v1.1 の頃と変わっていない
             response_error_code = response_json['errors'][0]['code']
-            response_error_message = response_json["errors"][0]["message"]
+            response_error_message = response_json['errors'][0]['message']
 
             # 想定外のエラーコードが返ってきた場合のエラーメッセージ
             alternative_error_message = f'Code: {response_error_code} / Message: {response_error_message}'
-            logging.error(f'[TwitterGraphQLAPI] Failed to invoke GraphQL API ({alternative_error_message})')
+            logging.error(f'{self.log_prefix} Failed to invoke GraphQL API ({alternative_error_message})')
 
             # エラーコードに対応するエラーメッセージを返し、対応するものがない場合は alternative_error_message を返す
             return error_message_prefix + self.ERROR_MESSAGES.get(response_error_code, alternative_error_message)
@@ -548,104 +500,472 @@ class TwitterGraphQLAPI:
         # API レスポンスにエラーが含まれていないが、'data' キーが存在しない場合
         ## 実装時点の GraphQL API は必ず成功時は 'data' キーの下にレスポンスが格納されるはず
         ## もし 'data' キーが存在しない場合は、API 仕様が変更されている可能性がある
-        elif 'data' not in response_json:
-            logging.error('[TwitterGraphQLAPI] Response does not have "data" key')
-            return error_message_prefix + 'Twitter API のレスポンスに "data" キーが存在しません。開発者に修正を依頼してください。'
+        if 'data' not in response_json:
+            logging.error(f'{self.log_prefix} Response does not have "data" key.')
+            return (
+                error_message_prefix
+                + 'Twitter API のレスポンスに "data" キーが存在しません。開発者に修正を依頼してください。'
+            )
 
-        # ここまで来たら (中身のデータ構造はともかく) API レスポンスの取得には成功しているはず
+        # ここまで来たら (中身のデータ構造はともかく) GraphQL API レスポンスの取得には成功しているはず
+        logging.info(f'{self.log_prefix} {endpoint_name} GraphQL API request completed.')
         return response_json['data']
 
+    async def __markBrowserForRestart(self, reason: str) -> None:
+        """
+        ブラウザを「再起動が必要」な状態にマークする
+        idle-shutdown タイマーのキャンセル、is_setup_complete のリセット、ブラウザの shutdown を行う
+        この後、既存の setup チェックによりブラウザが自動的に再起動される
 
-    async def createTweet(self,
+        Args:
+            reason (str): ログに出力する再起動の理由
+        """
+
+        # idle-shutdown タイマーをキャンセル
+        ## このタイマーが残っていると、shutdown() / setup() の最中に OnShutdown タスクが発火し、
+        ## 新しく再作成されたブラウザが直後に shutdown されるレースコンディションが起きうる
+        logging.warning(f'{self.log_prefix} {reason}')
+        async with self._shutdown_task_lock:
+            if self._shutdown_task is not None:
+                if not self._shutdown_task.done():
+                    self._shutdown_task.cancel()
+                self._shutdown_task = None
+        # is_setup_complete のリセットは shutdown() 内の _setup_lock 配下で行われるため、
+        # ここで先にリセットしない (先にリセットすると、shutdown() がロックを取得する前に
+        # 別のコルーチンが is_setup_complete=False を検知して setup() を呼び、
+        # 新しいブラウザが作られた直後に shutdown() で破壊されるレースコンディションが発生する)
+        try:
+            await self._browser.shutdown()
+        except Exception as ex:
+            logging.warning(f'{self.log_prefix} Error during browser shutdown:', exc_info=ex)
+            # shutdown() が例外で中断した場合でも、次回 setup() が走るようにフラグをリセットする
+            self._browser.is_setup_complete = False
+
+    @staticmethod
+    def __isConnectionLostError(ex: Exception) -> bool:
+        """
+        例外がブラウザとの接続断を示すものかどうかを判定する
+        外部からの kill やブラウザクラッシュにより CDP WebSocket 接続が切断された場合に True を返す
+
+        Args:
+            ex (Exception): 判定する例外
+
+        Returns:
+            bool: 接続断を示す例外の場合は True
+        """
+
+        exception_type_name = type(ex).__name__
+        exception_message = str(ex)
+        # WebSocket 接続が切断された場合 (websockets ライブラリの例外)
+        if 'ConnectionClosed' in exception_type_name:
+            return True
+        # WebSocket 接続エラーのメッセージパターン
+        if 'no close frame' in exception_message:
+            return True
+        # OS レベルの接続エラー
+        if isinstance(ex, (ConnectionRefusedError, ConnectionResetError, BrokenPipeError)):
+            return True
+        return False
+
+    async def keepAlive(self) -> None:
+        """
+        ヘッドレスブラウザの自動シャットダウンを抑制する
+        視聴画面の Twitter パネルでユーザーの操作が継続している間はこのメソッドが定期的に呼び出される
+        """
+
+        # ヘッドレスブラウザが起動していないときは念のため何もしない
+        if self._browser.is_setup_complete is not True:
+            return
+
+        # 直近アクセス時刻を更新し、再度シャットダウンタイマーをセットする
+        self._last_graphql_api_call_time = time.time()
+        await self.__scheduleShutdownTask()
+
+    async def fetchLoggedViewer(
+        self,
+    ) -> schemas.TweetUser | schemas.TwitterAPIResult:
+        """
+        現在ログイン中の Twitter アカウントの情報を取得する
+
+        Returns:
+            schemas.TweetUser | schemas.TwitterAPIResult: Twitter アカウントの情報 (失敗時はエラーメッセージ)
+        """
+
+        # Twitter GraphQL API にリクエスト
+        response = await self.invokeGraphQLAPI(
+            endpoint_name='Viewer',
+            variables={
+                'withCommunitiesMemberships': True,
+            },
+            additional_flags={
+                'fieldToggles': {
+                    'isDelegate': False,
+                    'withAuxiliaryUserLabels': True,
+                },
+            },
+            error_message_prefix='ユーザー情報の取得に失敗しました。',
+        )
+
+        # 戻り値が str の場合、ユーザー情報の取得に失敗している (エラーメッセージが返ってくる)
+        if isinstance(response, str):
+            logging.error(f'{self.log_prefix} Failed to fetch logged viewer: {response}')
+            return schemas.TwitterAPIResult(
+                is_success=False,
+                detail=response,  # エラーメッセージをそのまま返す
+            )
+
+        # レスポンスからユーザー情報を取得
+        ## レスポンス構造: data.viewer.user_results.result
+        try:
+            viewer = response.get('viewer', {})
+            user_results = viewer.get('user_results', {})
+            result = user_results.get('result', {})
+
+            # 必要な情報が存在しない場合はエラーを返す
+            if not result:
+                logging.error(f'{self.log_prefix} Failed to fetch logged viewer: user_results.result not found')
+                return schemas.TwitterAPIResult(
+                    is_success=False,
+                    detail='ユーザー情報の取得に失敗しました。レスポンスにユーザー情報が含まれていません。開発者に修正を依頼してください。',
+                )
+
+            # ユーザー ID を取得
+            user_id = result.get('rest_id')
+            if not user_id:
+                logging.error(f'{self.log_prefix} Failed to fetch logged viewer: rest_id not found')
+                return schemas.TwitterAPIResult(
+                    is_success=False,
+                    detail='ユーザー情報の取得に失敗しました。ユーザー ID を取得できませんでした。開発者に修正を依頼してください。',
+                )
+
+            # ユーザー名とスクリーンネームを取得
+            core = result.get('core', {})
+            name = core.get('name', '')
+            screen_name = core.get('screen_name', '')
+            if not name or not screen_name:
+                logging.error(f'{self.log_prefix} Failed to fetch logged viewer: name or screen_name not found')
+                return schemas.TwitterAPIResult(
+                    is_success=False,
+                    detail='ユーザー情報の取得に失敗しました。ユーザー名またはスクリーンネームを取得できませんでした。開発者に修正を依頼してください。',
+                )
+
+            # アイコン URL を取得
+            avatar = result.get('avatar', {})
+            icon_url = avatar.get('image_url', '')
+            if not icon_url:
+                logging.error(f'{self.log_prefix} Failed to fetch logged viewer: image_url not found')
+                return schemas.TwitterAPIResult(
+                    is_success=False,
+                    detail='ユーザー情報の取得に失敗しました。アイコン URL を取得できませんでした。開発者に修正を依頼してください。',
+                )
+
+            # (ランダムな文字列)_normal.jpg だと画像サイズが小さいので、(ランダムな文字列).jpg に置換
+            icon_url = icon_url.replace('_normal', '')
+
+            return schemas.TweetUser(
+                source='Twitter',
+                id=str(user_id),
+                name=name,
+                screen_name=screen_name,
+                icon_url=icon_url,
+            )
+
+        except Exception as ex:
+            # 予期しないエラーが発生した場合
+            logging.error(f'{self.log_prefix} Failed to fetch logged viewer:', exc_info=ex)
+            logging.error(f'{self.log_prefix} Response: {response}')
+            return schemas.TwitterAPIResult(
+                is_success=False,
+                detail='ユーザー情報の取得に失敗しました。予期しないエラーが発生しました。開発者に修正を依頼してください。',
+            )
+
+    async def createTweet(
+        self,
         tweet: str,
-        media_ids: list[str] = [],
-        x_client_transaction_id: str | None = None,
+        images: list[UploadFile],
+        in_reply_to_status_id: str | None = None,
     ) -> schemas.PostTweetResult | schemas.TwitterAPIResult:
         """
-        ツイートを送信する
+        Twitter Web App のツイート送信モーダルを通じてツイートを送信する
+        読み取り系 API (invokeGraphQLAPI) と異なり、Twitter Web App の正規 UI 経路を通すため、
+        user_flow.json の scribe イベント (new_tweet_button click, compose show, send_tweet 等) が自然に発火する
+        画像アップロードも Twitter Web App の UI の自動操作で行うため、フィンガープリントの不一致が発生しないようになっている
 
         Args:
             tweet (str): ツイート内容
-            media_ids (list[str], optional): 添付するメディアの ID のリスト (デフォルトは空リスト)
-            x_client_transaction_id (str, optional): ブラウザ側で算出して API リクエストヘッダーに添付された X-Client-Transaction-ID ヘッダーの値
+            images (list[UploadFile]): 添付する画像（無いときは空リスト）
+            in_reply_to_status_id (str | None): リプライ先のツイート ID (None の場合は単独ツイート)
 
         Returns:
             schemas.PostTweetResult | schemas.TwitterAPIResult: ツイートの送信結果
         """
 
-        # まだ排他制御用のロックが存在しない場合は初期化
-        screen_name = self.twitter_account.screen_name
-        if screen_name not in self.__tweet_locks:
-            self.__tweet_locks[screen_name] = _TweetLockInfo(lock=asyncio.Lock(), last_tweet_time=0.0)
-
-        # ツイートの最小送信間隔を守るためにロックを取得
-        async with self.__tweet_locks[screen_name]['lock']:
-
-            # 最後のツイート時刻から最小送信間隔を経過していない場合は待機
-            current_time = time.time()
-            last_tweet_time = self.__tweet_locks[screen_name]['last_tweet_time']
-            wait_time = max(0, self.MINIMUM_TWEET_INTERVAL - (current_time - last_tweet_time))
-            if wait_time > 0:
-                await asyncio.sleep(wait_time)
-
-            # 画像の media_id をリストに格納 (画像がない場合は空のリストになる)
-            media_entities: list[dict[str, Any]] = []
-            for media_id in media_ids:
-                media_entities.append({
-                    'media_id': media_id,
-                    'tagged_users': []
-                })
-
-            # Twitter GraphQL API にリクエスト
-            response = await self.invokeGraphQLAPI(
-                endpoint_info = self.ENDPOINT_INFOS['CreateTweet'],
-                variables = {
-                    'tweet_text': tweet,
-                    'dark_request': False,
-                    'media': {
-                        'media_entities': media_entities,
-                        'possibly_sensitive': False,
-                    },
-                    'semantic_annotation_ids': [],
-                    'disallowed_reply_options': None,
-                },
-                x_client_transaction_id = x_client_transaction_id,
-                error_message_prefix = 'ツイートの送信に失敗しました。',
+        logging.info(f'{self.log_prefix} Posting tweet: {tweet} ({len(images)} images)')
+        for image in images:
+            logging.debug(
+                f'{self.log_prefix} Attached image file: {image.filename or "capture.jpg"} '
+                f'(content-type: {image.content_type or "image/jpeg"})',
             )
 
-            # 最後のツイート時刻を更新
-            self.__tweet_locks[screen_name]['last_tweet_time'] = time.time()
+        # ツイートの最小送信間隔を守る、またステートフルなヘッドレスブラウザの状態整合性を保つため、ロックを取得
+        async with self._tweet_lock:
+            logging.info(f'{self.log_prefix} Acquired tweet lock.')
 
-            # 戻り値が str の場合、ツイートの送信に失敗している (エラーメッセージが返ってくる)
-            if isinstance(response, str):
-                logging.error(f'[TwitterGraphQLAPI] Failed to create tweet: {response}')
-                return schemas.TwitterAPIResult(
-                    is_success = False,
-                    detail = response,  # エラーメッセージをそのまま返す
+            # 最後のツイート時刻から最小送信間隔を経過していない場合のスロットル期限を計算する
+            current_time = time.time()
+            minimum_tweet_interval_end = self._last_tweet_time + self.MINIMUM_TWEET_INTERVAL
+            throttle_deadline = current_time
+            if current_time < minimum_tweet_interval_end:
+                # 最小送信間隔ちょうどで毎回送信されると等間隔になって不自然なため、
+                # 0.001 秒単位で 0.1〜4.0 秒のランダムな追加待機時間を加えて送信タイミングをわずかに揺らす
+                additional_wait_time = round(random.uniform(
+                    self.MINIMUM_TWEET_INTERVAL_JITTER_MIN,
+                    self.MINIMUM_TWEET_INTERVAL_JITTER_MAX,
+                ), 3)
+                throttle_deadline = minimum_tweet_interval_end + additional_wait_time
+                logging.info(
+                    f'{self.log_prefix} Minimum tweet interval is active. '
+                    f'throttle deadline in: {max(0.0, throttle_deadline - current_time):.3f}s',
                 )
 
-            # おそらくツイートに成功しているはずなので、可能であれば送信したツイートの ID を取得
-            tweet_id: str
-            try:
-                tweet_id = str(response['create_tweet']['tweet_results']['result']['rest_id'])
-            except Exception:
-                # API レスポンスが変わっているなどでツイート ID を取得できなかった
-                tweet_id = '__error__'
+            # ブラウザプロセスが外部から kill されていないかを事前確認する
+            if self._browser.is_setup_complete is True and not self._browser.isBrowserProcessAlive():
+                await self.__markBrowserForRestart(
+                    'Browser process is no longer alive (may have been killed externally). Marking browser for re-setup...',
+                )
+                self._consecutive_compose_failures = 0
 
+            # ツイート送信モーダルの操作が連続で失敗している場合、ブラウザを再起動して状態をリセットする
+            ## Twitter の画像アップロード API やページ状態が壊れている場合に、フレッシュなブラウザで回復を試みるための処理
+            if self._consecutive_compose_failures >= 2 and self._browser.is_setup_complete is True:
+                await self.__markBrowserForRestart(
+                    f'{self._consecutive_compose_failures} consecutive tweet posting failures detected. '
+                    f'Restarting browser to reset state...',
+                )
+                self._consecutive_compose_failures = 0
+
+            # ヘッドレスブラウザがまだ起動していない場合、セットアップ処理を実行
+            if self._browser.is_setup_complete is not True:
+                try:
+                    await self._browser.setup()
+                except (BrowserBinaryNotFoundError, BrowserConnectionFailedError, BrowserSetupTimeoutError) as ex:
+                    logging.error(f'{self.log_prefix} Failed to setup browser:', exc_info=ex)
+                    return schemas.TwitterAPIResult(
+                        is_success=False,
+                        detail=str(ex),
+                    )
+
+            # ツイート送信フロー開始前にアイドルシャットダウンタスクをキャンセルする
+            ## ツイート送信フローは画像アップロード待ち (最大60秒) + CreateTweet 待ち (最大30秒) で
+            ## BROWSER_IDLE_TIMEOUT (60秒) を超える場合があるため、
+            ## 再スケジュールせずキャンセルのみ行い、フロー完了後の finally で再スケジュールする
+            async with self._shutdown_task_lock:
+                if self._shutdown_task is not None:
+                    if not self._shutdown_task.done():
+                        self._shutdown_task.cancel()
+                    self._shutdown_task = None
+
+            # ツイート送信モーダルを通じてツイートを送信する
+            try:
+                throttle_remaining_seconds = max(0.0, throttle_deadline - time.time())
+                logging.info(f'{self.log_prefix} Posting tweet via tweet posting modal...')
+                compose_ui_result = await self._browser.postTweetViaComposeUI(
+                    tweet_text=tweet,
+                    images=images,
+                    throttle_remaining_seconds=throttle_remaining_seconds,
+                    in_reply_to_status_id=in_reply_to_status_id,
+                )
+            except Exception as ex:
+                logging.error(f'{self.log_prefix} Failed to post tweet via tweet posting modal:', exc_info=ex)
+                self._consecutive_compose_failures += 1
+                # ブラウザとの接続が切断されている場合は、ブラウザプロセスの孤児化を防ぐため
+                # shutdown を含む完全な再起動準備を行う
+                if self.__isConnectionLostError(ex):
+                    try:
+                        await self.__markBrowserForRestart(
+                            'Browser connection lost during tweet posting. '
+                            'Shutting down browser for re-setup on next call...',
+                        )
+                    except Exception as restart_ex:
+                        logging.warning(f'{self.log_prefix} Error during browser restart marking:', exc_info=restart_ex)
+                return schemas.TwitterAPIResult(
+                    is_success=False,
+                    detail='Twitter へのツイートに失敗しました。Twitter API に接続できませんでした。',
+                )
+            finally:
+                # ツイート送信完了後、更新された可能性があるヘッドレスブラウザの Cookie を DB 側に反映
+                ## ブラウザが壊れた状態 (shutdown 後、re-setup 失敗後など) では Cookie 保存をスキップする
+                if self._browser.is_setup_complete is True:
+                    try:
+                        cookies_txt_content = await self._browser.saveTwitterCookiesToNetscapeFormat()
+                        self.twitter_account.access_token_secret = self.twitter_account.encryptAccessTokenSecret(cookies_txt_content)
+                        await self.twitter_account.save()
+                    except Exception as ex:
+                        logging.warning(f'{self.log_prefix} Failed to save cookies after tweet posting:', exc_info=ex)
+
+                # GraphQL API の前回呼び出し時刻を更新
+                self._last_graphql_api_call_time = time.time()
+
+                # 一定時間後にヘッドレスブラウザをシャットダウンするタスクを再スケジュールする
+                await self.__scheduleShutdownTask()
+
+            # Ctrl+Enter で送信したが、なんらかの理由でレスポンスがタイムアウトした可能性も考えられる
+            # その場合でもすでに Twitter 側でツイート送信が完了している可能性があるため、
+            # ツイート送信モーダル操作時のツイート送信完了時刻を前回のツイート送信時刻として記録する
+            if compose_ui_result.compose_submitted_at is not None:
+                self._last_tweet_time = compose_ui_result.compose_submitted_at
+
+            # ツイート送信モーダルからのツイート送信に失敗した場合
+            if compose_ui_result.is_success is not True:
+                self._consecutive_compose_failures += 1
+                error_message = compose_ui_result.error_message or '不明なエラー'
+                logging.error(
+                    f'{self.log_prefix} Failed to create tweet via tweet posting modal: {error_message} '
+                    f'(consecutive failures: {self._consecutive_compose_failures})',
+                )
+                # postTweetViaComposeUI() は内部で例外をキャッチして結果を返すため、
+                # CDP 接続断でもここに到達する (createTweet() の except ブロックには入らない)
+                # ブラウザプロセスが死んでいたら、次回呼び出し時の再起動を待たずに即座にフラグをリセットする
+                if not self._browser.isBrowserProcessAlive():
+                    try:
+                        await self.__markBrowserForRestart(
+                            'Browser process died during tweet posting modal operation. '
+                            'Shutting down browser for re-setup on next call...',
+                        )
+                    except Exception as restart_ex:
+                        logging.warning(f'{self.log_prefix} Error during browser restart marking:', exc_info=restart_ex)
+                return schemas.TwitterAPIResult(
+                    is_success=False,
+                    detail=f'Twitter へのツイートに失敗しました。{error_message}',
+                )
+
+            # CreateTweet のレスポンスを解析する
+            # 連続失敗カウンターのリセットはレスポンス検証が全て通った最終成功地点 (tweet_id 取得成功時) で行う
+            ## ここでリセットすると、後続の graphql_api_result is None / 非 2xx HTTP / 空 tweet_results などの
+            ## レスポンス検証失敗がカウンターに蓄積されず、壊れたブラウザが再起動されない問題が発生するため
+            graphql_api_result = compose_ui_result.graphql_api_result
+            if graphql_api_result is None:
+                self._consecutive_compose_failures += 1
+                logging.error(f'{self.log_prefix} Failed to get CreateTweet response: graphql_api_result is None')
+                return schemas.TwitterAPIResult(
+                    is_success=False,
+                    detail='Twitter へのツイートに失敗しました。CreateTweet のレスポンスが取得できませんでした。',
+                )
+
+            parsed_response = graphql_api_result.parsed_response
+            status_code = graphql_api_result.status_code
+
+            # HTTP ステータスコードが 200 系以外の場合
+            if status_code is not None and not (200 <= status_code < 300):
+                self._consecutive_compose_failures += 1
+                logging.error(f'{self.log_prefix} CreateTweet returned HTTP {status_code}.')
+                logging.error(f'{self.log_prefix} Response: {parsed_response}')
+
+                # エラーレスポンスから Twitter API エラーコードを抽出する
+                if isinstance(parsed_response, dict) and 'errors' in parsed_response:
+                    error_info = parsed_response['errors'][0]
+                    error_code = error_info.get('code', -1)
+                    error_message = self.ERROR_MESSAGES.get(
+                        error_code,
+                        f'Code: {error_code} / Message: {error_info.get("message", "Unknown error")}',
+                    )
+                    return schemas.TwitterAPIResult(
+                        is_success=False,
+                        detail=f'Twitter へのツイートに失敗しました。{error_message}',
+                    )
+
+                return schemas.TwitterAPIResult(
+                    is_success=False,
+                    detail=f'Twitter へのツイートに失敗しました。Twitter API から HTTP {status_code} エラーが返されました。',
+                )
+
+            # レスポンスから data を取り出す
+            if not isinstance(parsed_response, dict):
+                self._consecutive_compose_failures += 1
+                logging.error(f'{self.log_prefix} Failed to extract tweet ID from response: parsed_response is not a dict')
+                logging.error(f'{self.log_prefix} Response: {parsed_response}')
+                return schemas.TwitterAPIResult(
+                    is_success=False,
+                    detail='Twitter へのツイートに失敗しました。レスポンスの形式が不正です。',
+                )
+
+            # エラーが含まれていて data がない場合
+            if 'errors' in parsed_response and 'data' not in parsed_response:
+                self._consecutive_compose_failures += 1
+                error_info = parsed_response['errors'][0]
+                error_code = error_info.get('code', -1)
+                error_message = self.ERROR_MESSAGES.get(
+                    error_code,
+                    f'Code: {error_code} / Message: {error_info.get("message", "Unknown error")}',
+                )
+                logging.error(f'{self.log_prefix} CreateTweet API error: {error_message}')
+                return schemas.TwitterAPIResult(
+                    is_success=False,
+                    detail=f'Twitter へのツイートに失敗しました。{error_message}',
+                )
+
+            # data キーからツイート ID を抽出する
+            response_data = parsed_response.get('data', parsed_response)
+
+            try:
+                # tweet_results が空辞書の場合は、Twitter 側のレートリミットやスパム制限のシグナルの可能性がある
+                ## HTTP 200 でエラーも含まれないが、ツイートがサイレントに破棄されるケースに該当する
+                ## この状態になった後に画像アップロードが通らなくなる現象が確認されており、
+                ## 想定外のページ状態に陥っている可能性が高い
+                ## response_data (= parsed_response['data']) が想定外の構造の場合は後続の except で処理される
+                tweet_results = response_data.get('create_tweet', {}).get('tweet_results', None)
+                if isinstance(tweet_results, dict) and len(tweet_results) == 0:
+                    # ツイート送信モーダルの操作自体は成功したがレスポンスが空なので、連続失敗としてカウントする
+                    ## この状態のブラウザでは以降の画像アップロードが通らなくなる現象が確認されているため、
+                    ## カウンターを進めて閾値に達したら次回呼び出し時にブラウザを再起動させる
+                    self._consecutive_compose_failures += 1
+                    logging.warning(
+                        f'{self.log_prefix} CreateTweet returned empty tweet_results (HTTP 200 but no tweet data). '
+                        f'This may indicate Twitter rate limiting or spam detection. '
+                        f'Subsequent image uploads may fail. '
+                        f'(consecutive failures: {self._consecutive_compose_failures})',
+                    )
+                    logging.warning(f'{self.log_prefix} Response: {parsed_response}')
+                    # スクリーンショットを保存して、ブラウザ画面に何が表示されているかを確認可能にする
+                    await self._browser.captureDebugScreenshot('empty_tweet_results')
+                    return schemas.TwitterAPIResult(
+                        is_success=False,
+                        detail='Twitter へのツイートに失敗しました。Twitter からの応答が空でした。レートリミットまたはスパム制限の可能性があります。',
+                    )
+
+                tweet_id = str(response_data['create_tweet']['tweet_results']['result']['rest_id'])
+            except Exception as ex:
+                # この時点で HTTP 200 + errors なし + data キーありのため、ツイート自体は送信済みと判断する
+                ## parsed_response は dict 検証済みで、data キーの存在も確認済みだが、
+                ## response_data (= parsed_response['data']) の中身が想定外の構造
+                ## (create_tweet や tweet_results、rest_id が欠落) の場合にここで KeyError 等がキャッチされる
+                logging.error(f'{self.log_prefix} Failed to extract tweet ID from response:', exc_info=ex)
+                logging.error(f'{self.log_prefix} Response: {parsed_response}')
+                # ツイート送信自体は成功しているため、連続失敗カウンターをリセットする
+                self._consecutive_compose_failures = 0
+                return schemas.PostTweetResult(
+                    is_success=True,
+                    detail='Twitter にツイートしましたが、ツイート ID を取得できませんでした。',
+                    tweet_url='https://x.com/i/status/__error__',
+                    tweet_id=None,
+                )
+
+            # ツイートの送信に成功し、tweet_id も取得できたので連続失敗カウンターをリセットする
+            self._consecutive_compose_failures = 0
+            logging.info(f'{self.log_prefix} Tweet posted successfully. tweet_id: {tweet_id}')
             return schemas.PostTweetResult(
-                is_success = True,
-                detail = 'ツイートを送信しました。',
-                tweet_url = f'https://twitter.com/i/status/{tweet_id}',
+                is_success=True,
+                detail='Twitter にツイートしました。',
+                tweet_url=f'https://x.com/i/status/{tweet_id}',
+                tweet_id=tweet_id,
             )
 
-
-    async def createRetweet(self, tweet_id: str, x_client_transaction_id: str | None = None) -> schemas.TwitterAPIResult:
+    async def createRetweet(self, tweet_id: str) -> schemas.TwitterAPIResult:
         """
         ツイートをリツイートする
 
         Args:
             tweet_id (str): リツイートするツイートの ID
-            x_client_transaction_id (str, optional): ブラウザ側で算出して API リクエストヘッダーに添付された X-Client-Transaction-ID ヘッダーの値
 
         Returns:
             schemas.TwitterAPIResult: リツイートの結果
@@ -653,36 +973,33 @@ class TwitterGraphQLAPI:
 
         # Twitter GraphQL API にリクエスト
         response = await self.invokeGraphQLAPI(
-            endpoint_info = self.ENDPOINT_INFOS['CreateRetweet'],
-            variables = {
+            endpoint_name='CreateRetweet',
+            variables={
                 'tweet_id': tweet_id,
                 'dark_request': False,
             },
-            x_client_transaction_id = x_client_transaction_id,
-            error_message_prefix = 'リツイートに失敗しました。',
+            error_message_prefix='リツイートに失敗しました。',
         )
 
         # 戻り値が str の場合、リツイートに失敗している (エラーメッセージが返ってくる)
         if isinstance(response, str):
-            logging.error(f'[TwitterGraphQLAPI] Failed to create retweet: {response}')
+            logging.error(f'{self.log_prefix} Failed to create retweet: {response}')
             return schemas.TwitterAPIResult(
-                is_success = False,
-                detail = response,  # エラーメッセージをそのまま返す
+                is_success=False,
+                detail=response,  # エラーメッセージをそのまま返す
             )
 
         return schemas.TwitterAPIResult(
-            is_success = True,
-            detail = 'リツイートしました。',
+            is_success=True,
+            detail='リツイートしました。',
         )
 
-
-    async def deleteRetweet(self, tweet_id: str, x_client_transaction_id: str | None = None) -> schemas.TwitterAPIResult:
+    async def deleteRetweet(self, tweet_id: str) -> schemas.TwitterAPIResult:
         """
         ツイートのリツイートを取り消す
 
         Args:
             tweet_id (str): リツイートを取り消すツイートの ID
-            x_client_transaction_id (str, optional): ブラウザ側で算出して API リクエストヘッダーに添付された X-Client-Transaction-ID ヘッダーの値
 
         Returns:
             schemas.TwitterAPIResult: リツイートの取り消し結果
@@ -690,36 +1007,33 @@ class TwitterGraphQLAPI:
 
         # Twitter GraphQL API にリクエスト
         response = await self.invokeGraphQLAPI(
-            endpoint_info = self.ENDPOINT_INFOS['DeleteRetweet'],
-            variables = {
+            endpoint_name='DeleteRetweet',
+            variables={
                 'source_tweet_id': tweet_id,
                 'dark_request': False,
             },
-            x_client_transaction_id = x_client_transaction_id,
-            error_message_prefix = 'リツイートの取り消しに失敗しました。',
+            error_message_prefix='リツイートの取り消しに失敗しました。',
         )
 
         # 戻り値が str の場合、リツイートの取り消しに失敗している (エラーメッセージが返ってくる)
         if isinstance(response, str):
-            logging.error(f'[TwitterGraphQLAPI] Failed to delete retweet: {response}')
+            logging.error(f'{self.log_prefix} Failed to delete retweet: {response}')
             return schemas.TwitterAPIResult(
-                is_success = False,
-                detail = response,  # エラーメッセージをそのまま返す
+                is_success=False,
+                detail=response,  # エラーメッセージをそのまま返す
             )
 
         return schemas.TwitterAPIResult(
-            is_success = True,
-            detail = 'リツイートを取り消ししました。',
+            is_success=True,
+            detail='リツイートを取り消ししました。',
         )
 
-
-    async def favoriteTweet(self, tweet_id: str, x_client_transaction_id: str | None = None) -> schemas.TwitterAPIResult:
+    async def favoriteTweet(self, tweet_id: str) -> schemas.TwitterAPIResult:
         """
         ツイートをいいねする
 
         Args:
             tweet_id (str): いいねするツイートの ID
-            x_client_transaction_id (str, optional): ブラウザ側で算出して API リクエストヘッダーに添付された X-Client-Transaction-ID ヘッダーの値
 
         Returns:
             schemas.TwitterAPIResult: いいねの結果
@@ -727,35 +1041,32 @@ class TwitterGraphQLAPI:
 
         # Twitter GraphQL API にリクエスト
         response = await self.invokeGraphQLAPI(
-            endpoint_info = self.ENDPOINT_INFOS['FavoriteTweet'],
-            variables = {
+            endpoint_name='FavoriteTweet',
+            variables={
                 'tweet_id': tweet_id,
             },
-            x_client_transaction_id = x_client_transaction_id,
-            error_message_prefix = 'いいねに失敗しました。',
+            error_message_prefix='いいねに失敗しました。',
         )
 
         # 戻り値が str の場合、いいねに失敗している (エラーメッセージが返ってくる)
         if isinstance(response, str):
-            logging.error(f'[TwitterGraphQLAPI] Failed to favorite tweet: {response}')
+            logging.error(f'{self.log_prefix} Failed to favorite tweet: {response}')
             return schemas.TwitterAPIResult(
-                is_success = False,
-                detail = response,  # エラーメッセージをそのまま返す
+                is_success=False,
+                detail=response,  # エラーメッセージをそのまま返す
             )
 
         return schemas.TwitterAPIResult(
-            is_success = True,
-            detail = 'いいねしました。',
+            is_success=True,
+            detail='いいねしました。',
         )
 
-
-    async def unfavoriteTweet(self, tweet_id: str, x_client_transaction_id: str | None = None) -> schemas.TwitterAPIResult:
+    async def unfavoriteTweet(self, tweet_id: str) -> schemas.TwitterAPIResult:
         """
         ツイートのいいねを取り消す
 
         Args:
             tweet_id (str): いいねを取り消すツイートの ID
-            x_client_transaction_id (str, optional): ブラウザ側で算出して API リクエストヘッダーに添付された X-Client-Transaction-ID ヘッダーの値
 
         Returns:
             schemas.TwitterAPIResult: いいねの取り消し結果
@@ -763,79 +1074,278 @@ class TwitterGraphQLAPI:
 
         # Twitter GraphQL API にリクエスト
         response = await self.invokeGraphQLAPI(
-            endpoint_info = self.ENDPOINT_INFOS['UnfavoriteTweet'],
-            variables = {
+            endpoint_name='UnfavoriteTweet',
+            variables={
                 'tweet_id': tweet_id,
             },
-            x_client_transaction_id = x_client_transaction_id,
-            error_message_prefix = 'いいねの取り消しに失敗しました。',
+            error_message_prefix='いいねの取り消しに失敗しました。',
         )
 
         # 戻り値が str の場合、いいねの取り消しに失敗している (エラーメッセージが返ってくる)
         if isinstance(response, str):
-            logging.error(f'[TwitterGraphQLAPI] Failed to unfavorite tweet: {response}')
+            logging.error(f'{self.log_prefix} Failed to unfavorite tweet: {response}')
             return schemas.TwitterAPIResult(
-                is_success = False,
-                detail = response,  # エラーメッセージをそのまま返す
+                is_success=False,
+                detail=response,  # エラーメッセージをそのまま返す
             )
 
         return schemas.TwitterAPIResult(
-            is_success = True,
-            detail = 'いいねを取り消しました。',
+            is_success=True,
+            detail='いいねを取り消しました。',
         )
 
-
-    def __getCursorIDFromTimelineAPIResponse(self, response: dict[str, Any], cursor_type: Literal['Top', 'Bottom']) -> str | None:
+    def __getTimelineInstructions(self, response: dict[str, Any]) -> list[dict[str, Any]]:
         """
-        GraphQL API のうちツイートタイムライン系の API レスポンスから、指定されたタイプに一致するカーソル ID を取得する
-        次の API リクエスト時にカーソル ID を指定すると、そのカーソル ID から次のページを取得できる
+        GraphQL API のうちツイートタイムライン系の API レスポンスから命令列を取得する
 
         Args:
             response (dict[str, Any]): ツイートタイムライン系の API レスポンス
-            cursor_type (Literal['Top', 'Bottom']): カーソル ID タイプ (Top: 現在より最新のツイート, Bottom: 現在より過去のツイート)
 
         Returns:
-            str | None: カーソル ID (仕様変更などで取得できなかった場合は None)
+            list[dict[str, Any]]: タイムライン命令列
         """
 
         # HomeLatestTimeline からのレスポンス
         if 'home' in response:
-            instructions = response.get('home', {}).get('home_timeline_urt', {}).get('instructions', [])
+            return response.get('home', {}).get('home_timeline_urt', {}).get('instructions', [])
         # SearchTimeline からのレスポンス
         elif 'search_by_raw_query' in response:
-            instructions = response.get('search_by_raw_query', {}).get('search_timeline', {}).get('timeline', {}).get('instructions', [])
+            return (
+                response.get('search_by_raw_query', {})
+                .get('search_timeline', {})
+                .get('timeline', {})
+                .get('instructions', [])
+            )
         # それ以外のレスポンス (通常あり得ないため、ここに到達した場合はレスポンス構造が変わった可能性が高い)
         else:
-            instructions = []
-            logging.warning(f'[TwitterGraphQLAPI] Unknown timeline response format: {response}')
+            logging.warning(f'{self.log_prefix} Unknown timeline response format: {response}')
+            return []
 
-        for instruction in instructions:
-            if instruction.get('type') == 'TimelineAddEntries':
-                entries = instruction.get('entries', [])
-                for entry in entries:
-                    content = entry.get('content', {})
-                    if (content.get('entryType') == 'TimelineTimelineCursor' and \
-                        content.get('cursorType') == cursor_type):
-                        return content.get('value')
-                    # Bottom 指定時、たまに通常 cursorType が Bottom になるところ Gap になっている場合がある
-                    # その場合は Bottom の Cursor として解釈する
-                    elif (content.get('entryType') == 'TimelineTimelineCursor' and \
-                        content.get('cursorType') == 'Gap' and cursor_type == 'Bottom'):
-                        return content.get('value')
-            elif instruction.get('type') == 'TimelineReplaceEntry':
-                entry = instruction.get('entry', {})
-                content = entry.get('content', {})
-                if (content.get('entryType') == 'TimelineTimelineCursor' and \
-                    content.get('cursorType') == cursor_type):
-                    return content.get('value')
-                # Bottom 指定時、たまに通常 cursorType が Bottom になるところ Gap になっている場合がある
-                # その場合は Bottom の Cursor として解釈する
-                elif (content.get('entryType') == 'TimelineTimelineCursor' and \
-                    content.get('cursorType') == 'Gap' and cursor_type == 'Bottom'):
-                    return content.get('value')
+    def __getRawTweetObjectFromTimelineItemContent(self, item_content: dict[str, Any]) -> dict[str, Any] | None:
+        """
+        タイムライン項目から生のツイートオブジェクトを取得する
+
+        Args:
+            item_content (dict[str, Any]): タイムライン項目
+
+        Returns:
+            dict[str, Any] | None: ツイートオブジェクト (ツイート項目ではない場合は None)
+        """
+
+        if item_content.get('itemType') != 'TimelineTweet':
+            return None
+
+        tweet_results = item_content.get('tweet_results', {}).get('result')
+        if isinstance(tweet_results, dict) is False:
+            return None
+
+        if tweet_results.get('__typename') in ['Tweet', 'TweetWithVisibilityResults']:
+            return tweet_results
 
         return None
 
+    def __getRawTweetObjectFromTimelineModule(self, content: dict[str, Any]) -> dict[str, Any] | None:
+        """
+        タイムラインモジュールから代表ツイート 1 件分の生オブジェクトを取得する
+
+        Args:
+            content (dict[str, Any]): タイムラインモジュール
+
+        Returns:
+            dict[str, Any] | None: 代表ツイートのオブジェクト (対象外モジュールの場合は None)
+        """
+
+        # Twitter Web App はスレッドや返信チェーンを `TimelineTimelineModule` として返す
+        ## KonomiTV ではスレッド全体を表示しないため、実況として流れてきた最新の 1 件だけを通常ツイートとして扱う
+        if (
+            content.get('entryType') != 'TimelineTimelineModule'
+            or content.get('displayType') != 'VerticalConversation'
+        ):
+            return None
+
+        raw_tweet_objects: list[dict[str, Any]] = []
+        for module_item in content.get('items', []):
+            if isinstance(module_item, dict) is False:
+                continue
+
+            module_item_body = module_item.get('item', {})
+            if isinstance(module_item_body, dict) is False:
+                continue
+
+            # 通常は `item.itemContent` にツイート本体が入る
+            ## レスポンス形状が少し変わった場合でも、同じ項目内の `itemContent` だけは候補にする
+            item_content = module_item_body.get('itemContent')
+            if isinstance(item_content, dict) is False:
+                item_content = module_item.get('itemContent')
+            if isinstance(item_content, dict) is False:
+                continue
+
+            raw_tweet_object = self.__getRawTweetObjectFromTimelineItemContent(item_content)
+            if raw_tweet_object is not None:
+                raw_tweet_objects.append(raw_tweet_object)
+
+        if len(raw_tweet_objects) == 0:
+            return None
+
+        newest_raw_tweet_object: dict[str, Any] | None = None
+        newest_created_at: datetime | None = None
+        for raw_tweet_object in raw_tweet_objects:
+            created_at = self.__getCreatedAtFromRawTweetObject(raw_tweet_object)
+            if created_at is None:
+                continue
+
+            # 返信チェーンではタイムラインに流れてきた最新投稿を代表として抜き出す
+            ## 作成日時が取れない場合に備え、最後の有効ツイートを後段のフォールバックに残す
+            if newest_created_at is None or created_at > newest_created_at:
+                newest_raw_tweet_object = raw_tweet_object
+                newest_created_at = created_at
+
+        if newest_raw_tweet_object is not None:
+            return newest_raw_tweet_object
+
+        return raw_tweet_objects[-1]
+
+    def __getRawTweetObjectFromTimelineEntry(self, entry: dict[str, Any]) -> dict[str, Any] | None:
+        """
+        タイムラインエントリから生のツイートオブジェクトを取得する
+
+        Args:
+            entry (dict[str, Any]): タイムラインエントリ
+
+        Returns:
+            dict[str, Any] | None: ツイートオブジェクト (ツイートエントリではない場合は None)
+        """
+
+        # 広告ツイートは表示対象外なので、境界計算にも含めない
+        if entry.get('entryId', '').startswith('promoted-') is True:
+            return None
+
+        content = entry.get('content', {})
+        if content.get('entryType') == 'TimelineTimelineItem':
+            return self.__getRawTweetObjectFromTimelineItemContent(content.get('itemContent', {}))
+
+        return self.__getRawTweetObjectFromTimelineModule(content)
+
+    def __getCreatedAtFromRawTweetObject(self, raw_tweet_object: dict[str, Any]) -> datetime | None:
+        """
+        生のツイートオブジェクトから作成日時を取得する
+
+        Args:
+            raw_tweet_object (dict[str, Any]): ツイートオブジェクト
+
+        Returns:
+            datetime | None: ツイートの作成日時 (取得できない場合は None)
+        """
+
+        # 可視性制限付きツイートは実体が tweet に入るため、通常ツイートと同じ位置へ揃える
+        if raw_tweet_object.get('__typename') == 'TweetWithVisibilityResults':
+            raw_tweet_object = raw_tweet_object.get('tweet', {})
+
+        created_at = raw_tweet_object.get('legacy', {}).get('created_at')
+        if isinstance(created_at, str) is False:
+            return None
+
+        return datetime.strptime(created_at, '%a %b %d %H:%M:%S %z %Y').astimezone(JST)
+
+    def __getCursorsFromTimelineAPIResponse(
+        self, response: dict[str, Any]
+    ) -> tuple[str | None, list[schemas.TimelineLoadMoreCursor]]:
+        """
+        ツイートタイムライン系レスポンスから KonomiTV が扱うカーソル情報を取得する
+
+        Args:
+            response (dict[str, Any]): ツイートタイムライン系の API レスポンス
+
+        Returns:
+            tuple[str | None, list[schemas.TimelineLoadMoreCursor]]: 新着方向カーソルとさらに表示用カーソル
+        """
+
+        timeline_entries: list[dict[str, Any]] = []
+        for instruction in self.__getTimelineInstructions(response):
+            if instruction.get('type') == 'TimelineAddEntries':
+                timeline_entries.extend(instruction.get('entries', []))
+            elif instruction.get('type') == 'TimelineReplaceEntry':
+                timeline_entries.append(instruction.get('entry', {}))
+
+        parsed_entries: list[dict[str, Any]] = []
+        for entry in timeline_entries:
+            content = entry.get('content', {})
+            raw_tweet_object = self.__getRawTweetObjectFromTimelineEntry(entry)
+
+            # Twitter が返すカーソルは、投稿と同じ命令列上の位置を持っている
+            ## gap の表示位置を再構成できるよう、カーソルと投稿を同じ配列で扱う
+            if raw_tweet_object is not None:
+                parsed_entries.append({
+                    'type': 'Tweet',
+                    'created_at': self.__getCreatedAtFromRawTweetObject(raw_tweet_object),
+                })
+                continue
+
+            if content.get('entryType') != 'TimelineTimelineCursor':
+                continue
+
+            twitter_cursor_type = content.get('cursorType')
+            cursor_id = content.get('value')
+            if isinstance(cursor_id, str) is False:
+                continue
+
+            if twitter_cursor_type in ['Top', 'Bottom', 'Gap', 'ShowMore']:
+                parsed_entries.append({
+                    'type': 'Cursor',
+                    'entry_id': entry.get('entryId'),
+                    'cursor_type': twitter_cursor_type,
+                    'cursor_id': cursor_id,
+                })
+            # スレッド展開用カーソルはホームタイムライン / 検索タイムラインの追加取得ボタンでは使わない
+            ## もし混入した場合も、ツイート一覧のページング状態を壊さないよう無視する
+            elif twitter_cursor_type in ['ShowMoreThreads', 'ShowMoreThreadsPrompt']:
+                logging.debug(f'{self.log_prefix} Ignored unsupported timeline cursor: {twitter_cursor_type}')
+
+        newer_cursor_id: str | None = None
+        load_more_cursors: list[schemas.TimelineLoadMoreCursor] = []
+        for index, parsed_entry in enumerate(parsed_entries):
+            if parsed_entry.get('type') != 'Cursor':
+                continue
+
+            twitter_cursor_type = parsed_entry['cursor_type']
+            if twitter_cursor_type == 'Top':
+                newer_cursor_id = parsed_entry['cursor_id']
+                continue
+
+            cursor_type_map: dict[str, Literal['Older', 'Gap', 'ShowMore']] = {
+                'Bottom': 'Older',
+                'Gap': 'Gap',
+                'ShowMore': 'ShowMore',
+            }
+            cursor_type = cursor_type_map.get(twitter_cursor_type)
+            if cursor_type is None:
+                continue
+
+            upper_created_at: datetime | None = None
+            lower_created_at: datetime | None = None
+
+            # カーソルの前後にある最も近い投稿を時刻境界にする
+            ## Twitter の命令列は投稿とカーソルを同じ表示順で返すため、その前後関係だけを使う
+            for upper_index in range(index - 1, -1, -1):
+                candidate_created_at = parsed_entries[upper_index].get('created_at')
+                if candidate_created_at is not None:
+                    upper_created_at = candidate_created_at
+                    break
+            for lower_index in range(index + 1, len(parsed_entries)):
+                candidate_created_at = parsed_entries[lower_index].get('created_at')
+                if candidate_created_at is not None:
+                    lower_created_at = candidate_created_at
+                    break
+
+            load_more_cursors.append(schemas.TimelineLoadMoreCursor(
+                cursor_type=cursor_type,
+                cursor_id=parsed_entry['cursor_id'],
+                entry_id=parsed_entry.get('entry_id') if isinstance(parsed_entry.get('entry_id'), str) else None,
+                upper_created_at=upper_created_at,
+                lower_created_at=lower_created_at,
+            ))
+
+        return newer_cursor_id, load_more_cursors
 
     def __getTweetsFromTimelineAPIResponse(self, response: dict[str, Any]) -> list[schemas.Tweet]:
         """
@@ -849,7 +1359,7 @@ class TwitterGraphQLAPI:
         """
 
         def format_tweet(raw_tweet_object: dict[str, Any]) -> schemas.Tweet:
-            """ API レスポンスから取得したツイート情報を schemas.Tweet に変換する """
+            """API レスポンスから取得したツイート情報を schemas.Tweet に変換する"""
 
             # もし '__typename' が 'TweetWithVisibilityResults' なら、ツイート情報がさらにネストされているのでそれを取得
             if raw_tweet_object['__typename'] == 'TweetWithVisibilityResults':
@@ -864,7 +1374,11 @@ class TwitterGraphQLAPI:
             ## なぜかリツイートと異なり legacy 以下ではなく直下に入っている
             quoted_tweet = None
             if 'quoted_status_result' in raw_tweet_object:
-                quoted_tweet = format_tweet(raw_tweet_object['quoted_status_result']['result'])
+                if 'result' not in raw_tweet_object['quoted_status_result']:
+                    # ごく稀に quoted_status_result.result が空のツイート情報が返ってくるので、その場合は警告を出した上で無視する
+                    logging.warning(f'{self.log_prefix} Quoted tweet not found: {raw_tweet_object.get("rest_id", "unknown")}')
+                else:
+                    quoted_tweet = format_tweet(raw_tweet_object['quoted_status_result']['result'])
 
             # 画像の URL を取得
             image_urls = []
@@ -875,13 +1389,19 @@ class TwitterGraphQLAPI:
                         image_urls.append(media['media_url_https'])
                     elif media['type'] in ['video', 'animated_gif']:
                         # content_type が video/mp4 かつ bitrate が最も高いものを取得
-                        mp4_variants: list[dict[str, Any]] = list(filter(lambda variant: variant['content_type'] == 'video/mp4', media['video_info']['variants']))
+                        mp4_variants: list[dict[str, Any]] = list(
+                            filter(
+                                lambda variant: variant['content_type'] == 'video/mp4', media['video_info']['variants']
+                            )
+                        )
                         if len(mp4_variants) > 0:
                             highest_bitrate_variant: dict[str, Any] = max(
                                 mp4_variants,
-                                key = lambda variant: int(variant['bitrate']) if 'bitrate' in variant else 0,  # type: ignore
+                                key=lambda variant: int(variant['bitrate']) if 'bitrate' in variant else 0,  # type: ignore
                             )
-                            movie_url = str(highest_bitrate_variant['url']) if 'url' in highest_bitrate_variant else None
+                            movie_url = (
+                                str(highest_bitrate_variant['url']) if 'url' in highest_bitrate_variant else None
+                            )
 
             # t.co の URL を展開した URL に置換
             expanded_text = raw_tweet_object['legacy']['full_text']
@@ -895,61 +1415,56 @@ class TwitterGraphQLAPI:
                 expanded_text = re.sub(r'\s*https://t\.co/\w+$', '', expanded_text)
 
             return schemas.Tweet(
-                id = raw_tweet_object['legacy']['id_str'],
-                created_at = datetime.strptime(raw_tweet_object['legacy']['created_at'], '%a %b %d %H:%M:%S %z %Y').astimezone(ZoneInfo('Asia/Tokyo')),
-                user = schemas.TweetUser(
-                    id = raw_tweet_object['core']['user_results']['result']['rest_id'],
-                    name = raw_tweet_object['core']['user_results']['result']['legacy']['name'],
-                    screen_name = raw_tweet_object['core']['user_results']['result']['legacy']['screen_name'],
+                source='Twitter',
+                id=raw_tweet_object['legacy']['id_str'],
+                created_at=datetime.strptime(
+                    raw_tweet_object['legacy']['created_at'], '%a %b %d %H:%M:%S %z %Y'
+                ).astimezone(JST),
+                user=schemas.TweetUser(
+                    source='Twitter',
+                    id=raw_tweet_object['core']['user_results']['result']['rest_id'],
+                    name=raw_tweet_object['core']['user_results']['result']['core']['name'],
+                    screen_name=raw_tweet_object['core']['user_results']['result']['core']['screen_name'],
                     # (ランダムな文字列)_normal.jpg だと画像サイズが小さいので、(ランダムな文字列).jpg に置換
-                    icon_url = raw_tweet_object['core']['user_results']['result']['legacy']['profile_image_url_https'].replace('_normal', ''),
+                    icon_url=raw_tweet_object['core']['user_results']['result']['avatar']['image_url'].replace(
+                        '_normal', ''
+                    ),
                 ),
-                text = expanded_text,
-                lang = raw_tweet_object['legacy']['lang'],
-                via = re.sub(r'<.+?>', '', raw_tweet_object['source']),
-                image_urls = image_urls if len(image_urls) > 0 else None,
-                movie_url = movie_url,
-                retweet_count = raw_tweet_object['legacy']['retweet_count'],
-                favorite_count = raw_tweet_object['legacy']['favorite_count'],
-                retweeted = raw_tweet_object['legacy']['retweeted'],
-                favorited = raw_tweet_object['legacy']['favorited'],
-                retweeted_tweet = retweeted_tweet,
-                quoted_tweet = quoted_tweet,
+                text=expanded_text,
+                lang=raw_tweet_object['legacy']['lang'],
+                via=re.sub(r'<.+?>', '', raw_tweet_object['source']),
+                image_urls=image_urls if len(image_urls) > 0 else None,
+                movie_url=movie_url,
+                retweet_count=raw_tweet_object['legacy']['retweet_count'],
+                favorite_count=raw_tweet_object['legacy']['favorite_count'],
+                retweeted=raw_tweet_object['legacy']['retweeted'],
+                favorited=raw_tweet_object['legacy']['favorited'],
+                retweeted_tweet=retweeted_tweet,
+                quoted_tweet=quoted_tweet,
             )
 
-        # HomeLatestTimeline からのレスポンス
-        if 'home' in response:
-            instructions = response.get('home', {}).get('home_timeline_urt', {}).get('instructions', [])
-        # SearchTimeline からのレスポンス
-        elif 'search_by_raw_query' in response:
-            instructions = response.get('search_by_raw_query', {}).get('search_timeline', {}).get('timeline', {}).get('instructions', [])
-        # それ以外のレスポンス (通常あり得ないため、ここに到達した場合はレスポンス構造が変わった可能性が高い)
-        else:
-            instructions = []
-            logging.warning(f'[TwitterGraphQLAPI] Unknown timeline response format: {response}')
-
         tweets: list[schemas.Tweet] = []
-        for instruction in instructions:
+        for instruction in self.__getTimelineInstructions(response):
             if instruction.get('type') == 'TimelineAddEntries':
                 entries = instruction.get('entries', [])
                 for entry in entries:
-                    # entryId が promoted- から始まるツイートは広告ツイートなので除外
-                    if entry.get('entryId', '').startswith('promoted-'):
-                        continue
-                    content = entry.get('content', {})
-                    if content.get('entryType') == 'TimelineTimelineItem' and \
-                    content.get('itemContent', {}).get('itemType') == 'TimelineTweet':
-                        tweet_results = content.get('itemContent', {}).get('tweet_results', {}).get('result')
-                        if tweet_results and tweet_results.get('__typename') in ['Tweet', 'TweetWithVisibilityResults']:
-                            tweets.append(format_tweet(tweet_results))
+                    tweet_results = self.__getRawTweetObjectFromTimelineEntry(entry)
+                    if tweet_results is not None:
+                        tweets.append(format_tweet(tweet_results))
+            elif instruction.get('type') == 'TimelineReplaceEntry':
+                # Twitter は gap 展開やスレッド差し替えで単一エントリを返すことがある
+                ## 通常の追加命令と同じ抽出関数を通し、会話モジュール内の代表ツイートも取りこぼさない
+                tweet_results = self.__getRawTweetObjectFromTimelineEntry(instruction.get('entry', {}))
+                if tweet_results is not None:
+                    tweets.append(format_tweet(tweet_results))
 
         return tweets
 
-
-    async def homeLatestTimeline(self,
+    async def homeLatestTimeline(
+        self,
         cursor_id: str | None = None,
-        count: int = 20,
-        x_client_transaction_id: str | None = None,
+        cursor_type: Literal['Top', 'Bottom', 'Gap', 'ShowMore'] = 'Top',
+        seen_tweet_ids: list[str] | None = None,
     ) -> schemas.TimelineTweetsResult | schemas.TwitterAPIResult:
         """
         タイムラインの最新ツイートを取得する
@@ -957,70 +1472,96 @@ class TwitterGraphQLAPI:
 
         Args:
             cursor_id (str | None, optional): 次のページを取得するためのカーソル ID (デフォルトは None)
-            count (int, optional): 取得するツイート数 (デフォルトは 20)
-            x_client_transaction_id (str, optional): ブラウザ側で算出して API リクエストヘッダーに添付された X-Client-Transaction-ID ヘッダーの値
+            cursor_type (Literal['Top', 'Bottom', 'Gap', 'ShowMore'], optional): カーソル ID タイプ
+            seen_tweet_ids (list[str] | None, optional): Twitter Web App 上で閲覧済みとして扱われるツイート ID のリスト (デフォルトは None)
 
         Returns:
             schemas.TimelineTweets | schemas.TwitterAPIResult: 検索結果
         """
 
+        # 30 秒制限は新着方向の更新だけに掛ける
+        ## スクロールや gap ボタンによる追加取得は Twitter Web App でも短い間隔で発生するため、ここで止めると未取得範囲が埋まらない
+        if cursor_id is not None and cursor_type == 'Top':
+            elapsed_seconds = time.time() - self._last_home_fetched_at
+            if elapsed_seconds < self.MIN_FETCH_INTERVAL_SECONDS:
+                return schemas.TimelineTweetsResult(
+                    is_success=True,
+                    detail=f'取得制限により抑制されました (経過: {elapsed_seconds:.1f} 秒)',
+                    tweets=[],
+                    newer_cursor_id=None,
+                    load_more_cursors=[],
+                    is_cursor_consumed=False,
+                )
+
         # variables の挿入順序を Twitter Web App に厳密に合わせるためにこのような実装としている
         variables: dict[str, Any] = {}
-        variables['count'] = count
+        additional_flags: dict[str, Any] | None = None
+        if cursor_id is None:
+            ## カーソル ID が指定されていないときは20件取得する (Twitter Web App の挙動に合わせる)
+            variables['count'] = 20
+        elif cursor_type == 'Top':
+            ## より新しいツイートを取得するためのカーソル ID が指定されているときは40件取得する
+            variables['count'] = 40
+        else:
+            ## より古い過去のツイートや未取得範囲を取得するためのカーソル ID が指定されているときは20件取得する
+            variables['count'] = 20
         if cursor_id is not None:
             variables['cursor'] = cursor_id
-        variables['includePromotedContent'] = True
-        variables['latestControlAvailable'] = True
+        variables['enableRanking'] = False   # 人気順ではなく、常に最新ツイートを取得する
+        variables['includePromotedContent'] = True  # 常に true を設定すべき (本家の内部実装に倣う)
         if cursor_id is None:
+            ## カーソル ID が指定されていないときは、ページの初回ロード時のリクエストを再現する
             variables['requestContext'] = 'launch'
-        variables['seenTweetIds'] = []  # おそらく実際に表示されたツイートの ID を入れるキーだが、取得できないので空リストを入れておく
+        if seen_tweet_ids is not None and len(seen_tweet_ids) > 0:
+            ## Twitter Web App では、タイムライン上で閲覧済み扱いになったツイート ID を seenTweetIds として送る
+            ## seenTweetIds は件数が多くなりやすいため (本家では最大150件程度) 、Twitter Web App と同様に forcePost を指定して POST で送信する
+            variables['seenTweetIds'] = seen_tweet_ids
+            additional_flags = {'forcePost': True}
 
         # Twitter GraphQL API にリクエスト
         response = await self.invokeGraphQLAPI(
-            endpoint_info = self.ENDPOINT_INFOS['HomeLatestTimeline'],
-            variables = variables,
-            x_client_transaction_id = x_client_transaction_id,
-            error_message_prefix = 'タイムラインの取得に失敗しました。',
+            endpoint_name='HomeLatestTimeline',
+            variables=variables,
+            additional_flags=additional_flags,
+            error_message_prefix='タイムラインの取得に失敗しました。',
         )
 
         # 戻り値が str の場合、タイムラインの取得に失敗している (エラーメッセージが返ってくる)
         if isinstance(response, str):
-            logging.error(f'[TwitterGraphQLAPI] Failed to fetch timeline: {response}')
+            logging.error(f'{self.log_prefix} Failed to fetch timeline: {response}')
             return schemas.TwitterAPIResult(
-                is_success = False,
-                detail = response,  # エラーメッセージをそのまま返す
+                is_success=False,
+                detail=response,  # エラーメッセージをそのまま返す
             )
 
-        # まずはカーソル ID を取得
-        ## カーソル ID が取得できなかった場合は仕様変更があったとみなし、エラーを返す
-        next_cursor_id = self.__getCursorIDFromTimelineAPIResponse(response, 'Top')  # 現在よりも新しいツイートを取得するためのカーソル ID
-        previous_cursor_id = self.__getCursorIDFromTimelineAPIResponse(response, 'Bottom')  # 現在よりも過去のツイートを取得するためのカーソル ID
-        if next_cursor_id is None or previous_cursor_id is None:
-            logging.error(f'[TwitterGraphQLAPI] Failed to fetch timeline: Cursor ID not found')
-            return schemas.TwitterAPIResult(
-                is_success = False,
-                detail = 'タイムラインの取得に失敗しました。カーソル ID を取得できませんでした。開発者に修正を依頼してください。',
-            )
+        # Twitter がレスポンス内に入れているカーソルエントリをそのまま抽象化する
+        ## Gap, ShowMore についても、API サーバーが指示した未取得範囲としてフロントエンドへ渡す
+        newer_cursor_id, load_more_cursors = self.__getCursorsFromTimelineAPIResponse(response)
 
-        # ツイートリストを取得
+        # ツイートリストを取得する
         ## 取得できなかった場合、あるいは単純に一致する結果がない場合は空のリストになる
         tweets = self.__getTweetsFromTimelineAPIResponse(response)
 
+        # 新着方向の実リクエストだけ、成功後に取得時刻を更新する
+        ## 失敗時まで更新すると一時的な通信失敗の直後に 30 秒待ちになり、ユーザー操作でリトライできなくなる
+        if cursor_id is None or cursor_type == 'Top':
+            self._last_home_fetched_at = time.time()
+
         return schemas.TimelineTweetsResult(
-            is_success = True,
-            detail = 'タイムラインを取得しました。',
-            next_cursor_id = next_cursor_id,
-            previous_cursor_id = previous_cursor_id,
-            tweets = tweets,
+            is_success=True,
+            detail='Twitter のタイムラインを取得しました。',
+            tweets=tweets,
+            newer_cursor_id=newer_cursor_id,
+            load_more_cursors=load_more_cursors,
+            is_cursor_consumed=True,
         )
 
-
-    async def searchTimeline(self,
+    async def searchTimeline(
+        self,
         search_type: Literal['Top', 'Latest'],
         query: str,
         cursor_id: str | None = None,
-        count: int = 20,
-        x_client_transaction_id: str | None = None,
+        cursor_type: Literal['Top', 'Bottom', 'Gap', 'ShowMore'] = 'Top',
     ) -> schemas.TimelineTweetsResult | schemas.TwitterAPIResult:
         """
         ツイートを検索する
@@ -1029,57 +1570,80 @@ class TwitterGraphQLAPI:
             search_type (Literal['Top', 'Latest']): 検索タイプ (Top: トップツイート, Latest: 最新ツイート)
             query (str): 検索クエリ
             cursor_id (str | None, optional): 次のページを取得するためのカーソル ID (デフォルトは None)
-            count (int, optional): 取得するツイート数 (デフォルトは 20)
-            x_client_transaction_id (str, optional): ブラウザ側で算出して API リクエストヘッダーに添付された X-Client-Transaction-ID ヘッダーの値
+            cursor_type (Literal['Top', 'Bottom', 'Gap', 'ShowMore'], optional): カーソル ID タイプ
 
         Returns:
             schemas.TimelineTweets | schemas.TwitterAPIResult: 検索結果
         """
 
+        # 検索でも 30 秒制限は新着方向の更新だけに掛ける
+        ## 古い方向や gap の追加取得まで止めると、検索結果の中央 gap をユーザー操作で埋められなくなる
+        if cursor_id is not None and cursor_type == 'Top':
+            elapsed_seconds = time.time() - self._last_search_fetched_at
+            if elapsed_seconds < self.MIN_FETCH_INTERVAL_SECONDS:
+                return schemas.TimelineTweetsResult(
+                    is_success=True,
+                    detail=f'取得制限により抑制されました (経過: {elapsed_seconds:.1f} 秒)',
+                    tweets=[],
+                    newer_cursor_id=None,
+                    load_more_cursors=[],
+                    is_cursor_consumed=False,
+                )
+
         # variables の挿入順序を Twitter Web App に厳密に合わせるためにこのような実装としている
         variables: dict[str, Any] = {}
-        variables['rawQuery'] = query.strip() + ' exclude:replies lang:ja'
-        variables['count'] = count
+        variables['rawQuery'] = query.strip() + ' lang:ja -filter:replies'
+        if cursor_id is None:
+            ## カーソル ID が指定されていないときは20件取得する (Twitter Web App の挙動に合わせる)
+            variables['count'] = 20
+        elif cursor_type == 'Top':
+            ## より新しいツイートを取得するためのカーソル ID が指定されているときは40件取得する
+            variables['count'] = 40
+        else:
+            ## より古い過去のツイートや未取得範囲を取得するためのカーソル ID が指定されているときは20件取得する
+            variables['count'] = 20
         if cursor_id is not None:
             variables['cursor'] = cursor_id
-        variables['querySource'] = ''  # Twitter Web App 自体が空文字を送っているので合わせる
-        variables['product'] = search_type  # 検索タイプに Top か Latest を指定する
+        ## Twitter Web App で検索すると typed_query になることが多いのでそれに合わせる
+        variables['querySource'] = 'typed_query'
+        ## 検索タイプに Top か Latest を指定する
+        variables['product'] = search_type
+        ## Twitter Web App の挙動に合わせて設定
+        variables['withGrokTranslatedBio'] = False
 
         # Twitter GraphQL API にリクエスト
         response = await self.invokeGraphQLAPI(
-            endpoint_info = self.ENDPOINT_INFOS['SearchTimeline'],
-            variables = variables,
-            x_client_transaction_id = x_client_transaction_id,
-            error_message_prefix = 'ツイートの検索に失敗しました。',
+            endpoint_name='SearchTimeline',
+            variables=variables,
+            error_message_prefix='ツイートの検索に失敗しました。',
         )
 
         # 戻り値が str の場合、ツイートの検索に失敗している (エラーメッセージが返ってくる)
         if isinstance(response, str):
-            logging.error(f'[TwitterGraphQLAPI] Failed to search tweets: {response}')
+            logging.error(f'{self.log_prefix} Failed to search tweets: {response}')
             return schemas.TwitterAPIResult(
-                is_success = False,
-                detail = response,  # エラーメッセージをそのまま返す
+                is_success=False,
+                detail=response,  # エラーメッセージをそのまま返す
             )
 
-        # まずはカーソル ID を取得
-        ## カーソル ID が取得できなかった場合は仕様変更があったとみなし、エラーを返す
-        next_cursor_id = self.__getCursorIDFromTimelineAPIResponse(response, 'Top')  # 現在よりも新しいツイートを取得するためのカーソル ID
-        previous_cursor_id = self.__getCursorIDFromTimelineAPIResponse(response, 'Bottom')  # 現在よりも過去のツイートを取得するためのカーソル ID
-        if next_cursor_id is None or previous_cursor_id is None:
-            logging.error(f'[TwitterGraphQLAPI] Failed to search tweets: Cursor ID not found')
-            return schemas.TwitterAPIResult(
-                is_success = False,
-                detail = 'ツイートの検索に失敗しました。カーソル ID を取得できませんでした。開発者に修正を依頼してください。',
-            )
+        # Twitter がレスポンス内に入れているカーソルエントリをそのまま抽象化する
+        ## Gap, ShowMore についても、API サーバーが指示した未取得範囲としてフロントエンドへ渡す
+        newer_cursor_id, load_more_cursors = self.__getCursorsFromTimelineAPIResponse(response)
 
-        # ツイートリストを取得
+        # ツイートリストを取得する
         ## 取得できなかった場合、あるいは単純に一致する結果がない場合は空のリストになる
         tweets = self.__getTweetsFromTimelineAPIResponse(response)
 
+        # 新着方向の検索取得だけ、成功後に取得時刻を更新する
+        ## 失敗時まで更新すると一時的な通信失敗の直後に 30 秒待ちになり、ユーザー操作でリトライできなくなる
+        if cursor_id is None or cursor_type == 'Top':
+            self._last_search_fetched_at = time.time()
+
         return schemas.TimelineTweetsResult(
-            is_success = True,
-            detail = 'ツイートを検索しました。',
-            next_cursor_id = next_cursor_id,
-            previous_cursor_id = previous_cursor_id,
-            tweets = tweets,
+            is_success=True,
+            detail='Twitter のツイートを検索しました。',
+            tweets=tweets,
+            newer_cursor_id=newer_cursor_id,
+            load_more_cursors=load_more_cursors,
+            is_cursor_consumed=True,
         )
