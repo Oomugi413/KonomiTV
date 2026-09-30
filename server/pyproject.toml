@@ -1,13 +1,13 @@
 [project]
 name = "KonomiTV"
-version = "0.14.1"
+version = "0.14.4"
 description = "KonomiTV: Kept Organized, Notably Optimized, Modern Interface TV media server"
 requires-python = ">=3.13,<3.14"
 dependencies = [
     "aerich==0.9.1",
     "aiofiles>=24.1.0,<25",
     "aiohttp>=3.12.14,<4",
-    "ariblib @ https://github.com/tsukumijima/ariblib/releases/download/v0.1.4/ariblib-0.1.4-py3-none-any.whl",
+    "ariblib @ https://github.com/Oomugi413/ariblib/releases/download/v0.1.5/ariblib-0.1.5-py3-none-any.whl",
     "atproto==0.0.68",
     "av>=16.0.1,<17",
     "bcrypt>=4.3.0,<5",

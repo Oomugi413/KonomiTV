@@ -46,17 +46,17 @@ class LiveEncodingTask:
     GOP_LENGTH_SECONDS_H264: ClassVar[float] = 0.5
 
     # H.265 再生時のエンコード後のストリームの GOP 長 (秒)
-    GOP_LENGTH_SECONDS_H265: ClassVar[float] = float(2)
+    GOP_LENGTH_SECONDS_H265: ClassVar[float] = float(1)
 
     # エンコードタスクの最大リトライ回数
     ## この数を超えた場合はエンコードタスクを再起動しない（無限ループを避ける）
     MAX_RETRY_COUNT: ClassVar[int] = 10  # 10回まで
 
     # チューナーから放送波 TS を読み取る際のタイムアウト (秒)
-    TUNER_TS_READ_TIMEOUT: ClassVar[int] = 15
+    TUNER_TS_READ_TIMEOUT: ClassVar[int] = 20
 
     # エンコーダーの出力を読み取る際のタイムアウト (Standby 時) (秒)
-    ENCODER_TS_READ_TIMEOUT_STANDBY: ClassVar[int] = 20
+    ENCODER_TS_READ_TIMEOUT_STANDBY: ClassVar[int] = 30
 
     # エンコーダーの出力を読み取る際のタイムアウト (ONAir 時) (秒)
     # VCEEncC 利用時のみ起動時に OpenCL シェーダーがコンパイルされる関係で起動が遅いため、10 秒に設定
@@ -275,6 +275,7 @@ class LiveEncodingTask:
         quality: QUALITY_TYPES,
         encoder_type: Literal['QSVEncC', 'NVEncC', 'VCEEncC', 'rkmppenc'],
         channel_type: Literal['GR', 'BS', 'CS', 'CATV', 'SKY', 'BS4K'],
+        service_id: int,
         is_fullhd_channel: bool,
     ) -> list[str]:
         """
@@ -284,6 +285,7 @@ class LiveEncodingTask:
             quality (QUALITY_TYPES): 映像の品質
             encoder_type (Literal['QSVEncC', 'NVEncC', 'VCEEncC', 'rkmppenc']): エンコーダー (QSVEncC or NVEncC or VCEEncC or rkmppenc)
             channel_type (Literal['GR', 'BS', 'CS', 'CATV', 'SKY', 'BS4K']): チャンネルの種類
+            service_id (int): サービス ID
             is_fullhd_channel (bool): フル HD 放送が実施されているチャンネルかどうか
 
         Returns:
@@ -319,9 +321,12 @@ class LiveEncodingTask:
             options.append('--avhw')
         ## 入力途中の解像度変更に備えて、デコーダー/入力サーフェスの最大確保解像度を指定する
         ## --output-res は出力側の固定解像度であり、こちらは入力側の上限なので併用する
-        ## BS4K は入力が 4K のため 3840×2160、それ以外のチャンネルは HD 上限の 1920×1080 とする
+        ## BS4K のうち NHK BS8K (service_id=102) は入力が 8K のため 7680×4320、
+        ## それ以外の BS4K は入力が 4K のため 3840×2160、それ以外のチャンネルは HD 上限の 1920×1080 とする
         ## (画質プリセットの出力解像度とは独立で、入力に現れうる最大解像度を確保する必要がある)
-        if channel_type == 'BS4K':
+        if channel_type == 'BS4K' and service_id == 102:
+            options.append('--adapt-resolution 7680x4320')
+        elif channel_type == 'BS4K':
             options.append('--adapt-resolution 3840x2160')
         else:
             options.append('--adapt-resolution 1920x1080')
@@ -489,10 +494,11 @@ class LiveEncodingTask:
         # Mirakurun / mirakc は通常チャンネルタイプが GR, BS, CS, SKY しかないので、
         # フォールバックとして BS4K を BS に、CATV を CS に変換する
         fallback_channel_type = channel_type
-        if channel_type == 'BS4K':
-            fallback_channel_type = 'BS'
-        elif channel_type == 'CATV':
-            fallback_channel_type = 'CS'
+        #if channel_type == 'BS4K':
+        #    fallback_channel_type = 'BS'
+        #el
+        #if channel_type == 'CATV':
+        #    fallback_channel_type = 'CS'
 
         mirakurun_or_mirakc = 'Mirakurun'
         async with HTTPX_CLIENT() as client:
@@ -769,7 +775,7 @@ class LiveEncodingTask:
 
             # オプションを取得
             assert self.live_stream.quality != 'original'
-            encoder_options = self.buildHWEncCOptions(self.live_stream.quality, ENCODER_TYPE, channel.type, is_fullhd_channel)
+            encoder_options = self.buildHWEncCOptions(self.live_stream.quality, ENCODER_TYPE, channel.type, channel.service_id, is_fullhd_channel)
             logging.info(f'{self.live_stream.log_prefix} {ENCODER_TYPE} Commands:\n{ENCODER_TYPE} {" ".join(encoder_options)}')
 
             # エンコーダープロセスを非同期で作成・実行
