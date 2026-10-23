@@ -232,10 +232,13 @@ class VideoEncodingTask:
             options.append('--avhw')
         ## 入力途中の解像度変更に備えて、デコーダー/入力サーフェスの最大確保解像度を指定する
         ## --output-res は出力側の固定解像度であり、こちらは入力側の上限なので併用する
-        ## 代表解像度が 4K 相当なら 3840×2160、それ以外は HD 上限の 1920×1080 とする
-        ## (ファイル中の最大解像度は持っていないため、HD/4K の天井値で確保する)
+        ## 代表解像度が 8K 相当なら 7680×4320、4K 相当なら 3840×2160、それ以外は HD 上限の 1920×1080 とする
+        ## (ファイル中の最大解像度は持っていないため、HD/4K/8K の天井値で確保する)
         recorded_video = self.video_stream.recorded_program.recorded_video
-        if (recorded_video.video_resolution_width >= 3840 or
+        if (recorded_video.video_resolution_width >= 7680 or
+            recorded_video.video_resolution_height >= 4320):
+            options.append('--adapt-resolution 7680x4320')
+        elif (recorded_video.video_resolution_width >= 3840 or
             recorded_video.video_resolution_height >= 2160):
             options.append('--adapt-resolution 3840x2160')
         else:

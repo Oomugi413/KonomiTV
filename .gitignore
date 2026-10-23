@@ -145,6 +145,9 @@ cython_debug/
 # Codex
 .codex/hooks.json
 
+# Local build artifacts and caches
+/.build/
+
 # config.yaml
 config.yaml
 
@@ -158,6 +161,7 @@ server/data/thumbnails/*.*
 server/data/thumbnails/old/*.*
 server/data/twitter*
 server/static/interlaced_*
+server/debug_dump_nal.bin
 
 # thirdparty
 server/thirdparty/*

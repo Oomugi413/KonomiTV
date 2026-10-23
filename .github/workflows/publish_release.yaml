@@ -15,13 +15,13 @@ jobs:
   ## リリースコミットでのみ実行する
   build_installer:
     if: contains(github.event.head_commit.message, 'Release:')
-    uses: tsukumijima/KonomiTV/.github/workflows/build_installer.yaml@master
+    uses: Oomugi413/KonomiTV/.github/workflows/build_installer.yaml@master
 
   # サードパーティーライブラリのビルド
   ## リリースコミットでのみ実行する
   build_thirdparty:
     if: contains(github.event.head_commit.message, 'Release:')
-    uses: tsukumijima/KonomiTV/.github/workflows/build_thirdparty.yaml@master
+    uses: Oomugi413/KonomiTV/.github/workflows/build_thirdparty.yaml@master
 
   # 両方のビルドが終わったら、タグ付けしてリリースを公開
   ## リリースコミットでのみ実行する
