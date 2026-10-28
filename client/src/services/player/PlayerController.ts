@@ -134,6 +134,10 @@ class PlayerController {
     // 一時ミュートで発火した volumechange を、ユーザー操作として保存しないために使う
     private is_live_startup_temporary_muted = false;
 
+    // 動画要素で一時停止が発生した回数 (Safari の復旧待機中に行われた停止操作を区別するため)
+    // 再生開始待ちでも paused が true になるため、復旧処理は開始時の回数と比較する
+    private playback_pause_generation = 0;
+
 
     /**
      * コンストラクタ
@@ -298,12 +302,22 @@ class PlayerController {
         // この誤差は放送局や TOT 精度によっておそらく異なるので、本編の最初が削れないように2秒のプラスに留めている
         // seek_seconds はこの後 DPlayer を初期化した後の初回シーク時に参照される
         let seek_seconds = options.seek_seconds;
+        // URL で指定された再生位置から再生を始めるか (視聴履歴からの再開と区別し、続きからの通知を視聴履歴のときだけ出すため)
+        let is_url_playback_position = false;
         if (seek_seconds === null) {
             if (this.playback_mode === 'Video') {
                 const history = settings_store.settings.watched_history.find(
                     history => history.video_id === player_store.recorded_program.id
                 );
-                if (history) {
+                // URL で再生位置 (録画ファイルの先頭からの秒数) が指定されたときは、視聴履歴より優先してその位置から再生を開始する
+                // キャプチャの「この場面から再生」などから使う
+                const url_params = new URLSearchParams(window.location.search);
+                const playback_position = Number(url_params.get('playback_position'));
+                if (url_params.has('playback_position') && Number.isFinite(playback_position)) {
+                    seek_seconds = Math.max(0, playback_position);
+                    is_url_playback_position = true;
+                    console.log(`\u001b[31m[PlayerController] Seeking to ${seek_seconds} seconds. (URL Playback Position)`);
+                } else if (history) {
                     seek_seconds = history.last_playback_position;
                     console.log(`\u001b[31m[PlayerController] Seeking to ${seek_seconds} seconds. (Watched History)`);
                 } else {
@@ -741,13 +755,18 @@ class PlayerController {
                     // かつデコーダーが自動でデインタレースしてくれない環境では、Picture-in-Picture するとインタレ未解除の映像が
                     // ミニプレイヤーで表示されると思われるが、技術的に改善が難しいのと、ミニプレイヤーならジャギ気にならんやろと言うことで当面仕様とする
                     deinterlace: is_yadif_enabled,
-                    deinterlacer: is_yadif_enabled === true ? (video: HTMLVideoElement) => new Deinterlacer(video, {
-                        // 常に MPEG-2 60i 映像を 60fps でぬるぬる再生する
-                        doubleRate: true,
-                        // 24fps モードがオンの場合のみ、実写区間では 60fps でぬるぬる描画しつつ、
-                        // 映画・アニメなど 24fps で制作された映像を自動検出し、余分なフレームを間引いて本来の動きに近づける
-                        film: this.playback_mode === 'Live' ? this.quality_profile.tv_24fps_mode : this.quality_profile.video_24fps_mode,
-                    }) : undefined,
+                    deinterlacer: is_yadif_enabled === true ? (video: HTMLVideoElement) => {
+                        // PinP 内の画質切り替えでも、最初のフレーム通知は閉じられない元画面の Document で登録する
+                        const document_pip_manager = this.player_managers.find((manager) => manager instanceof DocumentPiPManager);
+                        document_pip_manager?.prepareVideoElement(video);
+                        return new Deinterlacer(video, {
+                            // 常に MPEG-2 60i 映像を 60fps でぬるぬる再生する
+                            doubleRate: true,
+                            // 24fps モードがオンの場合のみ、実写区間では 60fps でぬるぬる描画しつつ、
+                            // 映画・アニメなど 24fps で制作された映像を自動検出し、余分なフレームを間引いて本来の動きに近づける
+                            film: this.playback_mode === 'Live' ? this.quality_profile.tv_24fps_mode : this.quality_profile.video_24fps_mode,
+                        });
+                    } : undefined,
                 },
                 // mpegts.js
                 mpegts: {
@@ -1030,8 +1049,8 @@ class PlayerController {
                 this.player.bar.set('played', seek_seconds / player_store.recorded_program.recorded_video.duration, 'width');
 
                 // 視聴履歴から再生を再開する場合のみ通知を表示
-                // そうでない場合は seek() 実行後に表示される通知を即座に非表示にする
-                if (seek_seconds > player_store.recorded_program.recording_start_margin + 2) {
+                // そうでない場合 (URL で指定された再生位置から始める場合を含む) は seek() 実行後に表示される通知を即座に非表示にする
+                if (seek_seconds > player_store.recorded_program.recording_start_margin + 2 && is_url_playback_position === false) {
                     this.player.notice('前回視聴した続きから再生します');
                 } else {
                     this.player.hideNotice();
@@ -1284,7 +1303,7 @@ class PlayerController {
             const timeout_id = window.setTimeout(() => finish(false), timeout_milliseconds);
             frame_callback_handle = video.requestVideoFrameCallback(() => {
                 // PlayerController の破棄・再作成後に古い video 要素のフレームを成功扱いしない
-                if (this.destroyed === true || this.player === null || this.player.video !== video) {
+                if (this.destroying || this.destroyed || this.player === null || this.player.video !== video) {
                     finish(false);
                     return;
                 }
@@ -1301,18 +1320,29 @@ class PlayerController {
      */
     private async recoverSafariLivePlayback(video: HTMLVideoElement): Promise<boolean> {
 
+        const pause_generation = this.playback_pause_generation;
+        // 音声だけのチャンネルは映像フレームの復旧対象から外す
+        if (useChannelsStore().channel.current.is_radiochannel === true) return false;
+        if (this.destroying || this.destroyed || this.player === null || this.player.video !== video) return false;
+
         // まず現在の再生要求を維持したまま次のフレームを待つ
         // 一時停止直後は readyState が一時的に低下するため、ここで pause() を重ねると進行中の play() が AbortError になる
-        if (await this.waitForVideoFramePresentation(video, 750)) return true;
-        if (this.player === null || this.player.video !== video) return false;
+        const is_frame_presented = await this.waitForVideoFramePresentation(video, 750);
+        // 待機中の画質切り替え・破棄・一時停止を優先し、古い復旧処理を終了する
+        if (this.destroying || this.destroyed || this.player === null || this.player.video !== video ||
+            this.playback_pause_generation !== pause_generation) return false;
+        if (is_frame_presented === true) return true;
 
         // WebKit に再生可能状態を再評価させるため play() を再要求するが、保留されることがあるので await しない
         void video.play().catch((error) => {
             if (this.player === null || this.player.video !== video) return;
             console.warn('\u001b[31m[PlayerController] Safari live playback retry failed:', error);
         });
-        if (await this.waitForVideoFramePresentation(video, 1000)) return true;
-        if (this.destroyed === true || this.player === null || this.player.video !== video) return false;
+        const is_retry_frame_presented = await this.waitForVideoFramePresentation(video, 1000);
+        // 再生要求を待つ間に状態が変わった場合も、後続のシークを終了する
+        if (this.destroying || this.destroyed || this.player === null || this.player.video !== video ||
+            this.playback_pause_generation !== pause_generation) return false;
+        if (is_retry_frame_presented === true) return true;
 
         // buffered range があるのにフレームが再開しない場合だけ、ライブ末尾付近のランダムアクセスポイントへ移動する
         // これにより、短い停止中に古くなったデコード位置を捨てつつ、通常時の pause / play には不要な seek を行わない
@@ -1341,7 +1371,11 @@ class PlayerController {
                 if (this.player === null || this.player.video !== video) return;
                 console.warn('\u001b[31m[PlayerController] Safari live playback retry after seek failed:', error);
             });
-            return await this.waitForVideoFramePresentation(video, 1500);
+            const is_seek_frame_presented = await this.waitForVideoFramePresentation(video, 1500);
+            // シーク後のフレームも、同じ動画の再生を継続している場合だけ成功として扱う
+            if (this.destroying || this.destroyed || this.player === null || this.player.video !== video ||
+                this.playback_pause_generation !== pause_generation) return false;
+            return is_seek_frame_presented;
         }
 
         return false;
@@ -1356,9 +1390,14 @@ class PlayerController {
     private async recoverPlayback(): Promise<void> {
         assert(this.player !== null);
         const player_store = usePlayerStore();
+        const video = this.player.video;
+        const pause_generation = this.playback_pause_generation;
 
         // 1 秒待つ
         await Utils.sleep(1);
+        // 待機前の動画に対する復旧だけを継続し、ユーザーの停止操作を優先する
+        if (this.destroying || this.destroyed || this.player === null || this.player.video !== video ||
+            this.playback_pause_generation !== pause_generation) return;
 
         // この時点で映像が停止していて、かつ readyState が HAVE_FUTURE_DATA な場合、復旧を試みる
         // Safari ではタイミングによっては this.player.video が null になる場合があるらしいので ? を付ける
@@ -1367,12 +1406,21 @@ class PlayerController {
 
             // Safari のライブ再生では pause() が進行中の play() を AbortError にし、後続の映像・音声が停止する
             // 実フレームを基準に非破壊的な復旧を行い、従来の pause() / play() 再試行へは入らない
-            if (Utils.isSafari() === true && this.playback_mode === 'Live') {
-                const video = this.player.video;
+            if (Utils.isSafari() === true && this.playback_mode === 'Live' &&
+                useChannelsStore().channel.current.is_radiochannel === false) {
+                // 再生待ちではなく一時停止中なら、その状態を維持する
+                if (video.paused === true) return;
                 const is_recovered = await this.recoverSafariLivePlayback(video);
-                if (is_recovered === true && this.player !== null && this.player.video === video) {
+                // 復旧中の画質切り替え・破棄・一時停止を、復旧の失敗と区別する
+                if (this.destroying || this.destroyed || this.player === null || this.player.video !== video ||
+                    this.playback_pause_generation !== pause_generation) return;
+                if (is_recovered === true) {
                     player_store.is_video_buffering = false;
                     console.log('\u001b[31m[PlayerController] Safari live playback recovered without an additional pause().');
+                } else {
+                    player_store.event_emitter.emit('PlayerRestartRequired', {
+                        message: '映像の再生を再開できませんでした。プレイヤーを再起動しています…',
+                    });
                 }
                 return;
             }
@@ -1456,8 +1504,12 @@ class PlayerController {
 
         // 再生/停止されたときのイベント
         // デバイスの通知バーからの制御など、ブラウザの画面以外から動画の再生/停止が行われる事もあるため必要
-        const on_play_or_pause = () => {
+        const on_play_or_pause = (event: Event) => {
             if (this.player === null) return;
+            // 現在の動画の停止だけを数え、画質切り替えで残った古い動画のイベントを区別する
+            if (event.type === 'pause' && event.target === this.player.video) {
+                this.playback_pause_generation++;
+            }
             player_store.is_video_paused = this.player.video.paused;
             // 停止された場合、ロード中でなければ Progress Circular を非表示にする
             if (this.player.video.paused === true && player_store.is_loading === false) {
@@ -1488,10 +1540,24 @@ class PlayerController {
             }
         });
 
+        // DPlayer は画質切り替え完了時に再生速度を元へ戻すため、ライブ視聴のバッファ調整中は再度 0 にする
+        // 必要なバッファが貯まった時点で on_canplay() が再生速度を 1 に戻し、背景写真を非表示にする
+        // Safari は on_canplay() でも通常速度のまま実フレームを待つため、ここでも通常速度を維持する
+        // 速度を 1 に戻す処理は Safari 以外の分岐にあるため、速度を 0 にする処理も同じブラウザに限る
+        this.player.on('quality_end', () => {
+            if (this.playback_mode === 'Live' && this.player?.type === 'mpegts' &&
+                player_store.is_loading === true && Utils.isSafari() === false) {
+                this.player.video.playbackRate = 0;
+            }
+        });
+
         // 今回 (DPlayer 初期化直後) と画質切り替え開始時の両方のタイミングで実行する必要がある処理
         // mpegts.js などの DPlayer のプラグインは画質切り替え時に一旦破棄されるため、再度イベントハンドラーを登録する必要がある
         const on_init_or_quality_change = async () => {
             assert(this.player !== null);
+            // 非同期の開始処理は、この画質の動画要素に結び付けて管理する
+            const video = this.player.video;
+            const startup_pause_generation = this.playback_pause_generation;
 
             // ローディング中の背景写真をランダムに変更
             player_store.background_url = PlayerUtils.generatePlayerBackgroundURL();
@@ -1624,10 +1690,9 @@ class PlayerController {
                             console.warn(`\u001b[31m[PlayerController] Failed to start playback after ${maxAttempts} attempts.`);
                             return;
                         }
-                        if (this.player === null) return;
-
                         // PlayerController 再作成後に、古い video 要素の保留中 play() を操作し続けないよう保持する
-                        const video = this.player.video;
+                        if (this.destroying || this.destroyed || this.player === null || this.player.video !== video ||
+                            this.playback_pause_generation !== startup_pause_generation) return;
                         try {
                             await video.play();
                             if (this.player === null || this.player.video !== video) return;
@@ -1650,7 +1715,7 @@ class PlayerController {
                 const on_canplay = async () => {
 
                     // 重複実行を回避する
-                    if (this.player === null) return;
+                    if (this.destroying || this.destroyed || this.player === null || this.player.video !== video) return;
                     if (on_canplay_called === true) return;
                     this.player.video.oncanplay = null;
                     this.player.video.oncanplaythrough = null;
@@ -1670,23 +1735,38 @@ class PlayerController {
                         const live_playback_buffer_seconds = this.live_playback_buffer_seconds;  // 毎回取得すると負荷が掛かるのでキャッシュする
                         let current_playback_buffer_sec = this.getPlaybackBufferSeconds();
                         while (current_playback_buffer_sec < live_playback_buffer_seconds) {
-                            if (this.destroyed === true || this.player === null) return;
                             await Utils.sleep(0.1);
+                            // バッファ待機中に切り替えた動画の速度は、新しい開始処理に任せる
+                            if (this.destroying || this.destroyed || this.player === null || this.player.video !== video) return;
                             current_playback_buffer_sec = this.getPlaybackBufferSeconds();
                         }
 
                         // 再生バッファ調整のため一旦停止していた再生を再び開始
                         this.player.video.playbackRate = 1;
-                    } else {
+                    } else if (channels_store.channel.current.is_radiochannel === false) {
                         // Safari では playbackRate=0 と buffer目標待ちが再生開始を止めるため、通常速度のまま実フレーム確認へ進む
-                        const video = this.player.video;
-                        void video.play().catch((error) => {
-                            if (this.player === null || this.player.video !== video) return;
-                            console.warn('\u001b[31m[PlayerController] Safari playback retry after MSE initialization failed:', error);
-                        });
-                        const is_frame_presented = await this.waitForVideoFramePresentation(video, 2500);
-                        if (is_frame_presented === false && this.player !== null && this.player.video === video) {
-                            await this.recoverSafariLivePlayback(video);
+                        // 開始待ちに停止操作があった場合は、ユーザーが再開するまで再生要求を追加せず、準備完了の表示へ進む
+                        if (this.playback_pause_generation === startup_pause_generation || video.paused === false) {
+                            const pause_generation = this.playback_pause_generation;
+                            void video.play().catch((error) => {
+                                if (this.player === null || this.player.video !== video) return;
+                                console.warn('\u001b[31m[PlayerController] Safari playback retry after MSE initialization failed:', error);
+                            });
+                            let is_frame_presented = await this.waitForVideoFramePresentation(video, 2500);
+                            // 同じ動画の準備だけを継続し、画面離脱や画質切り替え後の状態を保持する
+                            if (this.destroying || this.destroyed || this.player === null || this.player.video !== video) return;
+                            if (is_frame_presented === false && this.playback_pause_generation === pause_generation) {
+                                is_frame_presented = await this.recoverSafariLivePlayback(video);
+                                // 復旧待機中にも画面離脱や画質切り替えが起きるため、戻り値を扱う前に確認する
+                                if (this.destroying || this.destroyed || this.player === null || this.player.video !== video) return;
+                            }
+                            // 停止操作による中断以外で映像が出ない場合は、完了扱いにせず既存の再起動処理へ渡す
+                            if (is_frame_presented === false && this.playback_pause_generation === pause_generation) {
+                                player_store.event_emitter.emit('PlayerRestartRequired', {
+                                    message: '映像の再生を開始できませんでした。プレイヤーを再起動しています…',
+                                });
+                                return;
+                            }
                         }
                     }
 
@@ -1723,6 +1803,8 @@ class PlayerController {
                         const volume_step = current_volume / 10;
                         for (let i = 0; i < 10; i++) {  // 10 回に分けて音量を上げる
                             await Utils.sleep(0.5 / 10);
+                            // フェードイン中に画質や画面が変わった場合は、新しい動画の音量を保持する
+                            if (this.destroying || this.destroyed || this.player === null || this.player.video !== video) return;
                             // 音量が current_volume を超えないようにする
                             // 浮動小数点絡みの問題 (丸め誤差) が出るため小数第3位で切り捨てる
                             this.player.video.volume = Math.min(Utils.mathFloor(this.player.video.volume + volume_step, 3), current_volume);
@@ -1756,6 +1838,8 @@ class PlayerController {
                 (async () => {
                     let have_future_data_count = 0;
                     while (this.player !== null && this.player.video.readyState < 4) {
+                        // この画質の開始処理が終了した場合は、古い監視ループを片付ける
+                        if (this.destroying || this.destroyed || this.player.video !== video || on_canplay_called) return;
                         // プレイヤーが充分と判断する基準はまちまちでブラウザによっては HAVE_FUTURE_DATA のままタイムアウトするので
                         // HAVE_FUTURE_DATA がおおむね 5 秒つづけば HAVE_ENOUGH_DATA 扱いする
                         if (this.player.video.readyState < 3) {
@@ -1777,7 +1861,7 @@ class PlayerController {
                 // もしライブストリームのステータスが ONAir にも関わらず 15 秒以上バッファリング中で canplaythrough が発火しない場合、
                 // ロードに失敗したとみなし PlayerController の再起動を要求する
                 await Utils.sleep(15);
-                if (this.destroyed === true || this.player === null) return;
+                if (this.destroying || this.destroyed || this.player === null || this.player.video !== video) return;
                 if (player_store.live_stream_status === 'ONAir' && player_store.is_video_buffering === true && on_canplay_called === false) {
                     player_store.event_emitter.emit('PlayerRestartRequired', {
                         message: '再生開始までに時間が掛かっています。プレイヤーを再起動しています…',
