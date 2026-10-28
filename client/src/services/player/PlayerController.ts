@@ -1505,8 +1505,11 @@ class PlayerController {
 
         // DPlayer は画質切り替え完了時に再生速度を元へ戻すため、ライブ視聴のバッファ調整中は再度 0 にする
         // 必要なバッファが貯まった時点で on_canplay() が再生速度を 1 に戻し、背景写真を非表示にする
+        // Safari は on_canplay() でも通常速度のまま実フレームを待つため、ここでも通常速度を維持する
+        // 速度を 1 に戻す処理は Safari 以外の分岐にあるため、速度を 0 にする処理も同じブラウザに限る
         this.player.on('quality_end', () => {
-            if (this.playback_mode === 'Live' && this.player?.type === 'mpegts' && player_store.is_loading === true) {
+            if (this.playback_mode === 'Live' && this.player?.type === 'mpegts' &&
+                player_store.is_loading === true && Utils.isSafari() === false) {
                 this.player.video.playbackRate = 0;
             }
         });
