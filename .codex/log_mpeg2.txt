@@ -1,0 +1,63 @@
+2026/06/27 21:56:20.165] INFO:     /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: New recording or copying file detected.
+[2026/06/27 21:56:20.165] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File size is 0. ignored.
+[2026/06/27 21:56:20.668] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:20.970] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:21.373] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:21.877] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:22.280] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:22.582] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:22.985] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:23.339] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:23.741] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:24.145] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:24.548] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:24.951] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:25.354] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:25.756] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:26.159] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:26.461] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:26.863] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:27.266] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:27.670] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:28.073] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:28.477] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:28.878] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:29.282] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:29.684] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:30.086] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:30.488] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:30.890] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:31.292] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:31.695] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:32.098] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:32.502] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:32.905] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:33.308] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:33.710] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:34.064] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:34.365] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:34.868] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:35.170] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:35.573] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:35.976] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:36.379] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:36.883] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:37.185] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:37.587] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:37.990] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:38.392] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:38.794] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:39.196] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:39.499] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:39.902] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:40.305] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:40.809] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:41.111] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:41.515] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:41.667] WARNING:  /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: File is not recording. ignored.
+[2026/06/27 21:56:57.590] INFO:     /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: Recording or copying has just completed or has already completed.
+[2026/06/27 21:56:57.728] DEBUG:    /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: FFprobe analysis completed.
+[2026/06/27 21:56:57.737] DEBUG:    /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: Detected preferred service_id 1024 from FFprobe (nb_streams: 11, pcr_pid: 511).
+[2026/06/27 21:56:57.738] DEBUG:    /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: Using preferred service_id 1024 from external analysis.
+[2026/06/27 21:56:57.760] DEBUG:    /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: MPEG-TS SDT/EIT analysis completed.
+[2026/06/27 21:56:57.792] DEBUG:    /mnt/recording/20260627_CodexRecordingStatusTest_20260627_215445.ts: This file is too short. (duration 21.5s < 60s) Skipped.

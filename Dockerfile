@@ -18,11 +18,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends aria2 ca-certif
 ## サードパーティーライブラリは変更が少ないので、先にダウンロード処理を実行してビルドキャッシュを効かせる
 WORKDIR /
 ## リリース版用
-# RUN aria2c -x10 https://github.com/tsukumijima/KonomiTV/releases/download/v0.14.1/thirdparty-linux.tar.xz
-# RUN tar xvf thirdparty-linux.tar.xz
-## 開発版 (0.xx.x-dev) 用
-RUN aria2c -x10 https://nightly.link/tsukumijima/KonomiTV/actions/runs/39993380983/thirdparty-linux.tar.xz.zip
-RUN unzip thirdparty-linux.tar.xz.zip && tar xvf thirdparty-linux.tar.xz
+RUN aria2c -x10 https://github.com/Oomugi413/KonomiTV/releases/download/v0.14.7/thirdparty-linux.tar.xz
+RUN tar xvf thirdparty-linux.tar.xz
+## 開発版 (0.x.x-dev) 用
+# RUN aria2c -x10 https://nightly.link/Oomugi413/KonomiTV/workflows/build_thirdparty.yaml/master/thirdparty-linux.tar.xz.zip
+# RUN unzip thirdparty-linux.tar.xz.zip && tar xvf thirdparty-linux.tar.xz
 
 # --------------------------------------------------------------------------------------------------------------
 # クライアントをビルドするステージ
@@ -53,11 +53,11 @@ RUN yarn build
 
 # Ubuntu 24.04 LTS (with CUDA) をベースイメージとして利用
 ## NVEncC の動作には CUDA ライブラリが必要なため、CUDA 付きのイメージを使う
-## RTX 5090 (Blackwell) 世代をサポートする最低バージョンである CUDA 12.8.0 を指定している
+## RTX 5090 (Blackwell) 世代をサポートするバージョンを前提として、このフォークでは CUDA 12.9.2 を指定している
 ## cuda:x.x.x-runtime 系イメージだと NVEncC で使わない余計なライブラリが付属して重いので、base イメージを使う
 ## OS イメージは、VCEEncC 公式に動作確認されている Linux 環境が Ubuntu 24.04 以降のみであること、
 ## また VA-API 向け OpenCL ドライバー Rusticl が Ubuntu 24.04 以降の mesa-opencl-icd にしか含まれないことを鑑み、Ubuntu 24.04 を指定している
-FROM nvidia/cuda:12.8.0-base-ubuntu24.04
+FROM nvidia/cuda:12.9.2-base-ubuntu24.04
 
 # タイムゾーンを東京に設定
 ENV TZ=Asia/Tokyo
