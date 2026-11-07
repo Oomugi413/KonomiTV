@@ -2097,6 +2097,14 @@ class RecordedScanTask:
                         current_modified = datetime.fromtimestamp(stat.st_mtime, tz=JST)
                         current_size = stat.st_size
 
+                        # 監視イベントを取りこぼした場合も、完了確認で検出したサイズを次回の比較に使う。
+                        # 古いサイズのままでは一致条件を永久に満たせず、解析失敗後の再試行も止まるため。
+                        # 変化を検出した回は完了にせず、次回も同じサイズで更新が止まっていることを確認する。
+                        if current_size != recording_info.file_size:
+                            recording_info.file_size = current_size
+                            recording_info.last_modified = current_modified
+                            continue
+
                         # RECORDING_COMPLETE_SECONDS 秒以上更新がなく、かつファイルサイズが変化していない場合は録画完了と判断
                         if ((now - current_modified).total_seconds() >= self.RECORDING_COMPLETE_SECONDS and
                             current_size == recording_info.file_size):
