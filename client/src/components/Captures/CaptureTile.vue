@@ -1,7 +1,10 @@
 <template>
-    <div class="capture-tile"
+    <!-- 拡大表示を閉じるときに、戻る先のタイルを探せるよう、キャプチャの ID を属性に持たせる -->
+    <div class="capture-tile" :data-capture-id="capture.id"
         :class="{
             'capture-tile--selected': selected,
+            'capture-tile--cursor': cursor,
+            'capture-tile--previewed': previewed && !selected,
             'capture-tile--selecting': selecting,
         }"
         @click="onClick"
@@ -14,11 +17,11 @@
             :alt="capture.caption_text ?? ''" decoding="async" draggable="false" @load="isLoaded = true">
         <div class="capture-tile__shade"></div>
         <div v-ripple class="capture-tile__check" @click.stop="$emit('toggle', $event.shiftKey)">
-            <Icon :icon="selected ? 'fluent:checkmark-circle-24-filled' : 'fluent:circle-24-regular'" width="24px" height="24px" />
+            <Icon :icon="selected || previewed ? 'fluent:checkmark-circle-24-filled' : 'fluent:circle-24-regular'" width="24px" height="24px" />
         </div>
         <!-- お気に入りのボタン (お気に入りに追加済みなら常に出し、そうでなければマウスを乗せたときだけ出す) -->
-        <!-- ログインしていないとき (is_favorite が null) は、お気に入りを使えないので出さない -->
-        <div v-if="capture.is_favorite !== null" v-ripple class="capture-tile__favorite"
+        <!-- ログインしていないとき (is_favorite が null) も表示し、押したときに拡大表示と同じくログインが必要なことを伝える -->
+        <div v-ripple class="capture-tile__favorite"
             :class="{'capture-tile__favorite--active': capture.is_favorite}"
             v-ftooltip.bottom="capture.is_favorite ? 'お気に入りから外す' : 'お気に入りに追加'"
             @click.stop="toggleFavorite">
@@ -42,20 +45,26 @@
 </template>
 <script lang="ts" setup>
 
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
 
+import { openWithTransition } from '@/components/Captures/CaptureTransition';
 import Message from '@/message';
 import Captures, { ICapture } from '@/services/Captures';
+import useUserStore from '@/stores/UserStore';
 
 
 const props = withDefaults(defineProps<{
     capture: ICapture;
     selected?: boolean;
+    cursor?: boolean;
+    previewed?: boolean;
     selecting?: boolean;
     showPosition?: boolean;
     showCaption?: boolean;
 }>(), {
     selected: false,
+    cursor: false,
+    previewed: false,
     selecting: false,
     showPosition: false,
     showCaption: false,
@@ -67,6 +76,7 @@ const emit = defineEmits<{
     (event: 'updated', capture: ICapture): void;
 }>();
 
+const userStore = useUserStore();
 const imageRef = ref<HTMLImageElement | null>(null);
 const isLoaded = ref(false);
 
@@ -102,6 +112,11 @@ watch(() => props.capture.id, () => {
 // 応答を待つ間にタイルが別のキャプチャに使い回されても、押したときのキャプチャに結果を当てる
 let isUpdatingFavorite = false;
 const toggleFavorite = async () => {
+    // お気に入りはログインが必要なので、ログインしていなければ拡大表示や選択中のバーと同じ文言でログインを促す
+    if (!userStore.is_logged_in) {
+        Message.warning('お気に入りとタグを使うには、KonomiTV アカウントにログインしてください。');
+        return;
+    }
     if (isUpdatingFavorite) {
         return;
     }
@@ -117,39 +132,13 @@ const toggleFavorite = async () => {
 };
 
 // 選択モード中のクリックは選択の切り替え、それ以外は拡大表示
+// 拡大表示は、タイルの画像が1枚表示の画像の位置まで拡大していくように開く
 const onClick = (event: MouseEvent) => {
     if (props.selecting || event.shiftKey) {
         emit('toggle', event.shiftKey);
     } else {
-        openWithTransition();
+        openWithTransition(isLoaded.value ? imageRef.value : null, () => emit('open'));
     }
-};
-
-// 拡大表示を開くときは、View Transitions API でタイルの画像が1枚表示の画像の位置まで拡大していくように見せる
-// タイルの画像と1枚表示の画像に同じ名前を付けると、ブラウザが2つの位置と大きさをつないでアニメーションさせる
-const openWithTransition = () => {
-    const image = imageRef.value;
-    // 対応していないブラウザ、画像がまだ読み込めていないタイル、動きを減らす設定のときは、そのまま開く
-    if (document.startViewTransition === undefined || image === null || isLoaded.value === false ||
-        window.matchMedia('(prefers-reduced-motion: reduce)').matches === true) {
-        emit('open');
-        return;
-    }
-    image.style.setProperty('view-transition-name', 'capture-lightbox-image');
-    document.startViewTransition(async () => {
-        // 開いた後の画面では、名前を1枚表示の画像 (CaptureLightbox.vue) へ渡す
-        image.style.removeProperty('view-transition-name');
-        emit('open');
-        await nextTick();
-        // 1枚表示の画像の描画が間に合うよう、デコードを待ってから開いた後の画面を撮らせる (同じ URL なのでキャッシュから読まれる)
-        const target = document.querySelector<HTMLImageElement>('.capture-lightbox__image--current');
-        if (target !== null) {
-            await Promise.race([
-                target.decode().catch(() => undefined),
-                new Promise(resolve => window.setTimeout(resolve, 300)),
-            ]);
-        }
-    });
 };
 
 // スマホでは長押しで選択を始める (HonomiTV 版の選択の作りと同じ)
@@ -260,7 +249,7 @@ function getSharedObserver(): IntersectionObserver {
     cursor: pointer;
     user-select: none;
     -webkit-touch-callout: none;
-    transition: transform 0.12s ease;
+    transition: transform 0.12s ease, outline-color 0.15s ease;
 
     &__image {
         display: block;
@@ -340,6 +329,9 @@ function getSharedObserver(): IntersectionObserver {
         // 入れ物はクリックを下のタイルへ通すが、印はマウスを乗せたときに言葉を出せるようにする (クリックは親のタイルへ伝わる)
         pointer-events: auto;
     }
+    &__badges, &__position {
+        transition: opacity 0.15s ease;
+    }
 
     &__position {
         position: absolute;
@@ -369,6 +361,34 @@ function getSharedObserver(): IntersectionObserver {
     &--selecting {
         .capture-tile__check {
             opacity: 1;
+        }
+    }
+    // Ctrl キーと矢印キーで動かしているカーソルの位置は、選択の枠と区別できるよう白い枠で示す
+    &--cursor::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        border: 2px solid rgb(var(--v-theme-text));
+        border-radius: inherit;
+        pointer-events: none;
+    }
+    // Shift キーを押しながらマウスを乗せているときに、クリックすると選ばれる範囲は、選んだときより淡く示す
+    &--previewed {
+        outline: 3px solid rgb(var(--v-theme-primary), 0.5);
+        outline-offset: -3px;
+        .capture-tile__shade {
+            opacity: 1;
+        }
+        .capture-tile__check {
+            color: rgb(var(--v-theme-primary-lighten-1));
+        }
+    }
+    // 拡大表示を閉じてこのタイルへ縮んでいく間は、画像の上に重なる枠とアイコンを隠し、縮み終わってからフェードインさせる
+    // (縮んでいく画像の下に隠れたまま、縮み終わった瞬間に突然現れないようにするため。CaptureLightbox.vue の close() を参照)
+    &--landing {
+        outline-color: transparent !important;
+        .capture-tile__shade, .capture-tile__check, .capture-tile__favorite, .capture-tile__badges, .capture-tile__position {
+            opacity: 0 !important;
         }
     }
     &--selected {

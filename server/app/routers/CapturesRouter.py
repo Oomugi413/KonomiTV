@@ -26,6 +26,7 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.security import OAuth2PasswordBearer
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, ValidationError
 from tortoise import connections
@@ -95,7 +96,10 @@ class CaptureFilters(BaseModel):
     event_id: int | None = None
     start_time: datetime | None = None
     is_favorite: bool | None = None
-    tag_id: int | None = None
+    tag_ids: list[int] | None = None
+    channel_ids: list[str] | None = None
+    start_date: Date | None = None
+    end_date: Date | None = None
     is_caption_composited: bool | None = None
     is_comment_composited: bool | None = None
     has_caption_text: bool | None = None
@@ -188,7 +192,12 @@ async def SerializeCaptures(rows: list[dict[str, Any]], user: User | None) -> li
     return captures
 
 
-async def BuildCaptureWhere(filters: CaptureFilters, user: User | None) -> tuple[list[str], list[Any]]:
+async def BuildCaptureWhere(
+    filters: CaptureFilters,
+    user: User | None,
+    axis: Literal['captured_at', 'broadcast_at'],
+    day_start_hour: int,
+) -> tuple[list[str], list[Any]]:
     """
     絞り込みの条件から、キャプチャの一覧の WHERE 句の条件を作る
     場所・お気に入り・タグでの絞り込みは EXISTS で行い、キャプチャの行が増えないようにする
@@ -196,6 +205,8 @@ async def BuildCaptureWhere(filters: CaptureFilters, user: User | None) -> tuple
     Args:
         filters (CaptureFilters): 絞り込みの条件
         user (User | None): 閲覧しているユーザー
+        axis (Literal['captured_at', 'broadcast_at']): 期間で絞り込むときに使う日時の列 (タイムラインの時間の軸)
+        day_start_hour (int): 期間の日付の境目とする時刻 (28時間表記なら 4)
 
     Returns:
         tuple[list[str], list[Any]]: WHERE 句の条件と、バインドする値
@@ -222,15 +233,18 @@ async def BuildCaptureWhere(filters: CaptureFilters, user: User | None) -> tuple
         params.append(filters.capture_program_id)
 
     # 録画番組で絞り込む (録画番組とは、番組キーが一致する放送回のキャプチャで結び付ける)
+    ## チャンネルでの絞り込みと同じく、録画番組の放送回を先に探し、当てはまった放送回の ID で絞り込む
+    ## キャプチャの行ごとに録画番組と照合すると、百万件規模のキャプチャを全件走査してしまう
     if filters.recorded_program_id is not None:
         conditions.append("""
-            EXISTS (
-                SELECT 1 FROM recorded_programs r
+            c.capture_program_id IN (
+                SELECT p4.id FROM recorded_programs r
+                JOIN capture_programs p4 ON
+                    p4.network_id = r.network_id AND
+                    p4.service_id = r.service_id AND
+                    p4.event_id = r.event_id AND
+                    p4.start_time = r.start_time
                 WHERE r.id = ?
-                    AND r.network_id = p.network_id
-                    AND r.service_id = p.service_id
-                    AND r.event_id = p.event_id
-                    AND r.start_time = p.start_time
             )
         """.strip())
         params.append(filters.recorded_program_id)
@@ -245,7 +259,8 @@ async def BuildCaptureWhere(filters: CaptureFilters, user: User | None) -> tuple
             )
         conditions.append(await BuildPersonalCaptureCondition('capture_favorites', 'user_id', user.id))
         params.append(user.id)
-    if filters.tag_id is not None:
+    # 複数のタグを指定した場合は、すべてのタグが付いているキャプチャに絞る
+    for tag_id in sorted(set(filters.tag_ids or [])):
         if user is None:
             raise HTTPException(
                 status_code = status.HTTP_401_UNAUTHORIZED,
@@ -253,9 +268,33 @@ async def BuildCaptureWhere(filters: CaptureFilters, user: User | None) -> tuple
                 headers = {'WWW-Authenticate': 'Bearer'},
             )
         # ほかのユーザーのタグで絞り込めないよう、所有者をチェックしてから条件にする
-        await GetOwnedTag(filters.tag_id, user)
-        conditions.append(await BuildPersonalCaptureCondition('capture_tag_items', 'tag_id', filters.tag_id))
-        params.append(filters.tag_id)
+        await GetOwnedTag(tag_id, user)
+        conditions.append(await BuildPersonalCaptureCondition('capture_tag_items', 'tag_id', tag_id))
+        params.append(tag_id)
+
+    # チャンネルで絞り込む (1枚のキャプチャは1つのチャンネルにしか属さないので、複数のチャンネルはどれかに当てはまれば含める)
+    ## チャンネルの放送回を数千行の capture_programs の中で先に探し、当てはまった放送回の ID で絞り込む
+    channel_ids = sorted(set(filters.channel_ids or []))
+    if len(channel_ids) > 0:
+        placeholders = ', '.join('?' for _ in channel_ids)
+        conditions.append(f"""
+            c.capture_program_id IN (
+                SELECT p3.id FROM capture_programs p3
+                JOIN channels ch3 ON ch3.network_id = p3.network_id AND ch3.service_id = p3.service_id
+                WHERE ch3.id IN ({placeholders})
+            )
+        """.strip())
+        params.extend(channel_ids)
+
+    # 期間で絞り込む (開始日の境目の時刻から、終了日の翌日の境目の時刻までの範囲に絞る)
+    if filters.start_date is not None:
+        start = datetime.combine(filters.start_date, datetime.min.time(), JST) + timedelta(hours=day_start_hour)
+        conditions.append(f'c.{axis} >= ?')
+        params.append(SQLDateTime(start))
+    if filters.end_date is not None:
+        end = datetime.combine(filters.end_date, datetime.min.time(), JST) + timedelta(days=1, hours=day_start_hour)
+        conditions.append(f'c.{axis} < ?')
+        params.append(SQLDateTime(end))
 
     # 字幕・コメントを画像に合成したかどうかで絞り込む
     if filters.is_caption_composited is not None:
@@ -280,25 +319,35 @@ async def BuildCaptureWhere(filters: CaptureFilters, user: User | None) -> tuple
     # 検索語は、録画番組の検索と同じく空白で区切った語の AND による部分一致で探す
     ## 範囲の指定がないか、3つの範囲をすべて指定した場合は、字幕・番組名・番組概要・チャンネル名・ファイル名のどれかに含まれていれば当てはまる
     ## 範囲を指定した場合は、指定した範囲のどれかに含まれていれば当てはまる
+    ## 番組名・番組概要・チャンネル名は放送回 (capture_programs) の数千行の中で、ファイル名は capture_files の中で1回だけ探し、
+    ## 当てはまった放送回とキャプチャの ID で絞り込む (キャプチャ1枚ごとに放送回やファイルを探し直すと、百万枚規模では数倍遅くなる)
+    ## SQLite の LIKE は英字の大文字と小文字を区別せず、LOWER() も英字だけを変換するので、百万行の1行ごとに LOWER() を呼ばずに比較する
+    ## ファイル名は、テーブルより小さい file_name のインデックスだけを走査して当てはまる行を探してから、キャプチャの ID を取得する
     query_targets = set(filters.query_targets or [])
     is_all_targets = len(query_targets) == 0 or query_targets == {'CaptionText', 'ProgramTitle', 'ProgramDescription'}
     for keyword in (filters.query or '').split():
-        pattern = f'%{keyword.lower()}%'
+        # 検索語に含まれる % と _ は、ワイルドカードではなくその文字自体として探すよう \ でエスケープする
+        escaped_keyword = keyword.lower().replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+        pattern = f'%{escaped_keyword}%'
 
         # すべての範囲から探す
         if is_all_targets is True:
             conditions.append("""
                 (
-                    LOWER(c.caption_text) LIKE ? OR
-                    LOWER(p.title) LIKE ? OR
-                    LOWER(p.description) LIKE ? OR
-                    EXISTS (
-                        SELECT 1 FROM channels ch
-                        WHERE ch.network_id = p.network_id AND ch.service_id = p.service_id AND LOWER(ch.name) LIKE ?
+                    c.caption_text LIKE ? ESCAPE '\\' OR
+                    c.capture_program_id IN (
+                        SELECT p2.id FROM capture_programs p2
+                        WHERE p2.title LIKE ? ESCAPE '\\' OR p2.description LIKE ? ESCAPE '\\' OR EXISTS (
+                            SELECT 1 FROM channels ch
+                            WHERE ch.network_id = p2.network_id AND ch.service_id = p2.service_id AND ch.name LIKE ? ESCAPE '\\'
+                        )
                     ) OR
-                    EXISTS (
-                        SELECT 1 FROM capture_files f
-                        WHERE f.capture_id = c.id AND LOWER(f.file_name) LIKE ?
+                    c.id IN (
+                        SELECT f.capture_id FROM capture_files f
+                        WHERE f.id IN (
+                            SELECT f2.id FROM capture_files f2
+                            WHERE f2.file_name LIKE ? ESCAPE '\\'
+                        )
                     )
                 )
             """.strip())
@@ -308,13 +357,18 @@ async def BuildCaptureWhere(filters: CaptureFilters, user: User | None) -> tuple
         # 指定された範囲の列だけから探す (列の並びは、すべての範囲から探すときと同じ順にする)
         target_conditions: list[str] = []
         if 'CaptionText' in query_targets:
-            target_conditions.append('LOWER(c.caption_text) LIKE ?')
+            target_conditions.append("c.caption_text LIKE ? ESCAPE '\\'")
+            params.append(pattern)
+        program_conditions: list[str] = []
         if 'ProgramTitle' in query_targets:
-            target_conditions.append('LOWER(p.title) LIKE ?')
+            program_conditions.append("p2.title LIKE ? ESCAPE '\\'")
+            params.append(pattern)
         if 'ProgramDescription' in query_targets:
-            target_conditions.append('LOWER(p.description) LIKE ?')
+            program_conditions.append("p2.description LIKE ? ESCAPE '\\'")
+            params.append(pattern)
+        if len(program_conditions) > 0:
+            target_conditions.append(f'c.capture_program_id IN (SELECT p2.id FROM capture_programs p2 WHERE {" OR ".join(program_conditions)})')
         conditions.append(f'({" OR ".join(target_conditions)})')
-        params.extend([pattern] * len(target_conditions))
 
     # 利用できる場所があるかの EXISTS は最後に置き、ほかの条件に当てはまったキャプチャだけで評価させる
     conditions.append(CAPTURE_AVAILABLE_CONDITION)
@@ -534,54 +588,70 @@ async def SerializePrograms(ids: list[int]) -> list[schemas.CaptureProgram]:
     return programs
 
 
-async def GetProgramAlbum(program: schemas.CaptureProgram, user: User | None) -> schemas.CaptureProgramAlbum:
+async def GetProgramAlbums(programs: list[schemas.CaptureProgram], user: User | None) -> list[schemas.CaptureProgramAlbum]:
     """
-    放送回のアルバム (利用できるキャプチャの枚数と代表のキャプチャ) を作る
+    放送回ごとのアルバム (利用できるキャプチャの枚数と代表のキャプチャ) を作る
 
     Args:
-        program (schemas.CaptureProgram): 放送回の番組情報
+        programs (list[schemas.CaptureProgram]): 放送回の番組情報 (この並び順でアルバムを返す)
         user (User | None): 閲覧しているユーザー
 
     Returns:
-        schemas.CaptureProgramAlbum: 放送回のアルバム
+        list[schemas.CaptureProgramAlbum]: 放送回のアルバム (利用できるキャプチャが1枚もない放送回は含めない)
     """
 
-    conn = connections.get('default')
+    if len(programs) == 0:
+        return []
 
-    # 利用できるキャプチャの枚数を取得する
-    stats_rows = await conn.execute_query_dict(f"""
-        SELECT COUNT(*) AS count
-        FROM captures c
-        WHERE c.capture_program_id = ? AND {CAPTURE_AVAILABLE_CONDITION}
-    """, [program.id])
-    stats = stats_rows[0]
-    if stats['count'] == 0:
-        raise HTTPException(
-            status_code = status.HTTP_404_NOT_FOUND,
-            detail = 'Capture program not found',
-        )
+    # 放送回ごとに、再生位置のあるキャプチャを先に並べ、再生位置のあるキャプチャの真ん中あたりを代表のキャプチャにする
+    ## 一覧の全部の放送回の枚数と代表のキャプチャを1回のクエリで取得する
+    ## 放送回ごとに問い合わせると、起動時の一括スキャンのように DB の接続を使い続ける処理があるとき、問い合わせのたびに順番を待って一覧が数十秒かかる
+    ## 字幕の文章を含むキャプチャの全部の列を、放送回のすべてのキャプチャの分だけ並べ替えないよう、先に代表のキャプチャの ID だけを選んでから行を読む
+    placeholders = ', '.join('?' for _ in programs)
+    cover_rows = await connections.get('default').execute_query_dict(f"""
+        SELECT c.*, a.album_capture_count
+        FROM (
+            SELECT
+                c.id,
+                ROW_NUMBER() OVER album_order AS album_position,
+                COUNT(*) OVER album AS album_capture_count,
+                COUNT(c.playback_position) OVER album AS album_positioned_count
+            FROM captures c
+            WHERE c.capture_program_id IN ({placeholders}) AND {CAPTURE_AVAILABLE_CONDITION}
+            WINDOW
+                album AS (PARTITION BY c.capture_program_id),
+                album_order AS (
+                    PARTITION BY c.capture_program_id
+                    ORDER BY (c.playback_position IS NULL), c.playback_position, c.captured_at, c.id
+                )
+        ) a
+        JOIN captures c ON c.id = a.id
+        WHERE a.album_position = a.album_positioned_count / 2 + 1
+    """, [program.id for program in programs])
 
-    # 再生位置のあるキャプチャを先に並べ、その真ん中あたりを代表のキャプチャにする
-    positioned_rows = await conn.execute_query_dict(f"""
-        SELECT COUNT(*) AS count
-        FROM captures c
-        WHERE c.capture_program_id = ? AND {CAPTURE_AVAILABLE_CONDITION} AND c.playback_position IS NOT NULL
-    """, [program.id])
-    cover_offset = positioned_rows[0]['count'] // 2
-    cover_rows = await conn.execute_query_dict(f"""
-        SELECT c.*
-        FROM captures c
-        WHERE c.capture_program_id = ? AND {CAPTURE_AVAILABLE_CONDITION}
-        ORDER BY (c.playback_position IS NULL), c.playback_position, c.captured_at, c.id
-        LIMIT 1 OFFSET ?
-    """, [program.id, cover_offset])
-    cover_capture = (await SerializeCaptures(cover_rows, user))[0]
+    # 代表のキャプチャを API のレスポンスの形にし、放送回ごとの枚数と一緒に引けるようにする
+    capture_counts: dict[int, int] = {}
+    capture_rows: list[dict[str, Any]] = []
+    for cover_row in cover_rows:
+        capture_counts[cover_row['capture_program_id']] = cover_row.pop('album_capture_count')
+        capture_rows.append(cover_row)
+    covers_by_program_id: dict[int, schemas.Capture] = {}
+    for capture in await SerializeCaptures(capture_rows, user):
+        if capture.capture_program_id is not None:
+            covers_by_program_id[capture.capture_program_id] = capture
 
-    return schemas.CaptureProgramAlbum(
-        **program.model_dump(),
-        capture_count = stats['count'],
-        cover_capture = cover_capture,
-    )
+    # 渡された放送回の順にアルバムを作る (利用できるキャプチャが1枚もない放送回は、代表のキャプチャがないので含めない)
+    albums: list[schemas.CaptureProgramAlbum] = []
+    for program in programs:
+        cover_capture = covers_by_program_id.get(program.id)
+        if cover_capture is None:
+            continue
+        albums.append(schemas.CaptureProgramAlbum(
+            **program.model_dump(),
+            capture_count = capture_counts[program.id],
+            cover_capture = cover_capture,
+        ))
+    return albums
 
 
 async def SerializeTag(tag: CaptureTag) -> schemas.CaptureTag:
@@ -658,14 +728,13 @@ async def CapturesAPI(
     # 本人のお気に入りとタグの状態を含むので、共有のキャッシュに入れさせない
     response.headers['Cache-Control'] = 'private, no-store'
 
-    conditions, params = await BuildCaptureWhere(filters, user)
-
     # 放送日時の順では、放送日時の分からないキャプチャ (番組の情報がないもの) を除く
+    axis: Literal['captured_at', 'broadcast_at'] = 'captured_at'
     if order.startswith('BroadcastAt'):
         axis = 'broadcast_at'
+    conditions, params = await BuildCaptureWhere(filters, user, axis, day_start_hour)
+    if axis == 'broadcast_at':
         conditions.append('c.broadcast_at IS NOT NULL')
-    else:
-        axis = 'captured_at'
 
     # 日付を指定された場合は、その日の境目の時刻から24時間の範囲に絞る
     if date is not None:
@@ -741,14 +810,28 @@ async def CapturesAPI(
 )
 async def CaptureUploadAPI(
     image: Annotated[UploadFile, File(description='アップロードするキャプチャ画像 (JPEG or PNG)。')],
-    user: Annotated[User | None, Depends(GetOptionalCurrentUser)],
+    token: Annotated[str | None, Depends(OAuth2PasswordBearer(tokenUrl='users/token', auto_error=False))],
     file_modified_at: Annotated[float | None, Form(allow_inf_nan=False, description='元のファイルの更新日時 (UNIX 時間のミリ秒) 。手元のファイルをアップロードするときに指定する。')] = None,
 ):
     """
     クライアント側でキャプチャした画像や手元の画像をサーバーにアップロードする。<br>
     アップロードされた画像は、サーバー設定で指定されたフォルダに保存し、その場でキャプチャとして登録する。<br>
-    同じ内容のキャプチャが既に保存されている場合は、保存せずにそのキャプチャを返す。
+    同じ内容のキャプチャが既に保存されている場合は、保存せずにそのキャプチャを返す。<br>
+    アクセストークンが期限切れなどで無効な場合も、ログインしていない場合と同じく保存する。
     """
+
+    # ログインしている場合だけ、返すキャプチャにお気に入りとタグを含めるためにユーザーを取得する
+    ## キャプチャはユーザーごとに区別せずに保存するので、ユーザーは保存そのものには使わない
+    ## 視聴中にアクセストークンの期限が切れたりアカウントが削除されたりしても、撮影したキャプチャを失わないよう、
+    ## 無効なアクセストークンはエラーにせず、ログインしていない場合と同じく扱う
+    user: User | None = None
+    if token is not None:
+        try:
+            user = await GetCurrentUser(token)
+        except HTTPException as ex:
+            if ex.status_code != status.HTTP_401_UNAUTHORIZED:
+                raise
+            logging.warning('[CapturesRouter][CaptureUploadAPI] Invalid access token was sent. Saving the capture as a logged-out user.')
 
     # アップロードされた画像を読み込む
     ## 上限を超える巨大なファイルをメモリに載せないよう、上限より 1 バイトだけ多く読み込み、上限を超えていたらエラーにする
@@ -780,6 +863,10 @@ async def CaptureUploadAPI(
             detail = 'Specified filename is invalid',
         )
 
+    # macOS などでは使えても Windows のファイル名には使えない文字は、_ に置き換えて保存する
+    ## 置き換えないと、Windows で動くサーバーや Windows の共有フォルダの保存先では、ファイルを作れずに保存に失敗する
+    filename = re.sub(r'[<>"|?*\x01-\x1f]', '_', filename)
+
     # キャプチャは JPEG か PNG の画像なので、拡張子が .jpg / .jpeg / .png 以外のファイル名はエラーにする
     ## JPEG は末尾に任意のデータを付けても画像として読めるため、中身の検査だけでは .bat のような実行できるファイルとしても保存できてしまう
     if filename.lower().endswith(('.jpg', '.jpeg', '.png')) is False:
@@ -793,7 +880,7 @@ async def CaptureUploadAPI(
     ## 万が一悪意ある攻撃者から危険なファイルを送り込まれないように
     ## 受け止めるのは画像として読めないことを示す例外だけにし (registerFile() と同じ)、実装側の誤りはそのまま 500 として伝える
     try:
-        await asyncio.to_thread(ReadCaptureImage, data, filename, modified_at)
+        info = await asyncio.to_thread(ReadCaptureImage, data, filename, modified_at)
     except (UnidentifiedImageError, SyntaxError, ValueError, Image.DecompressionBombError, OSError) as ex:
         logging.error('[CapturesRouter][CaptureUploadAPI] Invalid image file was uploaded.')
         raise HTTPException(
@@ -803,7 +890,7 @@ async def CaptureUploadAPI(
 
     # 同じ内容のキャプチャが、今も保存先に実在すると確認できたときだけ、保存を省いてそのキャプチャを返す
     scanner = CaptureScanTask()
-    existing_capture = await Capture.get_or_none(file_hash=hashlib.sha256(data).digest())
+    existing_capture = await Capture.get_or_none(file_hash=info.file_hash)
     if existing_capture is not None:
         for existing_file in await CaptureFile.filter(capture_id=existing_capture.id, status='Available'):
             try:
@@ -849,20 +936,17 @@ async def CaptureUploadAPI(
             else:
                 name = f'{Path(filename).stem}-{count}{Path(filename).suffix}'
             path = NormalizeCapturePath(root / name)
-            # 実際に作るファイルは、受け取った名前の大文字小文字のままにする (ロックと DB には正規化したパスを使う)
-            ## Windows の正規化はパスを小文字にするので、そのまま作ると、保存先のファイル名まで小文字になってしまう
-            saved_path = os.path.abspath(os.path.join(os.path.normpath(str(upload_folder)), name))
 
             async with scanner.getPathLock(path):
                 # このリクエストでファイルを作ったかどうか (保存に失敗したときに、作ったファイルだけを消すため)
                 is_created = False
                 try:
                     # 同じ秒に撮った2枚を同時に受け取っても別の名前で保存できるよう、ファイルの作成そのものを排他的に行う
-                    async with await anyio.open_file(saved_path, 'xb') as output:
+                    async with await anyio.open_file(path, 'xb') as output:
                         is_created = True
                         await output.write(data)
                     if file_modified_at is not None:
-                        await asyncio.to_thread(os.utime, saved_path, (modified_at.timestamp(), modified_at.timestamp()))
+                        await asyncio.to_thread(os.utime, path, (modified_at.timestamp(), modified_at.timestamp()))
 
                     # 保存したファイルを、スキャンを待たずにその場でキャプチャとして登録する
                     capture = await scanner.registerFile(path, data=data)
@@ -882,9 +966,9 @@ async def CaptureUploadAPI(
                     ## 残しておくと、次のスキャンで画像として読めないファイルとして登録され、保存先に溜まっていく
                     if is_created is True:
                         try:
-                            await anyio.Path(saved_path).unlink(missing_ok=True)
+                            await anyio.Path(path).unlink(missing_ok=True)
                         except OSError as unlink_ex:
-                            logging.error(f'Cannot delete partially written capture image: {saved_path}', exc_info=unlink_ex)
+                            logging.error(f'Cannot delete partially written capture image: {path}', exc_info=unlink_ex)
 
                     if isinstance(ex, PermissionError):
                         raise HTTPException(
@@ -962,18 +1046,16 @@ async def CaptureSectionsAPI(
     if can_cache is True and cache_key in scanner.sections_cache:
         return scanner.sections_cache[cache_key]
 
-    conditions, params = await BuildCaptureWhere(filters, user)
-
     # 集計する日時の列 (放送日時の軸では、放送日時の分からないキャプチャを除く)
-    if axis == 'CapturedAt':
-        column = 'captured'
-    else:
-        column = 'broadcast'
-    conditions.append(f'c.{column}_at IS NOT NULL')
+    column: Literal['captured_at', 'broadcast_at'] = 'captured_at'
+    if axis == 'BroadcastAt':
+        column = 'broadcast_at'
+    conditions, params = await BuildCaptureWhere(filters, user, column, day_start_hour)
+    conditions.append(f'c.{column} IS NOT NULL')
 
     # 日時を日本時間に直してから、日付の境目の時刻の分だけずらした日付で数える
     ## DB の日時は +09:00 付きで保存されていて、SQLite の date() は UTC に直して扱うので、9時間を足して日本時間に戻す
-    date_expression = f"date(c.{column}_at, '+9 hours', '-{day_start_hour} hours')"
+    date_expression = f"date(c.{column}, '+9 hours', '-{day_start_hour} hours')"
 
     # 放送回の列 (p.) を条件に使う場合のみ、capture_programs テーブルを JOIN する
     ## JOIN しない場合は、captures テーブルの行を読み込まずに、日時と ID のインデックスだけを走査して件数を数えられる
@@ -999,6 +1081,39 @@ async def CaptureSectionsAPI(
         scanner.sections_cache[cache_key] = result
 
     return result
+
+
+@router.get(
+    '/channels',
+    summary = 'キャプチャチャンネル一覧 API',
+    response_description = '利用できるキャプチャがあるチャンネルのリスト。',
+    response_model = list[schemas.CaptureChannel],
+)
+async def CaptureChannelsAPI():
+    """
+    利用できるキャプチャが1枚以上あるチャンネルを、チャンネル一覧 API と同じリモコン番号の順に一覧する。<br>
+    キャプチャの一覧のチャンネルでの絞り込みに使う。
+    """
+
+    # 数千行の放送回のうち、利用できるキャプチャがあるものだけを見て、そのチャンネルを重複なく取得する
+    rows = await connections.get('default').execute_query_dict(f"""
+        SELECT
+            ch.id,
+            ch.display_channel_id,
+            ch.name,
+            ch.type
+        FROM channels ch
+        WHERE EXISTS (
+            SELECT 1 FROM capture_programs p
+            WHERE p.network_id = ch.network_id AND p.service_id = ch.service_id AND EXISTS (
+                SELECT 1 FROM captures c
+                WHERE c.capture_program_id = p.id AND {CAPTURE_AVAILABLE_CONDITION}
+            )
+        )
+        ORDER BY ch.remocon_id, ch.channel_number, ch.id
+    """)
+
+    return [schemas.CaptureChannel.model_validate(row) for row in rows]
 
 
 @router.get(
@@ -1040,14 +1155,16 @@ async def CaptureProgramsAPI(
     for keyword in (query or '').split():
         conditions.append("""
             (
-                LOWER(p.title) LIKE ? OR
+                LOWER(p.title) LIKE ? ESCAPE '\\' OR
                 EXISTS (
                     SELECT 1 FROM channels ch
-                    WHERE ch.network_id = p.network_id AND ch.service_id = p.service_id AND LOWER(ch.name) LIKE ?
+                    WHERE ch.network_id = p.network_id AND ch.service_id = p.service_id AND LOWER(ch.name) LIKE ? ESCAPE '\\'
                 )
             )
         """.strip())
-        params.extend([f'%{keyword.lower()}%'] * 2)  # 2つの検索対象に同じパラメータを使う
+        # 検索語に含まれる % と _ は、ワイルドカードではなくその文字自体として探すよう \ でエスケープする
+        escaped_keyword = keyword.lower().replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+        params.extend([f'%{escaped_keyword}%'] * 2)  # 2つの検索対象に同じパラメータを使う
 
     # 同じ番組キーの録画番組があるかどうかで絞り込む
     ## 録画ファイルが見つからなくなった (Missing の) 録画番組は開けないので、録画番組がないものとして扱う
@@ -1095,9 +1212,10 @@ async def CaptureProgramsAPI(
         next_cursor = EncodeCursor(signature, [rows[limit - 1]['start_time'], rows[limit - 1]['id']])
 
     # 放送回ごとにアルバム (枚数・撮影期間・代表のキャプチャ) を作る
+    ## 一覧を取得してからアルバムを作るまでの間に、キャプチャがすべて削除された放送回は一覧から外れる
     ids = [row['id'] for row in rows[:limit]]
     programs_by_id = {program.id: program for program in await SerializePrograms(ids)}
-    albums = [await GetProgramAlbum(programs_by_id[id], user) for id in ids]
+    albums = await GetProgramAlbums([programs_by_id[id] for id in ids], user)
     return schemas.CapturePrograms(programs=albums, next_cursor=next_cursor)
 
 
@@ -1119,13 +1237,14 @@ async def CaptureProgramAPI(
     # 代表のキャプチャに本人のお気に入りとタグの状態を含むので、共有のキャッシュに入れさせない
     response.headers['Cache-Control'] = 'private, no-store'
 
-    programs = await SerializePrograms([capture_program_id])
-    if len(programs) == 0:
+    # 放送回がないときと、利用できるキャプチャが1枚もないときは、どちらも見つからないものとして扱う
+    albums = await GetProgramAlbums(await SerializePrograms([capture_program_id]), user)
+    if len(albums) == 0:
         raise HTTPException(
             status_code = status.HTTP_404_NOT_FOUND,
             detail = 'Capture program not found',
         )
-    return await GetProgramAlbum(programs[0], user)
+    return albums[0]
 
 
 @router.get(

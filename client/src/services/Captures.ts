@@ -3,7 +3,7 @@ import { AxiosError } from 'axios';
 
 import Message from '@/message';
 import APIClient from '@/services/APIClient';
-import Utils, { Semaphore } from '@/utils';
+import Utils, { dayjs, Semaphore } from '@/utils';
 
 
 /** キャプチャの一覧 */
@@ -129,7 +129,12 @@ export interface ICaptureFilter {
     event_id?: number | null;
     start_time?: string | null;
     is_favorite?: boolean | null;
-    tag_id?: number | null;
+    // 複数のタグはすべて付いているキャプチャに、複数のチャンネルはどれかに当てはまるキャプチャに絞る
+    tag_ids?: number[] | null;
+    channel_ids?: string[] | null;
+    // 期間 (YYYY-MM-DD) はタイムラインの時間の軸で比べ、終了日もその日の分まで含める
+    start_date?: string | null;
+    end_date?: string | null;
     is_caption_composited?: boolean | null;
     is_comment_composited?: boolean | null;
     has_caption_text?: boolean | null;
@@ -267,14 +272,14 @@ class Captures {
      * @param filter 絞り込みの条件
      * @returns クエリパラメータ
      */
-    private static buildFilterParams(filter: ICaptureFilter): Record<string, string | number | boolean | string[]> {
-        const params: Record<string, string | number | boolean | string[]> = {};
+    private static buildFilterParams(filter: ICaptureFilter): Record<string, string | number | boolean | (string | number)[]> {
+        const params: Record<string, string | number | boolean | (string | number)[]> = {};
         for (const [key, value] of Object.entries(filter)) {
             // 空の配列 (検索語を探す範囲を1つも選んでいない) も、指定なしとして送らない
             if (value === null || value === undefined || value === '' || (Array.isArray(value) && value.length === 0)) {
                 continue;
             }
-            params[key] = value as string | number | boolean | string[];
+            params[key] = value as string | number | boolean | (string | number)[];
         }
         return params;
     }
@@ -294,7 +299,7 @@ class Captures {
         filter?: ICaptureFilter;
     } = {}): Promise<ICaptures | null> {
 
-        const params: Record<string, string | number | boolean | string[]> = {
+        const params: Record<string, string | number | boolean | (string | number)[]> = {
             ...this.buildFilterParams(options.filter ?? {}),
             order: options.order ?? 'CapturedAtDesc',
             limit: options.limit ?? 100,
@@ -304,12 +309,15 @@ class Captures {
         }
         if (options.date) {
             params.date = options.date;
+        }
+        // 日付の境目の時刻は、日付の指定 (date) と期間の絞り込み (start_date・end_date) の両方に使われる
+        if (options.date || options.day_start_hour !== undefined) {
             params.day_start_hour = options.day_start_hour ?? 0;
         }
 
         const response = await APIClient.get<ICaptures>('/captures', {
             params,
-            // 検索語を探す範囲のリストを FastAPI が受け付ける &query_targets=A&query_targets=B の形式にエンコードする
+            // 検索語を探す範囲やタグなどのリストを FastAPI が受け付ける &query_targets=A&query_targets=B の形式にエンコードする
             paramsSerializer: {
                 indexes: null,
             },
@@ -324,7 +332,7 @@ class Captures {
 
     /**
      * 条件に合うキャプチャを、カーソルをたどって最後まで取得する
-     * 番組の中のキャプチャ (多くても数百件) のように、件数が限られる一覧のためのもの
+     * 番組の中のキャプチャ (多くても数百件) のように件数が限られる一覧や、Shift キーで範囲選択した期間のように、すべてのキャプチャが必要なときのためのもの
      * @param options 並び順・日付・絞り込み
      * @returns キャプチャと、それらが参照する番組 (失敗時は null)
      */
@@ -367,20 +375,37 @@ class Captures {
         filter?: ICaptureFilter;
     } = {}): Promise<ICaptureSections | null> {
 
-        const params: Record<string, string | number | boolean | string[]> = {
+        const params: Record<string, string | number | boolean | (string | number)[]> = {
             ...this.buildFilterParams(options.filter ?? {}),
             axis: options.axis ?? 'CapturedAt',
             day_start_hour: options.day_start_hour ?? 0,
         };
         const response = await APIClient.get<ICaptureSections>('/captures/sections', {
             params,
-            // 検索語を探す範囲のリストを FastAPI が受け付ける &query_targets=A&query_targets=B の形式にエンコードする
+            // 検索語を探す範囲やタグなどのリストを FastAPI が受け付ける &query_targets=A&query_targets=B の形式にエンコードする
             paramsSerializer: {
                 indexes: null,
             },
         });
         if (response.type === 'error') {
-            APIClient.showGenericError(response, 'キャプチャの日付ごとの件数を取得できませんでした。');
+            // 削除済みのタグで絞り込んだときは、タグの画面がタグが存在しないことを案内するので、エラーの通知は表示しない
+            if (response.data.detail !== 'Capture tag not found') {
+                APIClient.showGenericError(response, 'キャプチャの日付ごとの件数を取得できませんでした。');
+            }
+            return null;
+        }
+        return response.data;
+    }
+
+
+    /**
+     * 利用できるキャプチャがあるチャンネルの一覧を取得する (チャンネルでの絞り込みの選択肢に使う)
+     * @returns チャンネルの一覧 (失敗時は null)
+     */
+    static async fetchChannels(): Promise<ICaptureChannel[] | null> {
+        const response = await APIClient.get<ICaptureChannel[]>('/captures/channels');
+        if (response.type === 'error') {
+            APIClient.showGenericError(response, 'キャプチャのあるチャンネルの一覧を取得できませんでした。');
             return null;
         }
         return response.data;
@@ -410,6 +435,32 @@ class Captures {
      */
     static getImageURL(capture: ICapture): string {
         return `${Utils.api_base_url}/captures/${capture.id}/image?hash=${capture.file_hash}`;
+    }
+
+
+    /**
+     * キャプチャの画像を、保存先にあるファイル名でブラウザにダウンロードさせる
+     * 開発時は API のオリジンが画面と異なり、a 要素の download 属性が効かずに画像を開いてしまうため、Blob として取得してから保存させる
+     * 複数枚を渡したときは、選んだ順に1枚ずつ保存させる
+     * @param captures キャプチャのリスト
+     * @returns すべて保存できたかどうか
+     */
+    static async downloadImages(captures: ICapture[]): Promise<boolean> {
+        for (const capture of captures) {
+            const [detail, image] = await Promise.all([
+                Captures.fetchCapture(capture.id),
+                APIClient.get<Blob>(Captures.getImageURL(capture).replace(Utils.api_base_url, ''), { responseType: 'blob' }),
+            ]);
+            if (image.type === 'error') {
+                APIClient.showGenericError(image, 'キャプチャの画像をダウンロードできませんでした。');
+                return false;
+            }
+            // ファイル名を取得できなかったときは、撮影日時から KonomiTV のキャプチャと同じ形式のファイル名を付ける
+            const extension = image.data.type === 'image/png' ? 'png' : 'jpg';
+            const fileName = detail?.files[0]?.file_name ?? `Capture_${dayjs(capture.captured_at).format('YYYYMMDD-HHmmss')}.${extension}`;
+            Utils.downloadBlobData(image.data, fileName);
+        }
+        return true;
     }
 
 
@@ -503,7 +554,14 @@ class Captures {
     static async createTag(name: string): Promise<ICaptureTag | null> {
         const response = await APIClient.post<ICaptureTag>('/captures/tags', { name });
         if (response.type === 'error') {
-            APIClient.showGenericError(response, 'タグを作成できませんでした。');
+            switch (response.data.detail) {
+                case 'Capture tag name already exists':
+                    Message.error('同じ名前のタグがすでにあります。別の名前を入力してください。');
+                    break;
+                default:
+                    APIClient.showGenericError(response, 'タグを作成できませんでした。');
+                    break;
+            }
             return null;
         }
         return response.data;
@@ -519,7 +577,14 @@ class Captures {
     static async renameTag(tag_id: number, name: string): Promise<ICaptureTag | null> {
         const response = await APIClient.put<ICaptureTag>(`/captures/tags/${tag_id}`, { name });
         if (response.type === 'error') {
-            APIClient.showGenericError(response, 'タグの名前を変更できませんでした。');
+            switch (response.data.detail) {
+                case 'Capture tag name already exists':
+                    Message.error('同じ名前のタグがすでにあります。別の名前を入力してください。');
+                    break;
+                default:
+                    APIClient.showGenericError(response, 'タグの名前を変更できませんでした。');
+                    break;
+            }
             return null;
         }
         return response.data;
@@ -566,7 +631,13 @@ class Captures {
      * @returns 削除の結果 (失敗時は null)
      */
     static async deleteCaptures(capture_ids: number[]): Promise<ICaptureDeleteResult | null> {
-        const response = await APIClient.delete<ICaptureDeleteResult>('/captures', { data: { capture_ids } });
+        // サーバーは1回のリクエストで受け取ったキャプチャをすべて削除してから応答し、1回に削除できる枚数に上限はない
+        // ネットワーク上の保存先では1枚の削除に約 50ms かかるので、既定の30秒に、その2倍の 100ms を枚数分だけ加えた時間まで応答を待つ
+        // 数百枚をまとめて削除したときも、サーバーが削除し終えるまで待って、その結果を表示する
+        const response = await APIClient.delete<ICaptureDeleteResult>('/captures', {
+            data: { capture_ids },
+            timeout: 30 * 1000 + capture_ids.length * 100,
+        });
         if (response.type === 'error') {
             APIClient.showGenericError(response, 'キャプチャを削除できませんでした。');
             return null;

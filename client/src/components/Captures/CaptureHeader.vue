@@ -6,7 +6,7 @@
                 <Icon icon="fluent:search-20-filled" height="20px" />
             </div>
             <input ref="searchInputRef" v-model="searchText" type="search" name="capture-search" enterkeyhint="search"
-                placeholder="キャプチャを検索..." @keydown.enter.prevent="submitSearch" @keydown.esc="closeSearch">
+                placeholder="キャプチャを検索..." @keydown.enter="submitSearch" @keydown.esc="closeSearch">
             <div v-ripple class="capture-header__search-close" @click="closeSearch">
                 <Icon icon="fluent:dismiss-20-filled" height="24px" />
             </div>
@@ -38,47 +38,9 @@
                 <Icon icon="fluent:search-20-filled" height="24px" />
             </div>
             <!-- 並べ替えと絞り込みは、一覧の見え方を変える操作としてまとめ、1つのボタンから開く -->
-            <v-menu v-if="showTimelineControls" location="bottom end" :close-on-content-click="false">
-                <template #activator="{ props: menuProps }">
-                    <v-btn class="capture-header__view-button" variant="flat" color="background-lighten-1" height="34"
-                        :class="{'capture-header__view-button--active': activeFilterCount > 0}" v-bind="menuProps">
-                        <Icon icon="fluent:filter-20-regular" width="18px" height="18px" />
-                        <span class="capture-header__view-button-text">並べ替えと絞り込み</span>
-                        <span v-if="activeFilterCount > 0" class="capture-header__view-button-count">{{ activeFilterCount }}</span>
-                    </v-btn>
-                </template>
-                <v-card class="capture-header__filter" color="background-lighten-1">
-                    <div class="capture-header__filter-row">
-                        <span class="capture-header__filter-label">並べ替えの基準</span>
-                        <div class="capture-header__filter-choices">
-                            <div v-for="choice in axisChoices" :key="choice.value" v-ripple
-                                class="capture-header__filter-choice"
-                                :class="{'capture-header__filter-choice--active': axis === choice.value}"
-                                @click="$emit('update:axis', choice.value)">
-                                {{ choice.label }}
-                            </div>
-                        </div>
-                    </div>
-                    <div class="capture-header__filter-divider"></div>
-                    <div v-for="option in filterOptions" :key="option.key" class="capture-header__filter-row">
-                        <span class="capture-header__filter-label">{{ option.label }}</span>
-                        <div class="capture-header__filter-choices">
-                            <div v-for="choice in option.choices" :key="String(choice.value)" v-ripple
-                                class="capture-header__filter-choice"
-                                :class="{'capture-header__filter-choice--active': filter[option.key] === choice.value}"
-                                @click="updateFilter(option.key, choice.value)">
-                                {{ choice.label }}
-                            </div>
-                        </div>
-                    </div>
-                    <div class="capture-header__filter-footer">
-                        <v-btn variant="text" color="text" height="36" :disabled="activeFilterCount === 0" @click="clearFilters">
-                            <Icon icon="fluent:dismiss-16-filled" width="18px" height="18px" />
-                            <span class="ml-1">絞り込みをすべて解除</span>
-                        </v-btn>
-                    </div>
-                </v-card>
-            </v-menu>
+            <CaptureFilterMenu v-if="showTimelineControls" ref="filterMenuRef" sort-label="並べ替えの基準" :sort-choices="axisChoices" :sort="axis"
+                :filter="filter" :period-label="axis === 'BroadcastAt' ? '放送日' : '撮影日'" :lock-favorite="lockFavorite"
+                :excluded-tag-id="excludedTagId" @update:sort="updateAxis" @update:filter="$emit('update:filter', $event)" />
             <v-menu location="bottom end" :close-on-content-click="true">
                 <template #activator="{ props: menuProps }">
                     <div v-ripple class="capture-header__menu" v-bind="menuProps">
@@ -92,9 +54,16 @@
                         </template>
                         <v-list-item-title class="ml-3">画像をアップロード</v-list-item-title>
                     </v-list-item>
+                    <v-list-item @click="isShortcutDialogOpen = true">
+                        <template #prepend>
+                            <Icon icon="fluent:keyboard-20-regular" width="20px" />
+                        </template>
+                        <v-list-item-title class="ml-3">キーボードショートカット</v-list-item-title>
+                    </v-list-item>
                 </v-list>
             </v-menu>
             <input ref="fileInputRef" type="file" accept="image/jpeg,image/png" multiple hidden @change="onFilesSelected">
+            <CaptureShortcutDialog v-model:show="isShortcutDialogOpen" />
         </div>
 
         <!-- 検索結果では、別の画面へ移るタブの代わりに、検索語を探す範囲の絞り込みを出す -->
@@ -116,6 +85,14 @@
             </router-link>
         </div>
 
+        <!-- 使っている絞り込みの条件だけをチップで並べ、× でその条件を解除できるようにする -->
+        <div v-if="showTimelineControls && activeFilterChips.length > 0" class="capture-header__active-filters">
+            <v-chip v-for="chip in activeFilterChips" :key="chip.key" class="capture-header__active-filter" color="primary"
+                variant="tonal" size="small" closable @click:close="chip.clear()">
+                {{ chip.label }}
+            </v-chip>
+        </div>
+
         <!-- 画像のファイルを画面に持ってきている間に出す、ドロップしてアップロードするための枠 -->
         <Teleport to="body">
             <transition name="capture-drop-fade">
@@ -135,13 +112,13 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 
+import CaptureFilterMenu from '@/components/Captures/CaptureFilterMenu.vue';
+import CaptureShortcutDialog from '@/components/Captures/CaptureShortcutDialog.vue';
 import Message from '@/message';
 import Captures, { CaptureQueryTarget, CaptureTimelineAxis, ICapture, ICaptureFilter } from '@/services/Captures';
 import Maintenance, { IMaintenanceTaskStatus } from '@/services/Maintenance';
+import Utils from '@/utils';
 
-
-/** 絞り込みのうち、ヘッダーで切り替えるもの (キャプチャの種類と番組情報の有無) */
-export type CaptureTypeFilterKey = 'is_caption_composited' | 'is_comment_composited' | 'has_caption_text' | 'has_metadata';
 
 const props = withDefaults(defineProps<{
     title: string;
@@ -153,6 +130,10 @@ const props = withDefaults(defineProps<{
     axis?: CaptureTimelineAxis;
     filter?: ICaptureFilter;
     queryTargets?: CaptureQueryTarget[];
+    // お気に入りの画面では、お気に入りであることが画面の前提なので、お気に入りの絞り込みを出さない
+    lockFavorite?: boolean;
+    // タグの画面では、そのタグが画面の前提なので、重ねて選ぶタグの選択肢から外す
+    excludedTagId?: number | null;
 }>(), {
     total: null,
     showTimelineControls: false,
@@ -161,6 +142,8 @@ const props = withDefaults(defineProps<{
     axis: 'CapturedAt',
     filter: () => ({}),
     queryTargets: () => [],
+    lockFavorite: false,
+    excludedTagId: null,
 });
 
 const emit = defineEmits<{
@@ -194,7 +177,11 @@ const openSearch = async () => {
 const closeSearch = () => {
     isSearchOpen.value = false;
 };
-const submitSearch = () => {
+const submitSearch = (event: KeyboardEvent) => {
+    // IME で入力中の文字を確定する Enter キーでは検索しない
+    if (Utils.isIMEComposing(event)) {
+        return;
+    }
     const query = searchText.value.trim();
     if (query === '') {
         return;
@@ -222,26 +209,19 @@ const axisChoices: { label: string; value: CaptureTimelineAxis }[] = [
     { label: '撮影日時', value: 'CapturedAt' },
     { label: '放送日時', value: 'BroadcastAt' },
 ];
-
-// キャプチャの種類の絞り込み (どれも「指定なし」「あり」「なし」の3択)
-const filterOptions: { key: CaptureTypeFilterKey; label: string; choices: { label: string; value: boolean | null }[] }[] = [
-    { key: 'is_caption_composited', label: '字幕の合成', choices: [{ label: 'すべて', value: null }, { label: 'あり', value: true }, { label: 'なし', value: false }] },
-    { key: 'is_comment_composited', label: 'コメントの合成', choices: [{ label: 'すべて', value: null }, { label: 'あり', value: true }, { label: 'なし', value: false }] },
-    { key: 'has_caption_text', label: '字幕テキスト', choices: [{ label: 'すべて', value: null }, { label: 'あり', value: true }, { label: 'なし', value: false }] },
-    { key: 'has_metadata', label: '番組情報', choices: [{ label: 'すべて', value: null }, { label: 'あり', value: true }, { label: 'なし', value: false }] },
-];
-const activeFilterCount = computed(() => filterOptions.filter(option => props.filter[option.key] !== null && props.filter[option.key] !== undefined).length);
-
-const updateFilter = (key: CaptureTypeFilterKey, value: boolean | null) => {
-    emit('update:filter', { ...props.filter, [key]: value });
-};
-const clearFilters = () => {
-    const next = { ...props.filter };
-    for (const option of filterOptions) {
-        next[option.key] = null;
+const updateAxis = (value: string) => {
+    const choice = axisChoices.find(item => item.value === value);
+    if (choice !== undefined) {
+        emit('update:axis', choice.value);
     }
-    emit('update:filter', next);
 };
+
+// 使っている絞り込みの条件のチップ (条件と解除の処理は、並べ替えと絞り込みのメニューが持つ)
+const filterMenuRef = ref<InstanceType<typeof CaptureFilterMenu> | null>(null);
+const activeFilterChips = computed(() => filterMenuRef.value?.activeFilterChips ?? []);
+
+// キーボードショートカットの一覧 (／(？) キーで開く処理は CaptureShortcutDialog.vue が行う)
+const isShortcutDialogOpen = ref(false);
 
 // 手元の画像のアップロード (メタデータのない画像でも、ファイルの更新日時を撮影日時として扱う)
 // メニューから選んだファイルと、画面にドロップしたファイルの両方をここで送る
@@ -437,7 +417,6 @@ onBeforeUnmount(() => {
             display: none;
         }
     }
-    // 並べ替えと絞り込みのボタン (スマホの縦画面ではアイコンだけにする)
     // 検索の入口 (スマホの縦画面だけ。PC とスマホの横画面では上部のヘッダーの検索欄を使う)
     &__search-button {
         display: none;
@@ -495,63 +474,6 @@ onBeforeUnmount(() => {
             height: 40px;
             border-radius: 8px;
             cursor: pointer;
-        }
-    }
-
-    // 高さと文字の大きさは、録画番組の一覧の並べ替えの選択欄 (RecordedProgramList.vue) にそろえる
-    &__view-button {
-        flex-shrink: 0;
-        padding: 0 10px !important;
-        border-radius: 6px;
-        letter-spacing: 0;
-        font-size: 14px;
-        // スマホの縦画面では、検索や「その他」と同じ背景のない四角いアイコンのボタンにする
-        @include smartphone-vertical {
-            position: relative;
-            min-width: 40px !important;
-            width: 40px;
-            height: 40px !important;
-            :deep(svg) {
-                width: 20px;
-                height: 20px;
-            }
-            padding: 0 !important;
-            background: transparent !important;
-            box-shadow: none !important;
-        }
-        &-text {
-            margin-left: 6px;
-            @include smartphone-vertical {
-                display: none;
-            }
-        }
-        &-count {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            min-width: 20px;
-            height: 20px;
-            margin-left: 6px;
-            padding: 0 6px;
-            border-radius: 10px;
-            background: rgb(var(--v-theme-secondary));
-            color: rgb(var(--v-theme-text));
-            font-size: 12px;
-            font-weight: 700;
-            // スマホの縦画面では、アイコンの右上に重ねる
-            @include smartphone-vertical {
-                position: absolute;
-                top: 2px;
-                right: 0px;
-                min-width: 16px;
-                height: 16px;
-                margin-left: 0;
-                padding: 0 4px;
-                font-size: 10.5px;
-            }
-        }
-        &--active {
-            color: rgb(var(--v-theme-secondary-lighten-1)) !important;
         }
     }
     &__menu {
@@ -672,45 +594,16 @@ onBeforeUnmount(() => {
         }
     }
 
-    &__filter {
-        width: 340px;
-        max-width: calc(100vw - 24px);
-        padding: 14px 16px 8px;
-        &-row {
-            margin-bottom: 12px;
-        }
-        &-label {
-            display: block;
-            margin-bottom: 6px;
-            font-size: 13px;
-            color: rgb(var(--v-theme-text-darken-1));
-        }
-        &-choices {
-            display: flex;
-            gap: 6px;
-        }
-        &-choice {
-            flex: 1;
-            padding: 6px 0;
-            border-radius: 6px;
-            background: rgb(var(--v-theme-background-lighten-2));
-            text-align: center;
-            font-size: 13px;
-            cursor: pointer;
-            &--active {
-                background: rgb(var(--v-theme-primary));
-                color: rgb(var(--v-theme-text));
-            }
-        }
-        &-divider {
-            height: 1px;
-            margin: 4px 0 14px;
-            background: rgb(var(--v-theme-background-lighten-2));
-        }
-        &-footer {
-            display: flex;
-            justify-content: flex-end;
-        }
+    // 使っている絞り込みの条件のチップ (タブの行の下に、折り返して並べる)
+    &__active-filters {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: -4px;
+        margin-bottom: 14px;
+    }
+    &__active-filter {
+        user-select: none;
     }
 }
 
