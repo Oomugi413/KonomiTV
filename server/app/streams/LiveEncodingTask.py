@@ -111,9 +111,9 @@ class LiveEncodingTask:
         if network_id == 0x0004 and service_id in [103, 191, 192, 193, 211]:
             return True
 
-        # BS4K・CS4K (放送終了) は 4K 放送なのでフル HD 扱いとする
+        # BS4K・CS4K (放送終了)・ケーブル4K (デジタル放送高度リマックス) は 4K 放送なのでフル HD 扱いとする
         # 現在の KonomiTV は 1920×1080 以上の解像度へのエンコードをサポートしていない
-        if network_id == 0x000B or network_id == 0x000C:
+        if network_id in [0x000B, 0x000C, 0xFFFA]:
             return True
 
         return False
@@ -123,6 +123,7 @@ class LiveEncodingTask:
         quality: QUALITY_TYPES,
         channel_type: Literal['GR', 'BS', 'CS', 'CATV', 'SKY', 'BS4K'],
         is_fullhd_channel: bool,
+        is_4k_channel: bool,
     ) -> list[str]:
         """
         FFmpeg に渡すオプションを組み立てる
@@ -131,6 +132,7 @@ class LiveEncodingTask:
             quality (QUALITY_TYPES): 映像の品質
             channel_type (Literal['GR', 'BS', 'CS', 'CATV', 'SKY', 'BS4K']): チャンネルの種類
             is_fullhd_channel (bool): フル HD 放送が実施されているチャンネルかどうか
+            is_4k_channel (bool): 4K (3840×2160・60p プログレッシブ) 放送が実施されているチャンネルかどうか
 
         Returns:
             list[str]: FFmpeg に渡すオプションが連なる配列
@@ -190,9 +192,10 @@ class LiveEncodingTask:
             ## H.265/HEVC では高圧縮化のため、最大 GOP 長を長くする
             gop_length_second = self.GOP_LENGTH_SECONDS_H265
 
-        ## BS4K は 60p (プログレッシブ) で放送されているので、インターレース解除を行わず 60fps でエンコードする
-        if channel_type == "BS4K":
-            options.append(f'-vf scale={video_width}:{video_height}')
+        ## 4K 放送 (BS4K・ケーブル4K) は 60p (プログレッシブ) で放送されているので、インターレース解除を行わず 60fps でエンコードする
+        ## 4K 放送の映像は 10bit のため、8bit しか扱えない H.264 High Profile / H.265 Main Profile 向けに 8bit (yuv420p) へ変換する
+        if is_4k_channel is True:
+            options.append(f'-vf scale={video_width}:{video_height},format=yuv420p')
             options.append(f'-r 60000/1001 -g {int(gop_length_second * 60)}')
         else:
             ## インターレース解除 (60i → 60p (フレームレート: 60fps))
@@ -277,6 +280,7 @@ class LiveEncodingTask:
         channel_type: Literal['GR', 'BS', 'CS', 'CATV', 'SKY', 'BS4K'],
         service_id: int,
         is_fullhd_channel: bool,
+        is_4k_channel: bool,
     ) -> list[str]:
         """
         QSVEncC・NVEncC・VCEEncC・rkmppenc (便宜上 HWEncC と総称) に渡すオプションを組み立てる
@@ -287,6 +291,7 @@ class LiveEncodingTask:
             channel_type (Literal['GR', 'BS', 'CS', 'CATV', 'SKY', 'BS4K']): チャンネルの種類
             service_id (int): サービス ID
             is_fullhd_channel (bool): フル HD 放送が実施されているチャンネルかどうか
+            is_4k_channel (bool): 4K (3840×2160・60p プログレッシブ) 放送が実施されているチャンネルかどうか
 
         Returns:
             list[str]: HWEncC に渡すオプションが連なる配列
@@ -308,8 +313,8 @@ class LiveEncodingTask:
         ## --input-probesize, --input-analyze をつけることで、ストリームの分析時間を短縮できる
         ## 両方つけるのが重要で、--input-analyze だけだとエンコーダーがフリーズすることがある
         options.append(f'--input-format mpegts --input-probesize {input_probesize}K --input-analyze {input_analyze}')
-        ## BS4K 以外では 29.97fps (59.94i) を指定する
-        if channel_type != 'BS4K':
+        ## 4K 放送以外では 29.97fps (59.94i) を指定する
+        if is_4k_channel is False:
             options.append('--fps 30000/1001')
         ## 入力を指定する
         options.append('--input -')
@@ -322,11 +327,11 @@ class LiveEncodingTask:
         ## 入力途中の解像度変更に備えて、デコーダー/入力サーフェスの最大確保解像度を指定する
         ## --output-res は出力側の固定解像度であり、こちらは入力側の上限なので併用する
         ## BS4K のうち NHK BS8K (service_id=102) は入力が 8K のため 7680×4320、
-        ## それ以外の BS4K は入力が 4K のため 3840×2160、それ以外のチャンネルは HD 上限の 1920×1080 とする
+        ## それ以外の 4K 放送 (BS4K・ケーブル4K) は 3840×2160、それ以外のチャンネルは HD 上限の 1920×1080 とする
         ## (画質プリセットの出力解像度とは独立で、入力に現れうる最大解像度を確保する必要がある)
         if channel_type == 'BS4K' and service_id == 102:
             options.append('--adapt-resolution 7680x4320')
-        elif channel_type == 'BS4K':
+        elif is_4k_channel is True:
             options.append('--adapt-resolution 3840x2160')
         else:
             options.append('--adapt-resolution 1920x1080')
@@ -417,8 +422,8 @@ class LiveEncodingTask:
             ## H.265/HEVC では高圧縮化のため、最大 GOP 長を長くする
             gop_length_second = self.GOP_LENGTH_SECONDS_H265
 
-        ## BS4K は 60p (プログレッシブ) で放送されているので、インターレース解除を行わず 60fps でエンコードする
-        if channel_type == "BS4K":
+        ## 4K 放送 (BS4K・ケーブル4K) は 60p (プログレッシブ) で放送されているので、インターレース解除を行わず 60fps でエンコードする
+        if is_4k_channel is True:
             options.append(f'--avsync vfr --gop-len {int(gop_length_second * 60)}')
         else:
             ## インターレース映像として読み込む
@@ -697,6 +702,11 @@ class LiveEncodingTask:
         # フル HD 放送が行われているチャンネルかを取得
         is_fullhd_channel = self.isFullHDChannel(channel.network_id, channel.service_id)
 
+        # 4K 放送 (BS4K・CS4K・ケーブル4K) が行われているチャンネルかを取得
+        ## 放送波の PSI/SI から映像の解像度を取得する手段がないので、フル HD 放送の判定と同様にネットワーク ID で決め打ちしている
+        ## ケーブルテレビの高度ケーブル自主放送 (0xFFF7) には H.265 の 1080i の HD チャンネルも含まれるため、4K 放送としては扱わない
+        is_4k_channel = channel.network_id in [0x000B, 0x000C, 0xFFFA]
+
         ## ラジオチャンネルでは HW エンコードの意味がないため、FFmpeg に固定する
         if channel.is_radiochannel is True:
             ENCODER_TYPE = 'FFmpeg'
@@ -750,7 +760,7 @@ class LiveEncodingTask:
                 encoder_options = self.buildFFmpegOptionsForRadio()
             else:
                 assert self.live_stream.quality != 'original'
-                encoder_options = self.buildFFmpegOptions(self.live_stream.quality, channel.type, is_fullhd_channel)
+                encoder_options = self.buildFFmpegOptions(self.live_stream.quality, channel.type, is_fullhd_channel, is_4k_channel)
             logging.info(f'{self.live_stream.log_prefix} FFmpeg Commands:\nffmpeg {" ".join(encoder_options)}')
 
             # エンコーダープロセスを非同期で作成・実行
@@ -778,7 +788,7 @@ class LiveEncodingTask:
 
             # オプションを取得
             assert self.live_stream.quality != 'original'
-            encoder_options = self.buildHWEncCOptions(self.live_stream.quality, ENCODER_TYPE, channel.type, channel.service_id, is_fullhd_channel)
+            encoder_options = self.buildHWEncCOptions(self.live_stream.quality, ENCODER_TYPE, channel.type, channel.service_id, is_fullhd_channel, is_4k_channel)
             logging.info(f'{self.live_stream.log_prefix} {ENCODER_TYPE} Commands:\n{ENCODER_TYPE} {" ".join(encoder_options)}')
 
             # エンコーダープロセスを非同期で作成・実行
@@ -1077,51 +1087,62 @@ class LiveEncodingTask:
 
                 nonlocal chunk_buffer, chunk_written_at, writer_lock, original_quality_bytes_written
 
+                # 188 bytes の TS パケットに満たない、読み取ったデータの端数
+                ## read() は到着済みのデータを長さに関わらず返すため、パケットの途中で区切られることがある
+                ## 端数は次回の読み取りデータと結合し、チャンクバッファには完全な TS パケットだけを貯める
+                incomplete_packet_data = bytearray()
+
                 while True:
-                    try:
 
-                        # エンコーダーからの出力を読み取る
-                        ## TS パケットのサイズが 188 bytes なので、1回の readexactly() で 188 bytes ずつ読み取る
-                        ## read() ではなく厳密な readexactly() を使わないとぴったり 188 bytes にならない場合がある
-                        chunk = await cast(asyncio.StreamReader, encoder.stdout).readexactly(ts.PACKET_SIZE)
+                    # エンコーダーからの出力を、到着済みの分 (最大 64KB) だけまとめて読み取る
+                    ## readexactly() で 188 bytes ずつ読み取ると、パケットごとに await と排他ロックの取得が発生し、CPU 使用率が高くなる
+                    ## read() は指定サイズが揃うのを待たずに返るため、データ量の少ないラジオチャンネルでも遅延は増えない
+                    chunk = await cast(asyncio.StreamReader, encoder.stdout).read(65536)
 
-                        # 同時に chunk_buffer / chunk_written_at にアクセスするタスクが1つだけであることを保証する (排他ロック)
-                        async with writer_lock:
-
-                            # 188 bytes ごとに区切られた、エンコーダーの出力のチャンクをバッファに貯める
-                            chunk_buffer += chunk
-
-                            # チャンクバッファが 65536 bytes (64KB) 以上になった時のみ
-                            if len(chunk_buffer) >= 65536:
-
-                                # エンコーダーからの出力をライブストリームの Queue に書き込む
-                                chunk_size = len(chunk_buffer)
-                                self.live_stream.writeStreamData(bytes(chunk_buffer))
-                                # print(f'Writer:    Chunk size: {chunk_size:05} / Time: {time.time()}')
-
-                                # オリジナル画質 ("original") 指定時のみ、エンコーダーログがないため、
-                                # ライブストリームへ書き込んだ TS データ量からバッファリング完了を判定する
-                                if is_original_quality is True:
-                                    live_stream_status = self.live_stream.getStatus()
-                                    if live_stream_status.status == 'Standby':
-                                        original_quality_bytes_written += chunk_size
-                                        if original_quality_bytes_written < self.ORIGINAL_QUALITY_ONAIR_BUFFER_BYTES:
-                                            if live_stream_status.detail != 'ストリーミングを開始しています…':
-                                                self.live_stream.setStatus('Standby', 'ストリーミングを開始しています…')
-                                        else:
-                                            self.live_stream.setStatus('ONAir', 'ライブストリームは ONAir です。')
-                                            if self._retry_count > 0:
-                                                self._retry_count = 0
-
-                                # チャンクバッファを空にする（重要）
-                                chunk_buffer = bytearray()
-
-                                # チャンクの最終書き込み時刻を更新
-                                chunk_written_at = time.monotonic()
-
-                    # もし 188 bytes に満たないデータが返ってきたら、エンコーダーが終了したと判断してタスクを終了
-                    except asyncio.IncompleteReadError:
+                    # 空のデータが返ってきたら、エンコーダーが終了したと判断してタスクを終了
+                    ## 188 bytes に満たない最後の端数は、TS パケットとして不完全なので送信しない
+                    if len(chunk) == 0:
                         break
+
+                    # 端数と結合し、完全な TS パケットの部分だけを取り出す
+                    incomplete_packet_data += chunk
+                    complete_packets_size = len(incomplete_packet_data) - (len(incomplete_packet_data) % ts.PACKET_SIZE)
+                    complete_packets = incomplete_packet_data[:complete_packets_size]
+                    del incomplete_packet_data[:complete_packets_size]
+
+                    # 同時に chunk_buffer / chunk_written_at にアクセスするタスクが1つだけであることを保証する (排他ロック)
+                    async with writer_lock:
+
+                        # 188 bytes ごとに区切られた、エンコーダーの出力のチャンクをバッファに貯める
+                        chunk_buffer += complete_packets
+
+                        # チャンクバッファが 65536 bytes (64KB) 以上になった時のみ
+                        if len(chunk_buffer) >= 65536:
+
+                            # エンコーダーからの出力をライブストリームの Queue に書き込む
+                            chunk_size = len(chunk_buffer)
+                            self.live_stream.writeStreamData(bytes(chunk_buffer))
+                            # print(f'Writer:    Chunk size: {chunk_size:05} / Time: {time.time()}')
+
+                            # オリジナル画質 ("original") 指定時のみ、エンコーダーログがないため、
+                            # ライブストリームへ書き込んだ TS データ量からバッファリング完了を判定する
+                            if is_original_quality is True:
+                                live_stream_status = self.live_stream.getStatus()
+                                if live_stream_status.status == 'Standby':
+                                    original_quality_bytes_written += chunk_size
+                                    if original_quality_bytes_written < self.ORIGINAL_QUALITY_ONAIR_BUFFER_BYTES:
+                                        if live_stream_status.detail != 'ストリーミングを開始しています…':
+                                            self.live_stream.setStatus('Standby', 'ストリーミングを開始しています…')
+                                    else:
+                                        self.live_stream.setStatus('ONAir', 'ライブストリームは ONAir です。')
+                                        if self._retry_count > 0:
+                                            self._retry_count = 0
+
+                            # チャンクバッファを空にする（重要）
+                            chunk_buffer = bytearray()
+
+                            # チャンクの最終書き込み時刻を更新
+                            chunk_written_at = time.monotonic()
 
                     # エンコードタスクが終了しているか既にエンコーダープロセスが終了していたら、タスクを終了
                     if is_running is False or tsreadex.returncode is not None or encoder.returncode is not None:

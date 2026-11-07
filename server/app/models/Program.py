@@ -19,7 +19,7 @@ from tortoise.models import Model as TortoiseModel
 
 from app import logging
 from app.config import Config, LoadConfig
-from app.constants import DATABASE_CONFIG, HTTPX_CLIENT, JST
+from app.constants import DATABASE_CONFIG, HTTPX_CLIENT, JST, PROCESS_POOL_CONTEXT
 from app.models.Channel import Channel
 from app.schemas import Genre
 from app.utils import GetMirakurunAPIEndpointURL, ShutdownProcessPoolExecutor
@@ -100,7 +100,7 @@ class Program(TortoiseModel):
             # マルチプロセス実行用の Executor を初期化
             ## ProcessPoolExecutor のコンテキストマネージャーは、キャンセル時にも __exit__() で子プロセスの終了を同期的に待つ
             ## 番組情報更新中に API リクエストやバックグラウンドタスクがキャンセルされても、イベントループ全体を止めないように明示的に閉じる
-            executor = concurrent.futures.ProcessPoolExecutor(max_workers=1)
+            executor = concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=PROCESS_POOL_CONTEXT)
             should_wait_executor = True
             try:
                 # Mirakurun バックエンド
@@ -240,9 +240,13 @@ class Program(TortoiseModel):
                 raise ex
 
             # この変数から更新or更新不要な番組情報を削除していき、残った古い番組情報を最後にまとめて削除する
-            duplicate_programs = {temp.id:temp for temp in await Program.all()}
+            ## 変更の有無の判定に使う列だけを取得する (全列を ORM のオブジェクトにすると、2万件前後の番組で数十 MB を使うため)
+            duplicate_programs: dict[str, dict[str, Any]] = {}
+            for row in await Program.all().values('id', 'title', 'description', 'detail', 'start_time', 'end_time'):
+                duplicate_programs[row['id']] = row
 
-            # 追加・更新する番組情報 (最後に一括で DB に書き込む)
+            # 追加する番組情報と、更新する番組情報 (最後に一括で DB に書き込む)
+            added_programs: list[Program] = []
             updated_programs: list[Program] = []
 
             # チャンネル情報を取得
@@ -286,9 +290,20 @@ class Program(TortoiseModel):
 
                         # 見出しと本文
                         head_hankaku = TSInformation.formatString(head).replace('◇', '').strip()  # ◇ を取り除く
-                        if head_hankaku == '':  # 見出しが空の場合、固定で「番組内容」としておく
-                            head_hankaku = '番組内容'
                         text_hankaku = TSInformation.formatString(text).strip()
+                        ## 2つ目以降の項目で見出しが空 (空白だけ) の場合、直前の項目の本文の続きとしてつなげる
+                        ## WOWOW などは長い本文を、見出しが空白だけの別の項目に分けて送出するため、
+                        ## 「番組内容」として扱うと本来の番組内容を上書きしてしまう
+                        ## 分割位置には改行が含まれないため、続きの本文が「【」で始まる見出しのときだけ改行を挟んでつなげる
+                        ## (WOWOW では本文の中の「【」は常に行頭にあり、それ以外の分割位置は語や列挙の途中になっている)
+                        if head_hankaku == '' and len(detail) > 0:
+                            last_head = list(detail.keys())[-1]
+                            separator = '\n' if text_hankaku.startswith('【') else ''
+                            detail[last_head] += separator + text_hankaku
+                            continue
+                        ## 先頭の項目の見出しが空の場合、固定で「番組内容」としておく
+                        if head_hankaku == '':
+                            head_hankaku = '番組内容'
                         detail[head_hankaku] = text_hankaku
 
                         # 番組概要が空の場合、番組詳細の最初の本文を概要として使う
@@ -316,24 +331,21 @@ class Program(TortoiseModel):
 
                 # 重複する番組情報があり、かつタイトル・番組概要・番組詳細・番組開始時刻・番組終了時刻が全て同じ
                 if (duplicate_program is not None and
-                    duplicate_program.title == title and
-                    duplicate_program.description == description and
-                    len(duplicate_program.detail) == len(detail) and
-                    duplicate_program.start_time == start_time and
-                    duplicate_program.end_time == end_time):
+                    duplicate_program['title'] == title and
+                    duplicate_program['description'] == description and
+                    len(duplicate_program['detail']) == len(detail) and
+                    duplicate_program['start_time'] == start_time and
+                    duplicate_program['end_time'] == end_time):
 
                     # 更新不要なのでスキップ
                     del duplicate_programs[program_id]
                     continue
 
-                # 重複する番組情報が存在しない（追加）
-                if duplicate_program is None:
-                    program = Program()
-
-                # 重複する番組情報が存在する（更新）
-                else:
-                    del duplicate_programs[program_id]  # 参照を削除
-                    program = duplicate_program
+                # 重複する番組情報が存在する（更新）場合は、残った古い番組情報として削除されないよう参照を削除する
+                ## 追加・更新のどちらも、すべての列の値を新しく設定した番組情報を作って書き込む
+                if duplicate_program is not None:
+                    del duplicate_programs[program_id]
+                program = Program()
 
                 # 取得してきた値を設定
                 program.id = program_id
@@ -355,10 +367,10 @@ class Program(TortoiseModel):
                 ## 基本的には EIT[p/f] 由来の「終了時間未定」が降ってくる前に EIT[schedule] 由来の番組時間を取得しているはず
                 ## 「終了時間未定」だと番組表の整合性が壊れるので、実態と一致しないとしても EIT[schedule] 由来の番組時間を優先したい
                 if program_info['duration'] == 1:
-                    if program.duration is None:  # 番組情報をまだ取得していない
+                    if duplicate_program is None:  # 番組情報をまだ取得していない
                         program.end_time = start_time + timedelta(minutes=5)
                     else:  # すでに番組情報を取得しているので以前取得した値をそのまま使う
-                        pass
+                        program.end_time = duplicate_program['end_time']
                 else:
                     program.end_time = end_time
                 program.duration = (program.end_time - program.start_time).total_seconds()
@@ -398,9 +410,12 @@ class Program(TortoiseModel):
                 program.video_codec = None
                 program.video_resolution = None
                 if 'video' in program_info:
+                    # stream_content は Mirakurun が EIT の値をそのまま返すため、H.265 (0x09) や事業者定義の値など
+                    # ariblib の定義にない値も入りうる
+                    # 定義にない値で例外を送出すると全チャンネルの番組情報の更新が止まるため、'Unknown' として扱う
                     if program_info['video']['streamContent'] is not None:
-                        program.video_type = ariblib.constants.COMPONENT_TYPE \
-                            [program_info['video']['streamContent']].get(program_info['video']['componentType'], 'Unknown')
+                        component_types = ariblib.constants.COMPONENT_TYPE.get(program_info['video']['streamContent'], {})
+                        program.video_type = component_types.get(program_info['video']['componentType'], 'Unknown')
                     else:
                         program.video_type = 'Unknown'
                     program.video_codec = program_info['video']['type']
@@ -441,7 +456,8 @@ class Program(TortoiseModel):
                                 program.secondary_audio_language = program.secondary_audio_language + '+副音声'  # 副音声で固定
 
                 ## Mirakurun 3.8 以下向け（フォールバック）
-                else:
+                ## 音声コンポーネント記述子をまだ受信していない番組には audios も audio も存在しないため、その場合は空のままにする
+                elif 'audio' in program_info:
 
                     ## 主音声
                     ## 副音声の情報は常に存在しないため省略
@@ -456,18 +472,18 @@ class Program(TortoiseModel):
                 # 番組情報を、最後に一括で DB に書き込むリストに追加する
                 if duplicate_program is None:
                     logging.debug(f'Add Program: {program.id}')
+                    added_programs.append(program)
                 else:
                     logging.debug(f'Update Program: {program.id}')
-
-                updated_programs.append(program)
+                    updated_programs.append(program)
 
             # この時点で残存している番組情報は放送が終わって EPG から削除された番組なので、まとめて削除する
             # ここで削除しないと終了した番組の情報が幽霊のように残り続ける事になり、結果 DB が肥大化して遅くなってしまう
-            for duplicate_program in duplicate_programs.values():
-                logging.debug(f'Delete Program: {duplicate_program.id}')
+            for program_id in duplicate_programs.keys():
+                logging.debug(f'Delete Program: {program_id}')
 
             # 追加・更新する番組情報と、削除する番組情報を DB に書き込む
-            await cls.writePrograms(updated_programs, list(duplicate_programs.values()))
+            await cls.writePrograms(added_programs, updated_programs, list(duplicate_programs.keys()))
 
 
         # マルチプロセス実行時は、明示的に例外を拾わないとなぜかメインプロセスも含め全体がフリーズしてしまう
@@ -511,9 +527,13 @@ class Program(TortoiseModel):
                 raise Exception('Failed to get programs from EDCB.')
 
             # この変数から更新or更新不要な番組情報を削除していき、残った古い番組情報を最後にまとめて削除する
-            duplicate_programs = {temp.id:temp for temp in await Program.all()}
+            ## 変更の有無の判定に使う列だけを取得する (全列を ORM のオブジェクトにすると、2万件前後の番組で数十 MB を使うため)
+            duplicate_programs: dict[str, dict[str, Any]] = {}
+            for row in await Program.all().values('id', 'title', 'description', 'detail', 'start_time', 'end_time'):
+                duplicate_programs[row['id']] = row
 
-            # 追加・更新する番組情報 (最後に一括で DB に書き込む)
+            # 追加する番組情報と、更新する番組情報 (最後に一括で DB に書き込む)
+            added_programs: list[Program] = []
             updated_programs: list[Program] = []
 
             # チャンネルごとに
@@ -564,13 +584,23 @@ class Program(TortoiseModel):
                             ## 見出しのみ ariblib 側で意図的に重複防止のためのタブ文字付加が行われる場合があるため、
                             ## strip() では明示的に半角スペースと改行のみを指定している
                             head_hankaku = TSInformation.formatString(head).replace('◇', '').strip(' \r\n')  # ◇ を取り除く
+                            text_hankaku = TSInformation.formatString(text).strip()
+                            ## 2つ目以降の項目で見出しが空 (空白と重複防止のタブ文字だけ) の場合、直前の項目の本文の続きとしてつなげる
+                            ## WOWOW などは長い本文を、見出しが空白だけの別の項目に分けて送出するため、
+                            ## 「番組内容」として扱うと本来の番組内容を上書きしてしまう
+                            ## 分割位置には改行が含まれないため、続きの本文が「【」で始まる見出しのときだけ改行を挟んでつなげる
+                            ## (WOWOW では本文の中の「【」は常に行頭にあり、それ以外の分割位置は語や列挙の途中になっている)
+                            if head_hankaku.strip() == '' and len(detail) > 0:
+                                last_head = list(detail.keys())[-1]
+                                separator = '\n' if text_hankaku.startswith('【') else ''
+                                detail[last_head] += separator + text_hankaku
+                                continue
+                            ## 先頭の項目の見出しが空の場合、固定で「番組内容」としておく
+                            if head_hankaku.strip() == '':
+                                head_hankaku = '番組内容'
                             ## ないとは思うが、万が一この状態で見出しが衝突しうる場合は、見出しの後ろにタブ文字を付加する
                             while head_hankaku in detail.keys():
                                 head_hankaku += '\t'
-                            ## 見出しが空の場合、固定で「番組内容」としておく
-                            if head_hankaku == '':
-                                head_hankaku = '番組内容'
-                            text_hankaku = TSInformation.formatString(text).strip()
                             detail[head_hankaku] = text_hankaku
 
                             # 番組概要が空の場合、番組詳細の最初の本文を概要として使う
@@ -602,24 +632,21 @@ class Program(TortoiseModel):
 
                     # 重複する番組情報があり、かつタイトル・番組概要・番組詳細・番組開始時刻・番組終了時刻が全て同じ
                     if (duplicate_program is not None and
-                        duplicate_program.title == title and
-                        duplicate_program.description == description and
-                        len(duplicate_program.detail) == len(detail) and
-                        duplicate_program.start_time == start_time and
-                        duplicate_program.end_time == end_time):
+                        duplicate_program['title'] == title and
+                        duplicate_program['description'] == description and
+                        len(duplicate_program['detail']) == len(detail) and
+                        duplicate_program['start_time'] == start_time and
+                        duplicate_program['end_time'] == end_time):
 
                         # 更新不要なのでスキップ
                         del duplicate_programs[program_id]
                         continue
 
-                    # 重複する番組情報が存在しない（追加）
-                    if duplicate_program is None:
-                        program = Program()
-
-                    # 重複する番組情報が存在する（更新）
-                    else:
-                        del duplicate_programs[program_id]  # 参照を削除
-                        program = duplicate_program
+                    # 重複する番組情報が存在する（更新）場合は、残った古い番組情報として削除されないよう参照を削除する
+                    ## 追加・更新のどちらも、すべての列の値を新しく設定した番組情報を作って書き込む
+                    if duplicate_program is not None:
+                        del duplicate_programs[program_id]
+                    program = Program()
 
                     # 取得してきた値を設定
                     program.id = program_id
@@ -724,18 +751,18 @@ class Program(TortoiseModel):
                     # 番組情報を、最後に一括で DB に書き込むリストに追加する
                     if duplicate_program is None:
                         logging.debug(f'Add Program: {program.id}')
+                        added_programs.append(program)
                     else:
                         logging.debug(f'Update Program: {program.id}')
-
-                    updated_programs.append(program)
+                        updated_programs.append(program)
 
             # この時点で残存している番組情報は放送が終わって EPG から削除された番組なので、まとめて削除する
             # ここで削除しないと終了した番組の情報が幽霊のように残り続ける事になり、結果 DB が肥大化して遅くなってしまう
-            for duplicate_program in duplicate_programs.values():
-                logging.debug(f'Delete Program: {duplicate_program.id}')
+            for program_id in duplicate_programs.keys():
+                logging.debug(f'Delete Program: {program_id}')
 
             # 追加・更新する番組情報と、削除する番組情報を DB に書き込む
-            await cls.writePrograms(updated_programs, list(duplicate_programs.values()))
+            await cls.writePrograms(added_programs, updated_programs, list(duplicate_programs.keys()))
 
         # マルチプロセス実行時は、明示的に例外を拾わないとなぜかメインプロセスも含め全体がフリーズしてしまう
         except Exception as ex:
@@ -790,13 +817,14 @@ class Program(TortoiseModel):
 
 
     @classmethod
-    async def writePrograms(cls, updated_programs: list[Program], deleted_programs: list[Program]) -> None:
+    async def writePrograms(cls, added_programs: list[Program], updated_programs: list[Program], deleted_program_ids: list[str]) -> None:
         """
         番組情報の更新で追加・更新する番組情報と、削除する番組情報を DB に書き込む
 
         Args:
-            updated_programs (list[Program]): 追加・更新する番組情報
-            deleted_programs (list[Program]): 削除する番組情報
+            added_programs (list[Program]): 追加する番組情報
+            updated_programs (list[Program]): 更新する番組情報 (登録済みの番組の ID で、すべての列の値を設定したもの)
+            deleted_program_ids (list[str]): 削除する番組情報の ID
         """
 
         # 500件ごとに1つのトランザクションで書き込む
@@ -806,11 +834,16 @@ class Program(TortoiseModel):
         ## ロック待ちのタイムアウト (busy_timeout) を待たずに即座に SQLITE_BUSY エラーになる
         ## さらに、ほかの接続の書き込みが完了した後もトランザクションのスナップショットが古いままのため、何度再試行しても SQLITE_BUSY_SNAPSHOT エラーで失敗し続ける
         ## このため、トランザクション内では読み取りを行わずに最初の SQL 文から書き込み、ほかの接続の書き込みの完了を待ってから書き込むようにしている
+        for index in range(0, len(added_programs), 500):
+            async with transactions.in_transaction():
+                for program in added_programs[index:index + 500]:
+                    await program.save()
+
+        # 更新する番組情報は DB から読み込んだオブジェクトではないため、INSERT ではなく UPDATE で書き込むよう指定する
         for index in range(0, len(updated_programs), 500):
             async with transactions.in_transaction():
                 for program in updated_programs[index:index + 500]:
-                    await program.save()
-        for index in range(0, len(deleted_programs), 500):
+                    await program.save(force_update=True)
+        for index in range(0, len(deleted_program_ids), 500):
             async with transactions.in_transaction():
-                for program in deleted_programs[index:index + 500]:
-                    await program.delete()
+                await Program.filter(id__in=deleted_program_ids[index:index + 500]).delete()

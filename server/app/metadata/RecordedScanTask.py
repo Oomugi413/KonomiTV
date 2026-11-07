@@ -18,7 +18,7 @@ from watchfiles import Change, awatch
 
 from app import logging, schemas
 from app.config import Config
-from app.constants import JST, THUMBNAILS_DIR
+from app.constants import JST, PROCESS_POOL_CONTEXT, THUMBNAILS_DIR
 from app.metadata.CMSectionsDetector import CMSectionsDetector
 from app.metadata.MetadataAnalyzer import MetadataAnalyzer
 from app.metadata.ThumbnailGenerator import ThumbnailGenerator
@@ -39,11 +39,15 @@ class FileRecordingInfo:
     - last_checked: ファイルの最終チェック日時
     - file_size: ファイルのサイズ
     - mtime_continuous_start_at: ファイルの最終更新日時が継続的に更新されている場合の継続更新の開始日時
+    - retry_analysis_after_completion: 録画中の解析失敗後、録画完了時の一度だけの再解析を待っているか
     """
     last_modified: datetime
     last_checked: datetime
     file_size: int
     mtime_continuous_start_at: datetime | None
+    # 解析失敗後も完了確認に必要な状態を保持し、processRecordedFile() は録画中の再解析を抑止する。
+    # __checkRecordingCompletion() が追跡状態を削除してから解析することで、完了後の再試行は一度だけになる。
+    retry_analysis_after_completion: bool = False
 
 
 @dataclass(slots=True)
@@ -377,9 +381,12 @@ class RecordedScanTask:
 
             # 新しく見つからなくなったファイルの割合を録画フォルダごとに判定するため、Missing でないレコードの件数を録画フォルダごとに数える
             ## 録画フォルダ自体がシンボリックリンクの場合もあるので、実体のパスでも照合する
-            recorded_folder_pairs: list[tuple[anyio.Path, anyio.Path]] = []
+            ## 録画の件数 × 録画フォルダの数だけ判定するため、Path の比較ではなく、os.path.normcase() でそろえた文字列の前方一致で判定する
+            ## (Path の比較はパスの要素ごとに大文字と小文字をそろえ直すため、数万回の判定でイベントループを数秒占有する)
+            recorded_folder_keys: list[tuple[anyio.Path, list[str]]] = []
             for folder in self.recorded_folders:
-                recorded_folder_pairs.append((folder, await self.resolveRecordedPath(folder)))
+                canonical_folder = await self.resolveRecordedPath(folder)
+                recorded_folder_keys.append((folder, [os.path.normcase(str(canonical_folder)), os.path.normcase(str(folder))]))
 
             def FindRecordedFolder(file_path: anyio.Path) -> anyio.Path | None:
                 """
@@ -391,9 +398,13 @@ class RecordedScanTask:
                 Returns:
                     anyio.Path | None: 録画フォルダ (どの録画フォルダにも含まれない場合は None)
                 """
-                for folder, canonical_folder in recorded_folder_pairs:
-                    if file_path.is_relative_to(canonical_folder) or file_path.is_relative_to(folder):
-                        return folder
+                file_path_key = os.path.normcase(str(file_path))
+                for folder, folder_keys in recorded_folder_keys:
+                    for folder_key in folder_keys:
+                        # 録画フォルダそのものか、録画フォルダの区切りの後に続くパスなら、その録画フォルダに含まれる
+                        ## 区切りまで含めて比較し、E:\TV と E:\TV-Record のように名前の先頭だけが同じフォルダを区別する
+                        if file_path_key == folder_key or file_path_key.startswith(os.path.join(folder_key, '')):
+                            return folder
                 return None
 
             ## すでに Missing のレコードを除いて数えるので、利用者が自分で大量に消した場合も、次の走査からは割合が下がる
@@ -756,6 +767,10 @@ class RecordedScanTask:
                 # 現在録画中とマークされているファイルの処理
                 is_recording = file_path in self._recording_files
                 if is_recording:
+                    # 録画中に解析が失敗したファイルは、変更イベントや一括スキャンがあっても再解析しない。
+                    # 更新日時とサイズの監視は継続し、完了確認が追跡状態を外してから一度だけ再解析する。
+                    if self._recording_files[file_path].retry_analysis_after_completion:
+                        return
                     # 既に DB に登録済みで録画中の場合は再解析しない
                     if (existing_recorded_video_summary is not None and
                         existing_recorded_video_summary.status == 'Recording'):
@@ -951,7 +966,7 @@ class RecordedScanTask:
                 ## コンテキストマネージャーはキャンセル時にも子プロセス終了を同期的に待つため、イベントループ上では使わない
                 ## 正常完了時は明示的に待ってクリーンアップし、リクエスト切断時だけ待機なしで解放処理へ進める
                 loop = asyncio.get_running_loop()
-                executor = concurrent.futures.ProcessPoolExecutor(max_workers=1)
+                executor = concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=PROCESS_POOL_CONTEXT)
                 should_wait_executor = True
                 try:
                     recorded_program = await loop.run_in_executor(executor, analyzer.analyze)
@@ -965,7 +980,10 @@ class RecordedScanTask:
                     if existing_recorded_video_summary is not None:
                         await RecordedVideo.filter(id=existing_recorded_video_summary.id).update(status='AnalysisFailed')
                         existing_recorded_video_summary.status = 'AnalysisFailed'
-                    self._recording_files.pop(file_path, None)  # もし録画中扱いであればここで削除
+                    # 録画中の失敗は完了確認の対象に残す。録画済みの失敗は自動で再試行しない。
+                    recording_info_after_failure = self._recording_files.get(file_path)
+                    if recording_info_after_failure is not None:
+                        recording_info_after_failure.retry_analysis_after_completion = True
                     return
                 finally:
                     if should_wait_executor is True:
@@ -978,7 +996,10 @@ class RecordedScanTask:
                     if existing_recorded_video_summary is not None:
                         await RecordedVideo.filter(id=existing_recorded_video_summary.id).update(status='AnalysisFailed')
                         existing_recorded_video_summary.status = 'AnalysisFailed'
-                    self._recording_files.pop(file_path, None)  # もし録画中扱いであればここで削除
+                    # 例外を送出せず解析結果が得られなかった場合も、録画完了後の一度だけの再解析を待つ。
+                    recording_info_after_failure = self._recording_files.get(file_path)
+                    if recording_info_after_failure is not None:
+                        recording_info_after_failure.retry_analysis_after_completion = True
                     return
 
                 # 60秒未満のファイルは録画失敗または切り抜きとみなしてスキップ
@@ -2075,6 +2096,14 @@ class RecordedScanTask:
                         stat = await file_path.stat()
                         current_modified = datetime.fromtimestamp(stat.st_mtime, tz=JST)
                         current_size = stat.st_size
+
+                        # 監視イベントを取りこぼした場合も、完了確認で検出したサイズを次回の比較に使う。
+                        # 古いサイズのままでは一致条件を永久に満たせず、解析失敗後の再試行も止まるため。
+                        # 変化を検出した回は完了にせず、次回も同じサイズで更新が止まっていることを確認する。
+                        if current_size != recording_info.file_size:
+                            recording_info.file_size = current_size
+                            recording_info.last_modified = current_modified
+                            continue
 
                         # RECORDING_COMPLETE_SECONDS 秒以上更新がなく、かつファイルサイズが変化していない場合は録画完了と判断
                         if ((now - current_modified).total_seconds() >= self.RECORDING_COMPLETE_SECONDS and
