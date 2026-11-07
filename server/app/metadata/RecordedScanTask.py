@@ -39,11 +39,15 @@ class FileRecordingInfo:
     - last_checked: ファイルの最終チェック日時
     - file_size: ファイルのサイズ
     - mtime_continuous_start_at: ファイルの最終更新日時が継続的に更新されている場合の継続更新の開始日時
+    - retry_analysis_after_completion: 録画中の解析失敗後、録画完了時の一度だけの再解析を待っているか
     """
     last_modified: datetime
     last_checked: datetime
     file_size: int
     mtime_continuous_start_at: datetime | None
+    # 解析失敗後も完了確認に必要な状態を保持し、processRecordedFile() は録画中の再解析を抑止する。
+    # __checkRecordingCompletion() が追跡状態を削除してから解析することで、完了後の再試行は一度だけになる。
+    retry_analysis_after_completion: bool = False
 
 
 @dataclass(slots=True)
@@ -763,6 +767,10 @@ class RecordedScanTask:
                 # 現在録画中とマークされているファイルの処理
                 is_recording = file_path in self._recording_files
                 if is_recording:
+                    # 録画中に解析が失敗したファイルは、変更イベントや一括スキャンがあっても再解析しない。
+                    # 更新日時とサイズの監視は継続し、完了確認が追跡状態を外してから一度だけ再解析する。
+                    if self._recording_files[file_path].retry_analysis_after_completion:
+                        return
                     # 既に DB に登録済みで録画中の場合は再解析しない
                     if (existing_recorded_video_summary is not None and
                         existing_recorded_video_summary.status == 'Recording'):
@@ -972,7 +980,10 @@ class RecordedScanTask:
                     if existing_recorded_video_summary is not None:
                         await RecordedVideo.filter(id=existing_recorded_video_summary.id).update(status='AnalysisFailed')
                         existing_recorded_video_summary.status = 'AnalysisFailed'
-                    self._recording_files.pop(file_path, None)  # もし録画中扱いであればここで削除
+                    # 録画中の失敗は完了確認の対象に残す。録画済みの失敗は自動で再試行しない。
+                    recording_info_after_failure = self._recording_files.get(file_path)
+                    if recording_info_after_failure is not None:
+                        recording_info_after_failure.retry_analysis_after_completion = True
                     return
                 finally:
                     if should_wait_executor is True:
@@ -985,7 +996,10 @@ class RecordedScanTask:
                     if existing_recorded_video_summary is not None:
                         await RecordedVideo.filter(id=existing_recorded_video_summary.id).update(status='AnalysisFailed')
                         existing_recorded_video_summary.status = 'AnalysisFailed'
-                    self._recording_files.pop(file_path, None)  # もし録画中扱いであればここで削除
+                    # 例外を送出せず解析結果が得られなかった場合も、録画完了後の一度だけの再解析を待つ。
+                    recording_info_after_failure = self._recording_files.get(file_path)
+                    if recording_info_after_failure is not None:
+                        recording_info_after_failure.retry_analysis_after_completion = True
                     return
 
                 # 60秒未満のファイルは録画失敗または切り抜きとみなしてスキップ

@@ -669,7 +669,7 @@ def Installer(version: str) -> None:
 
         # GitHub からサードパーティーライブラリをダウンロード
         if version == 'latest':
-            thirdparty_base_url = 'https://nightly.link/Oomugi413/KonomiTV/workflows/build_thirdparty.yaml/'
+            thirdparty_base_url = 'https://nightly.link/Oomugi413/KonomiTV/workflows/build_thirdparty.yaml/master/'
         else:
             thirdparty_base_url = f'https://github.com/Oomugi413/KonomiTV/releases/download/v{version}/'
         thirdparty_compressed_file_name = 'thirdparty-windows.7z'
